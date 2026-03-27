@@ -7,6 +7,7 @@ from rich.console import Console
 from rich.table import Table
 
 from introspect.db import DEFAULT_DB_PATH, DEFAULT_JSONL_GLOB, get_connection
+from introspect.search import build_search_corpus, fts_search
 
 SID_TRUNCATE = 12
 
@@ -196,6 +197,65 @@ def stats():
         console.print(table)
 
     conn.close()
+
+
+@app.command()
+def search(
+    query_text: str = typer.Argument(help="Text to search for"),
+    limit: int = typer.Option(20, help="Number of results"),
+):
+    """Full-text search across conversation logs."""
+    conn = _db()
+    try:
+        # Ensure the search corpus exists; build if missing
+        tables = conn.execute("""
+            SELECT table_name FROM information_schema.tables
+            WHERE table_name = 'search_corpus' AND table_type = 'BASE TABLE'
+        """).fetchall()
+        if not tables:
+            console.print("[dim]Building search index...[/dim]")
+            build_search_corpus(conn)
+
+        results = fts_search(conn, query_text, limit)
+
+        if not results:
+            console.print("[yellow]No results found.[/yellow]")
+            raise typer.Exit()
+
+        table = Table(title=f"Search results for: {query_text}")
+        table.add_column("Session ID", style="cyan", max_width=12)
+        table.add_column("Timestamp", style="green")
+        table.add_column("Role")
+        table.add_column("Snippet", max_width=80)
+        table.add_column("Score", justify="right")
+
+        for row in results:
+            sid = _truncate_sid(row[0])
+            ts = str(row[1])[:19] if row[1] else ""
+            table.add_row(
+                sid,
+                ts,
+                row[2] or "",
+                row[3] or "",
+                f"{row[4]:.4f}" if row[4] is not None else "",
+            )
+
+        console.print(table)
+    finally:
+        conn.close()
+
+
+@app.command()
+def refresh():
+    """Rebuild the search corpus table and FTS index."""
+    conn = _db()
+    try:
+        console.print("[dim]Rebuilding search index...[/dim]")
+        build_search_corpus(conn)
+        count = conn.execute("SELECT COUNT(*) FROM search_corpus").fetchone()[0]
+        console.print(f"[green]Search index rebuilt with {count} entries.[/green]")
+    finally:
+        conn.close()
 
 
 if __name__ == "__main__":
