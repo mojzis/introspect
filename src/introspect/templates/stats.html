@@ -84,7 +84,7 @@
         <tbody>
             {% for s in longest_sessions %}
             <tr>
-                <td><a href="/sessions/{{ s[0] }}" hx-get="/sessions/{{ s[0] }}" hx-target="#content" hx-push-url="true"><span class="truncate">{{ s[0][:12] }}...</span></a></td>
+                <td><a href="/sessions/{{ s[0] }}" hx-get="/sessions/{{ s[0] }}" hx-target="#content" hx-push-url="true"><span class="truncate">{{ (s[0]|string)[:12] }}...</span></a></td>
                 <td>{{ (s[1]|string)[:19] }}</td>
                 <td>{{ s[2] }}</td>
                 <td>{{ s[3] or '' }}</td>
@@ -107,7 +107,7 @@
         <tbody>
             {% for s in most_tools_sessions %}
             <tr>
-                <td><a href="/sessions/{{ s[0] }}" hx-get="/sessions/{{ s[0] }}" hx-target="#content" hx-push-url="true"><span class="truncate">{{ s[0][:12] }}...</span></a></td>
+                <td><a href="/sessions/{{ s[0] }}" hx-get="/sessions/{{ s[0] }}" hx-target="#content" hx-push-url="true"><span class="truncate">{{ (s[0]|string)[:12] }}...</span></a></td>
                 <td>{{ s[1] }}</td>
                 <td>{{ s[2] }}</td>
             </tr>

@@ -47,7 +47,7 @@
         <tbody>
             {% for tc in tool_calls %}
             <tr>
-                <td><a href="/sessions/{{ tc[0] }}" hx-get="/sessions/{{ tc[0] }}" hx-target="#content" hx-push-url="true"><span class="truncate">{{ tc[0][:12] }}...</span></a></td>
+                <td><a href="/sessions/{{ tc[0] }}" hx-get="/sessions/{{ tc[0] }}" hx-target="#content" hx-push-url="true"><span class="truncate">{{ (tc[0]|string)[:12] }}...</span></a></td>
                 <td>{{ (tc[1]|string)[:19] }}</td>
                 <td>{{ tc[2] or '' }}</td>
                 <td>
