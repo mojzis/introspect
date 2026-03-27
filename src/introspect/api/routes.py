@@ -161,8 +161,16 @@ async def sessions(request: Request, page: int = Query(1, ge=1)):
     sessions = []
     for row in rows:
         (
-            session_id, started_at, ended_at, duration,
-            user_msgs, asst_msgs, model, cwd, git_branch, first_prompt,
+            session_id,
+            started_at,
+            ended_at,
+            duration,
+            user_msgs,
+            asst_msgs,
+            model,
+            cwd,
+            git_branch,
+            first_prompt,
         ) = row
         # Format duration as mm:ss
         dur_str = ""
@@ -173,19 +181,21 @@ async def sessions(request: Request, page: int = Query(1, ge=1)):
         project = ""
         if cwd:
             project = cwd.rstrip("/").rsplit("/", 1)[-1]
-        sessions.append({
-            "id": session_id,
-            "date": str(started_at)[5:10] if started_at else "",
-            "start_time": str(started_at)[11:16] if started_at else "",
-            "end_time": str(ended_at)[11:16] if ended_at else "",
-            "duration": dur_str,
-            "user_msgs": user_msgs or 0,
-            "asst_msgs": asst_msgs or 0,
-            "model": model or "",
-            "project": project,
-            "branch": git_branch or "",
-            "title": (first_prompt or "")[:120],
-        })
+        sessions.append(
+            {
+                "id": session_id,
+                "date": str(started_at)[5:10] if started_at else "",
+                "start_time": str(started_at)[11:16] if started_at else "",
+                "end_time": str(ended_at)[11:16] if ended_at else "",
+                "duration": dur_str,
+                "user_msgs": user_msgs or 0,
+                "asst_msgs": asst_msgs or 0,
+                "model": model or "",
+                "project": project,
+                "branch": git_branch or "",
+                "title": (first_prompt or "")[:120],
+            }
+        )
 
     return templates.TemplateResponse(
         request,
