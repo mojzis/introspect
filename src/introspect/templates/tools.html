@@ -4,19 +4,30 @@
 <h1>Tool Calls</h1>
 
 <div class="card">
-    <form action="/tools" method="get" class="filter-bar">
-        <label>
-            <input type="checkbox" name="failed" value="true" {% if filter_failed %}checked{% endif %} />
-            Failed only
-        </label>
-        <select name="name" style="padding:0.4rem;border:1px solid #ccc;border-radius:4px;">
-            <option value="">All tools</option>
-            {% for tn in tool_names %}
-            <option value="{{ tn }}" {% if filter_name == tn %}selected{% endif %}>{{ tn }}</option>
-            {% endfor %}
-        </select>
-        <button type="submit">Filter</button>
-    </form>
+    <div class="filter-bar" style="flex-wrap:wrap;">
+        <a href="/tools{% if filter_failed %}?failed=true{% endif %}"
+           hx-get="/tools{% if filter_failed %}?failed=true{% endif %}"
+           hx-target="#content" hx-push-url="true"
+           class="tool-btn{% if not filter_name %} tool-btn-active{% endif %}">
+            All
+        </a>
+        {% for tn, cnt in tool_names %}
+        <a href="/tools?name={{ tn }}{% if filter_failed %}&failed=true{% endif %}"
+           hx-get="/tools?name={{ tn }}{% if filter_failed %}&failed=true{% endif %}"
+           hx-target="#content" hx-push-url="true"
+           class="tool-btn{% if filter_name == tn %} tool-btn-active{% endif %}">
+            {{ tn }} <span class="tool-btn-count">{{ cnt }}</span>
+        </a>
+        {% endfor %}
+    </div>
+    <div class="filter-bar" style="margin-top:0.5rem;">
+        <a href="/tools{% if filter_name %}?name={{ filter_name }}{% endif %}{% if not filter_failed %}{{ '&' if filter_name else '?' }}failed=true{% endif %}"
+           hx-get="/tools{% if filter_name %}?name={{ filter_name }}{% endif %}{% if not filter_failed %}{{ '&' if filter_name else '?' }}failed=true{% endif %}"
+           hx-target="#content" hx-push-url="true"
+           class="tool-btn tool-btn-sm{% if filter_failed %} tool-btn-active{% endif %}">
+            {% if filter_failed %}Show all{% else %}Failed only{% endif %}
+        </a>
+    </div>
 </div>
 
 {% if stats %}
@@ -36,7 +47,7 @@
     <table>
         <thead>
             <tr>
-                <th>Session ID</th>
+                <th>Session</th>
                 <th>Called At</th>
                 <th>Tool</th>
                 <th>Status</th>
@@ -47,8 +58,8 @@
         <tbody>
             {% for tc in tool_calls %}
             <tr>
-                <td><a href="/sessions/{{ tc[0] }}" hx-get="/sessions/{{ tc[0] }}" hx-target="#content" hx-push-url="true"><span class="truncate">{{ (tc[0]|string)[:12] }}...</span></a></td>
-                <td>{{ (tc[1]|string)[:19] }}</td>
+                <td><a href="/sessions/{{ tc[0] }}" hx-get="/sessions/{{ tc[0] }}" hx-target="#content" hx-push-url="true"><span class="truncate" style="max-width:250px;" title="{{ (tc[6] or '')|e }}">{{ (tc[6] or (tc[0]|string)[:12] + '...')|truncate(50) }}</span></a></td>
+                <td style="white-space:nowrap;">{{ (tc[1]|string)[:19] }}</td>
                 <td>{{ tc[2] or '' }}</td>
                 <td>
                     {% if tc[3] == 'true' %}
