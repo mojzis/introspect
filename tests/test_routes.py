@@ -109,6 +109,57 @@ def _write_sample_jsonl(tmp_dir: Path) -> Path:
                 ],
             },
         },
+        {
+            "type": "assistant",
+            "timestamp": "2026-03-27T10:00:04.000Z",
+            "sessionId": session_id,
+            "uuid": "a3",
+            "parentUuid": "u2",
+            "isSidechain": False,
+            "cwd": "/tmp/test",
+            "version": "2.1.0",
+            "entrypoint": "cli",
+            "gitBranch": "main",
+            "requestId": "req3",
+            "message": {
+                "role": "assistant",
+                "model": "claude-opus-4-6",
+                "id": "msg3",
+                "content": [
+                    {
+                        "type": "tool_use",
+                        "id": "toolu_mcp1",
+                        "name": "mcp__github__get_me",
+                        "input": {},
+                    }
+                ],
+            },
+        },
+        {
+            "type": "user",
+            "timestamp": "2026-03-27T10:00:05.000Z",
+            "sessionId": session_id,
+            "uuid": "u3",
+            "parentUuid": "a3",
+            "isSidechain": False,
+            "cwd": "/tmp/test",
+            "version": "2.1.0",
+            "entrypoint": "cli",
+            "gitBranch": "main",
+            "sourceToolAssistantUUID": "a3",
+            "toolUseResult": {},
+            "message": {
+                "role": "user",
+                "content": [
+                    {
+                        "type": "tool_result",
+                        "tool_use_id": "toolu_mcp1",
+                        "content": '{"login": "test"}',
+                        "is_error": False,
+                    }
+                ],
+            },
+        },
     ]
 
     with jsonl_path.open("w") as f:
@@ -166,6 +217,22 @@ def test_tools_returns_200():
     with tempfile.TemporaryDirectory() as tmp, _patched_client(Path(tmp)) as client:
         response = client.get("/tools")
         assert response.status_code == 200
+
+
+def test_mcps_returns_200():
+    """MCPs page loads without error."""
+    with tempfile.TemporaryDirectory() as tmp, _patched_client(Path(tmp)) as client:
+        response = client.get("/mcps")
+        assert response.status_code == 200
+        assert "MCP Servers" in response.text
+
+
+def test_mcps_filter_by_server():
+    """MCPs page filters by server name."""
+    with tempfile.TemporaryDirectory() as tmp, _patched_client(Path(tmp)) as client:
+        response = client.get("/mcps?server=github")
+        assert response.status_code == 200
+        assert "github" in response.text
 
 
 def test_stats_returns_200():

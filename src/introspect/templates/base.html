@@ -49,6 +49,13 @@
         pre { white-space: pre-wrap; word-break: break-word; margin: 0; font-size: 0.85rem; }
         .filter-bar { display: flex; gap: 0.75rem; align-items: center; flex-wrap: wrap; margin-bottom: 1rem; }
         label { font-size: 0.9rem; display: flex; align-items: center; gap: 0.3rem; }
+        .tool-btn { display: inline-flex; align-items: center; gap: 0.35rem; padding: 0.3rem 0.7rem; border-radius: 6px; border: 1px solid #ddd; background: #fff; color: #333; font-size: 0.85rem; text-decoration: none; cursor: pointer; white-space: nowrap; }
+        .tool-btn:hover { background: #e8e8ff; border-color: #b0b0d0; color: #333; }
+        .tool-btn-active { background: #1a1a2e; color: #fff; border-color: #1a1a2e; }
+        .tool-btn-active:hover { background: #2a2a4e; border-color: #2a2a4e; }
+        .tool-btn-count { background: #e8e8f0; color: #555; font-size: 0.75rem; padding: 0.1rem 0.4rem; border-radius: 10px; font-weight: 600; }
+        .tool-btn-active .tool-btn-count { background: rgba(255,255,255,0.2); color: #fff; }
+        .tool-btn-sm { font-size: 0.8rem; padding: 0.2rem 0.6rem; }
     </style>
 </head>
 <body>
@@ -58,6 +65,7 @@
         <a href="/sessions" hx-get="/sessions" hx-target="#content" hx-push-url="true">Sessions</a>
         <a href="/search" hx-get="/search" hx-target="#content" hx-push-url="true">Search</a>
         <a href="/tools" hx-get="/tools" hx-target="#content" hx-push-url="true">Tools</a>
+        <a href="/mcps" hx-get="/mcps" hx-target="#content" hx-push-url="true">MCPs</a>
         <a href="/stats" hx-get="/stats" hx-target="#content" hx-push-url="true">Stats</a>
     </nav>
     <div class="container" id="content">
