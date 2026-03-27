@@ -149,3 +149,9 @@ def _create_views(conn: duckdb.DuckDBPyConnection, jsonl_glob: str) -> None:
             END AS content_text,
         FROM ordered
     """)
+
+    # Convenience alias: "sessions" → logical_sessions
+    conn.execute("""
+        CREATE OR REPLACE VIEW sessions AS
+        SELECT * FROM logical_sessions
+    """)

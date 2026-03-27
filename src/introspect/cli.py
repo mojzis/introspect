@@ -140,6 +140,41 @@ def tools(
 
 
 @app.command()
+def tables():
+    """List available SQL views and tables for use with the query command."""
+    conn = _db()
+    try:
+        rows = conn.execute("""
+            SELECT table_name, table_type
+            FROM information_schema.tables
+            WHERE table_schema = 'main'
+            ORDER BY table_type, table_name
+        """).fetchall()
+
+        table = Table(title="Available Tables & Views")
+        table.add_column("Name", style="cyan")
+        table.add_column("Type", style="green")
+        table.add_column("Columns")
+
+        for name, ttype in rows:
+            cols = conn.execute(
+                """
+                SELECT column_name
+                FROM information_schema.columns
+                WHERE table_name = ? AND table_schema = 'main'
+                ORDER BY ordinal_position
+                """,
+                [name],
+            ).fetchall()
+            col_names = ", ".join(c[0] for c in cols)
+            table.add_row(name, ttype.lower(), col_names)
+
+        console.print(table)
+    finally:
+        conn.close()
+
+
+@app.command()
 def query(
     sql: str = typer.Argument(help="SQL query to execute"),
 ):

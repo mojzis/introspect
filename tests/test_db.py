@@ -136,6 +136,7 @@ def test_views_created():
         assert "logical_sessions" in view_names
         assert "tool_calls" in view_names
         assert "conversation_turns" in view_names
+        assert "sessions" in view_names
         conn.close()
 
 
