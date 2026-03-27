@@ -1,0 +1,130 @@
+[project]
+name = "python-template"
+version = "0.1.0"
+description = "A Python project template"
+requires-python = ">=3.11"
+
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[dependency-groups]
+dev = [
+    "ruff",
+    "ty",
+    "pytest",
+    "pytest-cov",
+    "bandit",
+    "vulture",
+    "deptry",
+    "interrogate",
+    "poethepoet",
+]
+
+[tool.uv]
+exclude-newer = "2026-03-25T00:00:00Z"
+
+[tool.ruff]
+line-length = 88
+target-version = "py311"
+
+[tool.ruff.lint]
+select = ["E", "F", "W", "I", "UP", "B", "SIM", "C4", "DTZ", "T20", "PTH", "ERA", "PL", "TRY", "RUF"]
+
+[tool.ruff.format]
+
+[tool.ty]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+addopts = "--cov=src --cov-report=term-missing"
+
+[tool.coverage.run]
+source = ["src"]
+
+[tool.coverage.report]
+show_missing = true
+
+[tool.bandit]
+exclude_dirs = ["tests"]
+
+[tool.vulture]
+paths = ["src"]
+
+[tool.deptry]
+
+[tool.interrogate]
+fail_under = 0
+
+[tool.poe]
+verbosity = -1
+
+[tool.poe.tasks.fix]
+sequence = [
+    { cmd = "ruff format --quiet ." },
+    { cmd = "ruff check --fix --quiet ." },
+]
+help = "Auto-fix: format and lint"
+
+[tool.poe.tasks.lint]
+cmd = "ruff check ."
+help = "Run linter (no fix)"
+
+[tool.poe.tasks.typecheck]
+cmd = "ty check"
+help = "Run type checker"
+
+[tool.poe.tasks.test]
+cmd = "pytest -q --tb=short"
+help = "Run tests"
+
+[tool.poe.tasks.security]
+cmd = "bandit -r src -q"
+help = "Security scan (bandit)"
+
+[tool.poe.tasks.vulns]
+shell = "uvx pysentry-rs . || true"
+interpreter = "bash"
+help = "Dependency vulnerability scan"
+
+[tool.poe.tasks.dead-code]
+cmd = "vulture src"
+help = "Dead code detection"
+
+[tool.poe.tasks.unused-deps]
+cmd = "deptry ."
+help = "Unused dependency check"
+
+[tool.poe.tasks._check-parallel]
+shell = """
+  ruff check . &
+  ty check &
+  bandit -r src -q &
+  (uvx pysentry-rs . || true) &
+  wait
+"""
+interpreter = "bash"
+
+[tool.poe.tasks.check]
+sequence = [
+    { ref = "_check-parallel" },
+    { ref = "test" },
+]
+help = "Run all checks (parallel where possible)"
+
+[tool.poe.tasks.check-all]
+sequence = [
+    { ref = "lint" },
+    { ref = "typecheck" },
+    { ref = "security" },
+    { ref = "vulns" },
+    { ref = "dead-code" },
+    { ref = "unused-deps" },
+    { ref = "test" },
+]
+ignore_fail = true
+help = "Run all checks (report all failures)"
+
+[tool.poe.tasks.setup]
+cmd = "bash scripts/install-hooks.sh"
+help = "Install git hooks"
