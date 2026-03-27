@@ -1,0 +1,138 @@
+{% extends "base.html" %}
+{% block title %}Stats - Introspect{% endblock %}
+{% block content %}
+<h1>Stats &amp; Insights</h1>
+
+<div class="stat-grid">
+    <div class="stat-card">
+        <div class="value">{{ total_sessions }}</div>
+        <div class="label">Total Sessions</div>
+    </div>
+    <div class="stat-card">
+        <div class="value">{{ total_tool_calls }}</div>
+        <div class="label">Total Tool Calls</div>
+    </div>
+    <div class="stat-card">
+        <div class="value">{{ total_failed }}</div>
+        <div class="label">Failed Tool Calls</div>
+    </div>
+    {% if token_usage %}
+    <div class="stat-card">
+        <div class="value">{{ token_usage[0] or 0 }}</div>
+        <div class="label">Total Input Tokens</div>
+    </div>
+    <div class="stat-card">
+        <div class="value">{{ token_usage[1] or 0 }}</div>
+        <div class="label">Total Output Tokens</div>
+    </div>
+    {% endif %}
+</div>
+
+<h2>Session Duration Distribution</h2>
+<div class="card">
+    <table>
+        <thead>
+            <tr>
+                <th>Duration Bucket</th>
+                <th>Count</th>
+            </tr>
+        </thead>
+        <tbody>
+            {% for bucket in duration_buckets %}
+            <tr>
+                <td>{{ bucket[0] }}</td>
+                <td>{{ bucket[1] }}</td>
+            </tr>
+            {% endfor %}
+        </tbody>
+    </table>
+</div>
+
+<h2>Tool Usage Breakdown</h2>
+<div class="card">
+    <table>
+        <thead>
+            <tr>
+                <th>Tool Name</th>
+                <th>Count</th>
+                <th>Success Rate</th>
+            </tr>
+        </thead>
+        <tbody>
+            {% for tool in tool_breakdown %}
+            <tr>
+                <td>{{ tool[0] }}</td>
+                <td>{{ tool[1] }}</td>
+                <td>{{ "%.1f"|format(tool[2]) }}%</td>
+            </tr>
+            {% endfor %}
+        </tbody>
+    </table>
+</div>
+
+<h2>Longest Sessions (Top 5)</h2>
+<div class="card">
+    <table>
+        <thead>
+            <tr>
+                <th>Session ID</th>
+                <th>Started At</th>
+                <th>Duration</th>
+                <th>Model</th>
+            </tr>
+        </thead>
+        <tbody>
+            {% for s in longest_sessions %}
+            <tr>
+                <td><a href="/sessions/{{ s[0] }}" hx-get="/sessions/{{ s[0] }}" hx-target="#content" hx-push-url="true"><span class="truncate">{{ s[0][:12] }}...</span></a></td>
+                <td>{{ (s[1]|string)[:19] }}</td>
+                <td>{{ s[2] }}</td>
+                <td>{{ s[3] or '' }}</td>
+            </tr>
+            {% endfor %}
+        </tbody>
+    </table>
+</div>
+
+<h2>Most Tool Calls (Top 5 Sessions)</h2>
+<div class="card">
+    <table>
+        <thead>
+            <tr>
+                <th>Session ID</th>
+                <th>Tool Calls</th>
+                <th>Failed</th>
+            </tr>
+        </thead>
+        <tbody>
+            {% for s in most_tools_sessions %}
+            <tr>
+                <td><a href="/sessions/{{ s[0] }}" hx-get="/sessions/{{ s[0] }}" hx-target="#content" hx-push-url="true"><span class="truncate">{{ s[0][:12] }}...</span></a></td>
+                <td>{{ s[1] }}</td>
+                <td>{{ s[2] }}</td>
+            </tr>
+            {% endfor %}
+        </tbody>
+    </table>
+</div>
+
+<h2>Sessions Per Day</h2>
+<div class="card">
+    <table>
+        <thead>
+            <tr>
+                <th>Date</th>
+                <th>Sessions</th>
+            </tr>
+        </thead>
+        <tbody>
+            {% for day in sessions_per_day %}
+            <tr>
+                <td>{{ day[0] }}</td>
+                <td>{{ day[1] }}</td>
+            </tr>
+            {% endfor %}
+        </tbody>
+    </table>
+</div>
+{% endblock %}

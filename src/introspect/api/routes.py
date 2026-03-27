@@ -291,3 +291,115 @@ async def tools(
             "stats": stats,
         },
     )
+
+
+@router.get("/stats", response_class=HTMLResponse)
+async def stats(request: Request):
+    """Stats and insights page."""
+    conn = _conn(request)
+
+    total_sessions = conn.execute("SELECT COUNT(*) FROM logical_sessions").fetchone()[0]
+    total_tool_calls = conn.execute("SELECT COUNT(*) FROM tool_calls").fetchone()[0]
+    total_failed = conn.execute(
+        "SELECT COUNT(*) FROM tool_calls WHERE is_error = 'true'"
+    ).fetchone()[0]
+
+    # Session duration distribution
+    duration_buckets = conn.execute("""
+        SELECT
+            bucket,
+            COUNT(*) AS cnt
+        FROM (
+            SELECT
+                CASE
+                    WHEN duration < INTERVAL '1 minute' THEN '< 1 min'
+                    WHEN duration < INTERVAL '5 minutes' THEN '1-5 min'
+                    WHEN duration < INTERVAL '15 minutes' THEN '5-15 min'
+                    WHEN duration < INTERVAL '30 minutes' THEN '15-30 min'
+                    ELSE '30+ min'
+                END AS bucket,
+                CASE
+                    WHEN duration < INTERVAL '1 minute' THEN 1
+                    WHEN duration < INTERVAL '5 minutes' THEN 2
+                    WHEN duration < INTERVAL '15 minutes' THEN 3
+                    WHEN duration < INTERVAL '30 minutes' THEN 4
+                    ELSE 5
+                END AS sort_order
+            FROM logical_sessions
+        ) sub
+        GROUP BY bucket, sort_order
+        ORDER BY sort_order
+    """).fetchall()
+
+    # Tool usage breakdown
+    tool_breakdown = conn.execute("""
+        SELECT
+            tool_name,
+            COUNT(*) AS cnt,
+            100.0 * COUNT(*) FILTER (WHERE is_error IS DISTINCT FROM 'true')
+                / COUNT(*) AS success_rate
+        FROM tool_calls
+        WHERE tool_name IS NOT NULL
+        GROUP BY tool_name
+        ORDER BY cnt DESC
+    """).fetchall()
+
+    # Longest sessions top 5
+    longest_sessions = conn.execute("""
+        SELECT session_id, started_at, duration, model
+        FROM logical_sessions
+        ORDER BY duration DESC
+        LIMIT 5
+    """).fetchall()
+
+    # Most tool calls sessions top 5
+    most_tools_sessions = conn.execute("""
+        SELECT
+            session_id,
+            COUNT(*) AS tool_count,
+            COUNT(*) FILTER (WHERE is_error = 'true') AS failed_count
+        FROM tool_calls
+        GROUP BY session_id
+        ORDER BY tool_count DESC
+        LIMIT 5
+    """).fetchall()
+
+    # Sessions per day
+    sessions_per_day = conn.execute("""
+        SELECT
+            CAST(started_at AS DATE) AS day,
+            COUNT(*) AS cnt
+        FROM logical_sessions
+        GROUP BY day
+        ORDER BY day DESC
+        LIMIT 30
+    """).fetchall()
+
+    # Token usage summary (best effort)
+    try:
+        token_usage = conn.execute("""
+            SELECT
+                SUM(CAST(json_extract(message, '$.usage.input_tokens') AS BIGINT)),
+                SUM(CAST(json_extract(message, '$.usage.output_tokens') AS BIGINT))
+            FROM raw_messages
+            WHERE type = 'assistant'
+              AND json_extract(message, '$.usage.input_tokens') IS NOT NULL
+        """).fetchone()
+    except Exception:
+        token_usage = None
+
+    return templates.TemplateResponse(
+        "stats.html",
+        {
+            "request": request,
+            "total_sessions": total_sessions,
+            "total_tool_calls": total_tool_calls,
+            "total_failed": total_failed,
+            "duration_buckets": duration_buckets,
+            "tool_breakdown": tool_breakdown,
+            "longest_sessions": longest_sessions,
+            "most_tools_sessions": most_tools_sessions,
+            "sessions_per_day": sessions_per_day,
+            "token_usage": token_usage,
+        },
+    )

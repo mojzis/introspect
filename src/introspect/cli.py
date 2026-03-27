@@ -258,6 +258,14 @@ def serve(
 
 
 @app.command()
+def mcp():
+    """Run the MCP server (stdio transport) for Claude Code integration."""
+    from introspect.mcp.server import mcp as mcp_server  # noqa: PLC0415
+
+    mcp_server.run(transport="stdio")
+
+
+@app.command()
 def refresh():
     """Rebuild the search corpus table and FTS index."""
     conn = _db()
