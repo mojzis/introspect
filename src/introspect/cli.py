@@ -200,6 +200,50 @@ def query(
 
 
 @app.command()
+def raw(
+    limit: int = typer.Option(5, help="Number of records to show"),
+    session: str | None = typer.Option(
+        None, "--session", "-s", help="Filter by session ID"
+    ),
+):
+    """Show raw unfiltered JSONL records — all fields, no transformation."""
+    conn = _db()
+    try:
+        where = ""
+        params: list[str | int] = []
+        if session:
+            where = "WHERE sessionId LIKE ?"
+            params.append(f"{session}%")
+        params.append(limit)
+        result = conn.execute(
+            f"SELECT * FROM raw_data {where} LIMIT ?",  # nosec B608
+            params,
+        )
+        columns = [desc[0] for desc in result.description]
+        rows = result.fetchall()
+
+        if not rows:
+            console.print("[yellow]No records found.[/yellow]")
+            raise typer.Exit()
+
+        console.print(f"[dim]{len(columns)} columns: {', '.join(columns)}[/dim]\n")
+
+        for i, row in enumerate(rows):
+            console.print(f"[bold cyan]--- Record {i + 1} ---[/bold cyan]")
+            for col, val in zip(columns, row, strict=True):
+                if val is None:
+                    continue
+                val_str = str(val)
+                max_display = 200
+                if len(val_str) > max_display:
+                    val_str = val_str[:max_display] + "..."
+                console.print(f"  [yellow]{col}:[/yellow] {val_str}")
+            console.print()
+    finally:
+        conn.close()
+
+
+@app.command()
 def stats():
     """Show summary statistics."""
     conn = _db()

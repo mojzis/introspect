@@ -21,6 +21,19 @@ def get_connection(
 
 def _create_views(conn: duckdb.DuckDBPyConnection, jsonl_glob: str) -> None:
     """Create lazy views over JSONL files."""
+    # Raw data: completely unfiltered JSONL — every field, every row
+    conn.execute(f"""
+        CREATE OR REPLACE VIEW raw_data AS
+        SELECT *
+        FROM read_json_auto(
+            '{jsonl_glob}',
+            filename=true,
+            format='newline_delimited',
+            union_by_name=true,
+            ignore_errors=true
+        )
+    """)  # nosec B608
+
     # Raw messages: all JSONL lines with parsed fields
     raw_messages_sql = f"""
         CREATE OR REPLACE VIEW raw_messages AS
