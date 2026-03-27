@@ -29,6 +29,7 @@ dev = [
     "ty",
     "pytest",
     "pytest-cov",
+    "httpx",
     "bandit",
     "vulture",
     "deptry",

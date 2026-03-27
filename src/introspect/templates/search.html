@@ -29,7 +29,7 @@
         <tbody>
             {% for r in results %}
             <tr>
-                <td><a href="/sessions/{{ r[0] }}" hx-get="/sessions/{{ r[0] }}" hx-target="#content" hx-push-url="true"><span class="truncate">{{ r[0][:12] }}...</span></a></td>
+                <td><a href="/sessions/{{ r[0] }}" hx-get="/sessions/{{ r[0] }}" hx-target="#content" hx-push-url="true"><span class="truncate">{{ (r[0]|string)[:12] }}...</span></a></td>
                 <td>{{ (r[1]|string)[:19] }}</td>
                 <td>{{ r[2] or '' }}</td>
                 <td style="max-width:400px;overflow:hidden;text-overflow:ellipsis;">{{ r[3][:200] if r[3] else '' }}</td>
