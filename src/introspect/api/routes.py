@@ -18,6 +18,13 @@ templates = Jinja2Templates(directory=str(TEMPLATE_DIR))
 SESSIONS_PER_PAGE = 20
 
 
+def _parent(request: Request) -> str:
+    """Return the base template: full page for normal requests, partial for HTMX."""
+    if request.headers.get("HX-Request"):
+        return "partial.html"
+    return "base.html"
+
+
 def _parse_content_block(block) -> dict:  # noqa: PLR0911
     """Parse a single content block from a message."""
     if isinstance(block, str):
@@ -89,6 +96,7 @@ async def dashboard(request: Request):
         request,
         "dashboard.html",
         {
+            "parent": _parent(request),
             "session_count": session_count,
             "tool_count": tool_count,
             "failed_count": failed_count,
@@ -109,20 +117,92 @@ async def sessions(request: Request, page: int = Query(1, ge=1)):
 
     rows = conn.execute(
         """
-        SELECT session_id, started_at, ended_at, duration,
-               user_messages, assistant_messages, model, cwd
-        FROM logical_sessions
-        ORDER BY started_at DESC
+        SELECT
+            ls.session_id,
+            ls.started_at,
+            ls.ended_at,
+            ls.duration,
+            ls.user_messages,
+            ls.assistant_messages,
+            ls.model,
+            ls.cwd,
+            ls.git_branch,
+            fp.first_prompt
+        FROM logical_sessions ls
+        LEFT JOIN (
+            SELECT session_id, first_prompt FROM (
+                SELECT
+                    session_id,
+                    COALESCE(
+                        json_extract_string(message, '$.content[0].text'),
+                        json_extract_string(message, '$.content')
+                    ) AS first_prompt,
+                    ROW_NUMBER() OVER (
+                        PARTITION BY session_id ORDER BY timestamp
+                    ) AS rn
+                FROM raw_messages
+                WHERE type = 'user' AND role = 'user'
+                  AND json_extract_string(
+                      message, '$.content[0].type'
+                  ) IS DISTINCT FROM 'tool_result'
+                  AND COALESCE(
+                      json_extract_string(message, '$.content[0].text'),
+                      json_extract_string(message, '$.content'),
+                      ''
+                  ) NOT LIKE '/clear%'
+            ) sub WHERE rn = 1
+        ) fp ON ls.session_id = fp.session_id
+        ORDER BY ls.started_at DESC
         LIMIT ? OFFSET ?
-    """,
+    """,  # nosec B608
         [SESSIONS_PER_PAGE, offset],
     ).fetchall()
+
+    sessions = []
+    for row in rows:
+        (
+            session_id,
+            started_at,
+            ended_at,
+            duration,
+            user_msgs,
+            asst_msgs,
+            model,
+            cwd,
+            git_branch,
+            first_prompt,
+        ) = row
+        # Format duration as mm:ss
+        dur_str = ""
+        if duration:
+            total_secs = int(duration.total_seconds())
+            dur_str = f"{total_secs // 60}:{total_secs % 60:02d}"
+        # Extract project name (last path component)
+        project = ""
+        if cwd:
+            project = cwd.rstrip("/").rsplit("/", 1)[-1]
+        sessions.append(
+            {
+                "id": session_id,
+                "date": str(started_at)[5:10] if started_at else "",
+                "start_time": str(started_at)[11:16] if started_at else "",
+                "end_time": str(ended_at)[11:16] if ended_at else "",
+                "duration": dur_str,
+                "user_msgs": user_msgs or 0,
+                "asst_msgs": asst_msgs or 0,
+                "model": model or "",
+                "project": project,
+                "branch": git_branch or "",
+                "title": (first_prompt or "")[:120],
+            }
+        )
 
     return templates.TemplateResponse(
         request,
         "sessions.html",
         {
-            "sessions": rows,
+            "parent": _parent(request),
+            "sessions": sessions,
             "page": page,
             "total_pages": total_pages,
             "total": total,
@@ -190,6 +270,7 @@ async def session_detail(request: Request, session_id: str):
         request,
         "session_detail.html",
         {
+            "parent": _parent(request),
             "session": session_info,
             "session_id": session_id,
             "messages": parsed_messages,
@@ -218,6 +299,7 @@ async def search(request: Request, q: str = Query("", alias="q")):
         request,
         "search.html",
         {
+            "parent": _parent(request),
             "query": q,
             "results": results,
         },
@@ -284,6 +366,7 @@ async def tools(
         request,
         "tools.html",
         {
+            "parent": _parent(request),
             "tool_calls": rows,
             "tool_names": [t[0] for t in tool_names],
             "filter_failed": failed,
@@ -392,6 +475,7 @@ async def stats(request: Request):
         request,
         "stats.html",
         {
+            "parent": _parent(request),
             "total_sessions": total_sessions,
             "total_tool_calls": total_tool_calls,
             "total_failed": total_failed,
