@@ -3,10 +3,22 @@
 {% block content %}
 <h1>Stats &amp; Insights</h1>
 
+{% if earliest_session %}
+<p style="color: var(--text-muted, #888); margin-bottom: 1rem;">Data since {{ (earliest_session|string)[:10] }}</p>
+{% endif %}
+
 <div class="stat-grid">
     <div class="stat-card">
         <div class="value">{{ total_sessions }}</div>
         <div class="label">Total Sessions</div>
+    </div>
+    <div class="stat-card">
+        <div class="value">{{ total_turns }}</div>
+        <div class="label">Total Turns</div>
+    </div>
+    <div class="stat-card">
+        <div class="value">{{ total_user_messages }}</div>
+        <div class="label">User Messages</div>
     </div>
     <div class="stat-card">
         <div class="value">{{ total_tool_calls }}</div>
@@ -18,11 +30,11 @@
     </div>
     {% if token_usage %}
     <div class="stat-card">
-        <div class="value">{{ token_usage[0] or 0 }}</div>
+        <div class="value">{{ "{:,}".format(token_usage[0] or 0) }}</div>
         <div class="label">Total Input Tokens</div>
     </div>
     <div class="stat-card">
-        <div class="value">{{ token_usage[1] or 0 }}</div>
+        <div class="value">{{ "{:,}".format(token_usage[1] or 0) }}</div>
         <div class="label">Total Output Tokens</div>
     </div>
     {% endif %}
@@ -48,6 +60,26 @@
     </table>
 </div>
 
+<h2>Turns Per Session Distribution</h2>
+<div class="card">
+    <table>
+        <thead>
+            <tr>
+                <th>Turns Bucket</th>
+                <th>Count</th>
+            </tr>
+        </thead>
+        <tbody>
+            {% for bucket in turns_buckets %}
+            <tr>
+                <td>{{ bucket[0] }}</td>
+                <td>{{ bucket[1] }}</td>
+            </tr>
+            {% endfor %}
+        </tbody>
+    </table>
+</div>
+
 <h2>Tool Usage Breakdown</h2>
 <div class="card">
     <table>
@@ -55,6 +87,7 @@
             <tr>
                 <th>Tool Name</th>
                 <th>Count</th>
+                <th>% of Total</th>
                 <th>Success Rate</th>
             </tr>
         </thead>
@@ -63,6 +96,7 @@
             <tr>
                 <td>{{ tool[0] }}</td>
                 <td>{{ tool[1] }}</td>
+                <td>{{ "%.1f"|format(tool[3]) }}%</td>
                 <td>{{ "%.1f"|format(tool[2]) }}%</td>
             </tr>
             {% endfor %}
@@ -70,7 +104,104 @@
     </table>
 </div>
 
-<h2>Longest Sessions (Top 5)</h2>
+{% if mcp_servers %}
+<h2>MCP Servers</h2>
+<div class="card">
+    <table>
+        <thead>
+            <tr>
+                <th>Server</th>
+                <th>Total Calls</th>
+                <th>Commands Used</th>
+            </tr>
+        </thead>
+        <tbody>
+            {% for s in mcp_servers %}
+            <tr>
+                <td>{{ s[0] }}</td>
+                <td>{{ s[1] }}</td>
+                <td>{{ s[2] }}</td>
+            </tr>
+            {% endfor %}
+        </tbody>
+    </table>
+</div>
+
+<h2>MCP Command Breakdown</h2>
+<div class="card">
+    <table>
+        <thead>
+            <tr>
+                <th>Command</th>
+                <th>Count</th>
+                <th>% of Total</th>
+                <th>Success Rate</th>
+            </tr>
+        </thead>
+        <tbody>
+            {% for tool in mcp_breakdown %}
+            <tr>
+                <td>{{ tool[0] }}</td>
+                <td>{{ tool[1] }}</td>
+                <td>{{ "%.1f"|format(tool[3]) }}%</td>
+                <td>{{ "%.1f"|format(tool[2]) }}%</td>
+            </tr>
+            {% endfor %}
+        </tbody>
+    </table>
+</div>
+{% endif %}
+
+{% if bash_breakdown %}
+<h2>Bash Commands — By First Word</h2>
+<div class="card">
+    {% if bash_chained %}
+    <p style="margin: 0.5rem 1rem; color: var(--text-muted, #888);">
+        {{ bash_chained[0] }} of {{ bash_chained[1] }} bash calls ({{ "%.1f"|format(100.0 * bash_chained[0] / bash_chained[1]) if bash_chained[1] else 0 }}%) contain <code>&amp;&amp;</code> chaining
+    </p>
+    {% endif %}
+    <table>
+        <thead>
+            <tr>
+                <th>Command</th>
+                <th>Count</th>
+            </tr>
+        </thead>
+        <tbody>
+            {% for cmd in bash_breakdown %}
+            <tr>
+                <td><code>{{ cmd[0] }}</code></td>
+                <td>{{ cmd[1] }}</td>
+            </tr>
+            {% endfor %}
+        </tbody>
+    </table>
+</div>
+{% endif %}
+
+{% if bash_two_words %}
+<h2>Bash Commands — By First Two Words</h2>
+<div class="card">
+    <table>
+        <thead>
+            <tr>
+                <th>Command</th>
+                <th>Count</th>
+            </tr>
+        </thead>
+        <tbody>
+            {% for cmd in bash_two_words %}
+            <tr>
+                <td><code>{{ cmd[0] }}</code></td>
+                <td>{{ cmd[1] }}</td>
+            </tr>
+            {% endfor %}
+        </tbody>
+    </table>
+</div>
+{% endif %}
+
+<h2>Longest Sessions (Top 15)</h2>
 <div class="card">
     <table>
         <thead>
@@ -78,6 +209,10 @@
                 <th>Session ID</th>
                 <th>Started At</th>
                 <th>Duration</th>
+                <th>Turns</th>
+                <th>User Msgs</th>
+                <th>Tool Calls</th>
+                <th>Failed</th>
                 <th>Model</th>
             </tr>
         </thead>
@@ -87,6 +222,10 @@
                 <td><a href="/sessions/{{ s[0] }}" hx-get="/sessions/{{ s[0] }}" hx-target="#content" hx-push-url="true"><span class="truncate">{{ (s[0]|string)[:12] }}...</span></a></td>
                 <td>{{ (s[1]|string)[:19] }}</td>
                 <td>{{ s[2] }}</td>
+                <td>{{ s[6] }}</td>
+                <td>{{ s[4] }}</td>
+                <td>{{ s[7] }}</td>
+                <td>{{ s[8] }}</td>
                 <td>{{ s[3] or '' }}</td>
             </tr>
             {% endfor %}
@@ -94,7 +233,7 @@
     </table>
 </div>
 
-<h2>Most Tool Calls (Top 5 Sessions)</h2>
+<h2>Most Tool Calls (Top 15 Sessions)</h2>
 <div class="card">
     <table>
         <thead>
@@ -102,6 +241,11 @@
                 <th>Session ID</th>
                 <th>Tool Calls</th>
                 <th>Failed</th>
+                <th>Started At</th>
+                <th>Duration</th>
+                <th>Turns</th>
+                <th>User Msgs</th>
+                <th>Model</th>
             </tr>
         </thead>
         <tbody>
@@ -110,6 +254,11 @@
                 <td><a href="/sessions/{{ s[0] }}" hx-get="/sessions/{{ s[0] }}" hx-target="#content" hx-push-url="true"><span class="truncate">{{ (s[0]|string)[:12] }}...</span></a></td>
                 <td>{{ s[1] }}</td>
                 <td>{{ s[2] }}</td>
+                <td>{{ (s[3]|string)[:19] }}</td>
+                <td>{{ s[4] }}</td>
+                <td>{{ s[8] }}</td>
+                <td>{{ s[6] }}</td>
+                <td>{{ s[5] or '' }}</td>
             </tr>
             {% endfor %}
         </tbody>
