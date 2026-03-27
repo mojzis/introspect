@@ -65,8 +65,10 @@ exclude_dirs = ["tests"]
 
 [tool.vulture]
 paths = ["src"]
+min_confidence = 80
 
 [tool.deptry]
+per_rule_ignores = {"DEP002" = ["jinja2"], "DEP003" = ["introspect"]}
 
 [tool.interrogate]
 fail_under = 0

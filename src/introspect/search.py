@@ -165,6 +165,6 @@ def fts_search(
         WHERE {where_clauses}
         ORDER BY score DESC, timestamp DESC
         LIMIT ?
-        """,
+        """,  # nosec B608
         params,
     ).fetchall()

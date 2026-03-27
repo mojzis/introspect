@@ -22,7 +22,7 @@ def get_connection(
 def _create_views(conn: duckdb.DuckDBPyConnection, jsonl_glob: str) -> None:
     """Create lazy views over JSONL files."""
     # Raw messages: all JSONL lines with parsed fields
-    conn.execute(f"""-- nosec B608 - glob path, not user input
+    raw_messages_sql = f"""
         CREATE OR REPLACE VIEW raw_messages AS
         SELECT
             filename AS file_path,
@@ -48,7 +48,8 @@ def _create_views(conn: duckdb.DuckDBPyConnection, jsonl_glob: str) -> None:
             ignore_errors=true
         )
         WHERE type IN ('user', 'assistant')
-    """)
+    """  # nosec B608
+    conn.execute(raw_messages_sql)
 
     # Logical sessions: one row per session with summary stats
     conn.execute("""

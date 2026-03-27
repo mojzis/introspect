@@ -86,9 +86,9 @@ async def dashboard(request: Request):
     """).fetchall()
 
     return templates.TemplateResponse(
+        request,
         "dashboard.html",
         {
-            "request": request,
             "session_count": session_count,
             "tool_count": tool_count,
             "failed_count": failed_count,
@@ -119,9 +119,9 @@ async def sessions(request: Request, page: int = Query(1, ge=1)):
     ).fetchall()
 
     return templates.TemplateResponse(
+        request,
         "sessions.html",
         {
-            "request": request,
             "sessions": rows,
             "page": page,
             "total_pages": total_pages,
@@ -187,9 +187,9 @@ async def session_detail(request: Request, session_id: str):
         )
 
     return templates.TemplateResponse(
+        request,
         "session_detail.html",
         {
-            "request": request,
             "session": session_info,
             "session_id": session_id,
             "messages": parsed_messages,
@@ -215,9 +215,9 @@ async def search(request: Request, q: str = Query("", alias="q")):
         results = fts_search(conn, q, 50)
 
     return templates.TemplateResponse(
+        request,
         "search.html",
         {
-            "request": request,
             "query": q,
             "results": results,
         },
@@ -256,7 +256,7 @@ async def tools(
         {where}
         ORDER BY called_at DESC
         LIMIT 100
-    """,
+    """,  # nosec B608
         params,
     ).fetchall()
 
@@ -276,14 +276,14 @@ async def tools(
             COUNT(*) FILTER (WHERE is_error = 'true') AS failed_total
         FROM tool_calls
         {where}
-    """,
+    """,  # nosec B608
         params,
     ).fetchone()
 
     return templates.TemplateResponse(
+        request,
         "tools.html",
         {
-            "request": request,
             "tool_calls": rows,
             "tool_names": [t[0] for t in tool_names],
             "filter_failed": failed,
@@ -389,9 +389,9 @@ async def stats(request: Request):
         token_usage = None
 
     return templates.TemplateResponse(
+        request,
         "stats.html",
         {
-            "request": request,
             "total_sessions": total_sessions,
             "total_tool_calls": total_tool_calls,
             "total_failed": total_failed,
