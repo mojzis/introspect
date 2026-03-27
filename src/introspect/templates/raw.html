@@ -1,0 +1,175 @@
+{% extends parent %}
+{% block title %}Raw Data - Introspect{% endblock %}
+{% block content %}
+<style>
+    .raw-record { background: #fff; border-radius: 8px; padding: 1rem 1.25rem; margin-bottom: 1rem; box-shadow: 0 1px 3px rgba(0,0,0,0.08); }
+    .raw-record-header { font-weight: 700; color: #1a1a2e; margin-bottom: 0.75rem; font-size: 0.85rem; border-bottom: 2px solid #e0e0e0; padding-bottom: 0.5rem; }
+    .raw-field { display: flex; gap: 0.75rem; padding: 0.3rem 0; border-bottom: 1px solid #f0f0f0; align-items: flex-start; font-size: 0.85rem; }
+    .raw-field:last-child { border-bottom: none; }
+    .raw-field-name { min-width: 140px; max-width: 140px; font-weight: 600; color: #555; font-family: monospace; font-size: 0.8rem; padding-top: 0.15rem; flex-shrink: 0; }
+    .raw-field-value { flex: 1; word-break: break-word; font-family: monospace; font-size: 0.8rem; color: #333; white-space: pre-wrap; }
+    .raw-field-preview { cursor: pointer; color: #3b5bdb; }
+    .raw-field-preview:hover { text-decoration: underline; }
+    .raw-detail-panel { position: fixed; top: 0; right: 0; width: 50vw; height: 100vh; background: #fff; box-shadow: -4px 0 20px rgba(0,0,0,0.15); z-index: 1000; display: flex; flex-direction: column; }
+    .raw-detail-header { display: flex; justify-content: space-between; align-items: center; padding: 1rem 1.25rem; background: #1a1a2e; color: #fff; }
+    .raw-detail-header h3 { margin: 0; font-size: 1rem; font-family: monospace; }
+    .raw-detail-close { background: none; border: none; color: #fff; font-size: 1.5rem; cursor: pointer; padding: 0 0.5rem; }
+    .raw-detail-close:hover { color: #ff8080; background: none; }
+    .raw-detail-body { flex: 1; overflow: auto; padding: 1.25rem; }
+    .raw-detail-body pre { white-space: pre-wrap; word-break: break-word; font-size: 0.82rem; line-height: 1.5; }
+    .raw-overlay { position: fixed; top: 0; left: 0; width: 100%; height: 100%; background: rgba(0,0,0,0.3); z-index: 999; }
+    .json-key { color: #881391; }
+    .json-string { color: #1a6; }
+    .json-number { color: #1740eb; }
+    .json-bool { color: #d63384; }
+    .json-null { color: #999; }
+</style>
+
+<div x-data="rawDataViewer()">
+    <h1>Raw Data</h1>
+    <p style="color: #666; font-size: 0.9rem; margin-bottom: 1rem;">{{ total }} records &middot; {{ columns|length }} columns &middot; unfiltered JSONL</p>
+
+    <div class="filter-bar">
+        <form method="get" action="/raw" style="display: flex; gap: 0.75rem; align-items: center; flex-wrap: wrap;">
+            <label>Session: <input type="text" name="session" value="{{ filter_session }}" placeholder="Session ID prefix..." style="width: 200px;"></label>
+            <label>Type:
+                <select name="type" style="padding: 0.4rem 0.5rem; border: 1px solid #ccc; border-radius: 4px; font-size: 0.9rem;">
+                    <option value="">All</option>
+                    {% for t in record_types %}
+                    <option value="{{ t }}" {% if t == filter_type %}selected{% endif %}>{{ t }}</option>
+                    {% endfor %}
+                </select>
+            </label>
+            <button type="submit">Filter</button>
+            {% if filter_session or filter_type %}
+            <a href="/raw" class="btn" style="background: #666;" hx-get="/raw" hx-target="#content" hx-push-url="true">Clear</a>
+            {% endif %}
+        </form>
+    </div>
+
+    {% for record in records %}
+    <div class="raw-record">
+        <div class="raw-record-header">Record {{ (page - 1) * 20 + loop.index }} of {{ total }}</div>
+        {% for field in record %}
+        <div class="raw-field">
+            <div class="raw-field-name">{{ field.column }}</div>
+            <div class="raw-field-value">
+                {% if field.long %}
+                    <span class="raw-field-preview"
+                          @click="showDetail('{{ field.column }}', $el)"
+                          data-full="{{ field.value|e }}">{{ field.preview|e }}</span>
+                {% else %}
+                    {{ field.value }}
+                {% endif %}
+            </div>
+        </div>
+        {% endfor %}
+    </div>
+    {% endfor %}
+
+    {% if total == 0 %}
+    <div class="card" style="text-align: center; color: #999;">No records found.</div>
+    {% endif %}
+
+    {% if total_pages > 1 %}
+    <div class="pagination">
+        {% if page > 1 %}
+        <a href="/raw?page={{ page - 1 }}&session={{ filter_session }}&type={{ filter_type }}"
+           hx-get="/raw?page={{ page - 1 }}&session={{ filter_session }}&type={{ filter_type }}"
+           hx-target="#content" hx-push-url="true">&laquo; Prev</a>
+        {% endif %}
+        {% for p in range(1, total_pages + 1) %}
+            {% if p == page %}
+                <span class="current">{{ p }}</span>
+            {% elif p <= 3 or p > total_pages - 2 or (p >= page - 1 and p <= page + 1) %}
+                <a href="/raw?page={{ p }}&session={{ filter_session }}&type={{ filter_type }}"
+                   hx-get="/raw?page={{ p }}&session={{ filter_session }}&type={{ filter_type }}"
+                   hx-target="#content" hx-push-url="true">{{ p }}</a>
+            {% elif p == 4 or p == total_pages - 2 %}
+                <span>&hellip;</span>
+            {% endif %}
+        {% endfor %}
+        {% if page < total_pages %}
+        <a href="/raw?page={{ page + 1 }}&session={{ filter_session }}&type={{ filter_type }}"
+           hx-get="/raw?page={{ page + 1 }}&session={{ filter_session }}&type={{ filter_type }}"
+           hx-target="#content" hx-push-url="true">Next &raquo;</a>
+        {% endif %}
+    </div>
+    {% endif %}
+
+    <!-- Detail side panel -->
+    <template x-if="detailOpen">
+        <div>
+            <div class="raw-overlay" @click="closeDetail()"></div>
+            <div class="raw-detail-panel">
+                <div class="raw-detail-header">
+                    <h3 x-text="detailField"></h3>
+                    <button class="raw-detail-close" @click="closeDetail()">&times;</button>
+                </div>
+                <div class="raw-detail-body">
+                    <pre x-html="detailHtml"></pre>
+                </div>
+            </div>
+        </div>
+    </template>
+</div>
+
+<script>
+function rawDataViewer() {
+    return {
+        detailOpen: false,
+        detailField: '',
+        detailHtml: '',
+
+        showDetail(fieldName, el) {
+            const raw = el.getAttribute('data-full');
+            this.detailField = fieldName;
+            this.detailHtml = this.formatValue(raw);
+            this.detailOpen = true;
+        },
+
+        closeDetail() {
+            this.detailOpen = false;
+        },
+
+        formatValue(str) {
+            // Decode HTML entities
+            const txt = document.createElement('textarea');
+            txt.innerHTML = str;
+            const decoded = txt.value;
+
+            // Try to parse and syntax-highlight JSON
+            try {
+                const obj = JSON.parse(decoded);
+                return this.syntaxHighlight(JSON.stringify(obj, null, 2));
+            } catch(e) {
+                // Not JSON — render as text with newlines
+                return this.escapeHtml(decoded);
+            }
+        },
+
+        syntaxHighlight(json) {
+            const escaped = json.replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;');
+            return escaped.replace(
+                /("(\\u[\da-fA-F]{4}|\\[^u]|[^\\"])*"(\s*:)?|\b(true|false|null)\b|-?\d+(?:\.\d*)?(?:[eE][+\-]?\d+)?)/g,
+                function(match) {
+                    let cls = 'json-number';
+                    if (/^"/.test(match)) {
+                        cls = /:$/.test(match) ? 'json-key' : 'json-string';
+                    } else if (/true|false/.test(match)) {
+                        cls = 'json-bool';
+                    } else if (/null/.test(match)) {
+                        cls = 'json-null';
+                    }
+                    return '<span class="' + cls + '">' + match + '</span>';
+                }
+            );
+        },
+
+        escapeHtml(text) {
+            return text.replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;');
+        }
+    }
+}
+</script>
+{% endblock %}

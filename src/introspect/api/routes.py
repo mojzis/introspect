@@ -403,6 +403,103 @@ async def tools(
     )
 
 
+RAW_PER_PAGE = 20
+
+
+@router.get("/raw", response_class=HTMLResponse)
+async def raw_data(
+    request: Request,
+    page: int = Query(1, ge=1),
+    session: str = Query("", alias="session"),
+    record_type: str = Query("", alias="type"),
+):
+    """Raw unfiltered JSONL records with all fields."""
+    conn = _conn(request)
+
+    where_clauses: list[str] = []
+    params: list[str | int] = []
+    if session.strip():
+        where_clauses.append("sessionId LIKE ?")
+        params.append(f"{session.strip()}%")
+    if record_type.strip():
+        where_clauses.append("type = ?")
+        params.append(record_type.strip())
+
+    where = "WHERE " + " AND ".join(where_clauses) if where_clauses else ""
+
+    total = conn.execute(
+        f"SELECT COUNT(*) FROM raw_data {where}",  # nosec B608
+        params,
+    ).fetchone()[0]
+    total_pages = max(1, math.ceil(total / RAW_PER_PAGE))
+    offset = (page - 1) * RAW_PER_PAGE
+
+    result = conn.execute(
+        f"SELECT * FROM raw_data {where} LIMIT ? OFFSET ?",  # nosec B608
+        [*params, RAW_PER_PAGE, offset],
+    )
+    columns = [desc[0] for desc in result.description]
+    rows = result.fetchall()
+
+    # Get distinct types for filter dropdown
+    record_types = conn.execute(
+        "SELECT DISTINCT type FROM raw_data WHERE type IS NOT NULL ORDER BY type"
+    ).fetchall()
+
+    # Build records as list of {column, value, is_json, preview} dicts
+    preview_len = 100
+    records = []
+    for row in rows:
+        fields = []
+        for col, val in zip(columns, row, strict=True):
+            if val is None:
+                continue
+            val_str = str(val)
+            # Try to pretty-print JSON objects/arrays
+            is_json = False
+            if isinstance(val, (dict, list)):
+                try:
+                    val_str = json.dumps(val, indent=2, ensure_ascii=False)
+                    is_json = True
+                except (TypeError, ValueError):
+                    pass
+            elif isinstance(val, str) and val.strip()[:1] in ("{", "["):
+                try:
+                    parsed = json.loads(val)
+                    val_str = json.dumps(parsed, indent=2, ensure_ascii=False)
+                    is_json = True
+                except (json.JSONDecodeError, ValueError):
+                    pass
+            long = len(val_str) > preview_len
+            preview = val_str[:preview_len] + "..." if long else val_str
+            fields.append(
+                {
+                    "column": col,
+                    "value": val_str,
+                    "preview": preview,
+                    "long": long,
+                    "is_json": is_json,
+                }
+            )
+        records.append(fields)
+
+    return templates.TemplateResponse(
+        request,
+        "raw.html",
+        {
+            "parent": _parent(request),
+            "records": records,
+            "columns": columns,
+            "page": page,
+            "total_pages": total_pages,
+            "total": total,
+            "filter_session": session,
+            "filter_type": record_type,
+            "record_types": [r[0] for r in record_types],
+        },
+    )
+
+
 @router.get("/mcps", response_class=HTMLResponse)
 async def mcps(
     request: Request,
@@ -428,10 +525,10 @@ async def mcps(
 
     # --- Commands for selected server (or all) ---
     cmd_where = ["tool_name LIKE 'mcp__%'"]
-    params: list[str | int] = []
+    mcp_params: list[str | int] = []
     if server.strip():
         cmd_where.append("split_part(tool_name, '__', 2) = ?")
-        params.append(server.strip())
+        mcp_params.append(server.strip())
 
     mcp_commands = conn.execute(
         f"""
@@ -445,7 +542,7 @@ async def mcps(
         GROUP BY server_name, command_name
         ORDER BY cnt DESC
     """,  # nosec B608
-        params,
+        mcp_params,
     ).fetchall()
 
     # --- Filtered call list ---
@@ -502,7 +599,7 @@ async def mcps(
         list_params,
     ).fetchall()
 
-    stats = conn.execute(
+    mcp_stats = conn.execute(
         f"""
         SELECT
             COUNT(*) AS total,
@@ -524,7 +621,7 @@ async def mcps(
             "filter_server": server,
             "filter_command": command,
             "filter_failed": failed,
-            "stats": stats,
+            "stats": mcp_stats,
         },
     )
 
