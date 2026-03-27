@@ -18,6 +18,13 @@ templates = Jinja2Templates(directory=str(TEMPLATE_DIR))
 SESSIONS_PER_PAGE = 20
 
 
+def _parent(request: Request) -> str:
+    """Return the base template: full page for normal requests, partial for HTMX."""
+    if request.headers.get("HX-Request"):
+        return "partial.html"
+    return "base.html"
+
+
 def _parse_content_block(block) -> dict:  # noqa: PLR0911
     """Parse a single content block from a message."""
     if isinstance(block, str):
@@ -89,6 +96,7 @@ async def dashboard(request: Request):
         request,
         "dashboard.html",
         {
+            "parent": _parent(request),
             "session_count": session_count,
             "tool_count": tool_count,
             "failed_count": failed_count,
@@ -122,6 +130,7 @@ async def sessions(request: Request, page: int = Query(1, ge=1)):
         request,
         "sessions.html",
         {
+            "parent": _parent(request),
             "sessions": rows,
             "page": page,
             "total_pages": total_pages,
@@ -190,6 +199,7 @@ async def session_detail(request: Request, session_id: str):
         request,
         "session_detail.html",
         {
+            "parent": _parent(request),
             "session": session_info,
             "session_id": session_id,
             "messages": parsed_messages,
@@ -218,6 +228,7 @@ async def search(request: Request, q: str = Query("", alias="q")):
         request,
         "search.html",
         {
+            "parent": _parent(request),
             "query": q,
             "results": results,
         },
@@ -284,6 +295,7 @@ async def tools(
         request,
         "tools.html",
         {
+            "parent": _parent(request),
             "tool_calls": rows,
             "tool_names": [t[0] for t in tool_names],
             "filter_failed": failed,
@@ -392,6 +404,7 @@ async def stats(request: Request):
         request,
         "stats.html",
         {
+            "parent": _parent(request),
             "total_sessions": total_sessions,
             "total_tool_calls": total_tool_calls,
             "total_failed": total_failed,
