@@ -56,9 +56,14 @@
         .tool-btn-count { background: #e8e8f0; color: #555; font-size: 0.75rem; padding: 0.1rem 0.4rem; border-radius: 10px; font-weight: 600; }
         .tool-btn-active .tool-btn-count { background: rgba(255,255,255,0.2); color: #fff; }
         .tool-btn-sm { font-size: 0.8rem; padding: 0.2rem 0.6rem; }
+        #loading-overlay { display: none; position: fixed; top: 0; left: 0; right: 0; bottom: 0; background: rgba(245,245,245,0.7); z-index: 1000; justify-content: center; align-items: center; }
+        #loading-overlay.active { display: flex; }
+        .spinner { width: 36px; height: 36px; border: 3px solid #e0e0e0; border-top-color: #1a1a2e; border-radius: 50%; animation: spin 0.7s linear infinite; }
+        @keyframes spin { to { transform: rotate(360deg); } }
     </style>
 </head>
 <body>
+    <div id="loading-overlay"><div class="spinner"></div></div>
     <nav>
         <a href="/" class="brand" hx-get="/" hx-target="#content" hx-push-url="true">Introspect</a>
         <a href="/" hx-get="/" hx-target="#content" hx-push-url="true">Dashboard</a>
@@ -72,5 +77,13 @@
     <div class="container" id="content">
         {% block content %}{% endblock %}
     </div>
+    <script>
+        document.addEventListener('htmx:beforeRequest', function() {
+            document.getElementById('loading-overlay').classList.add('active');
+        });
+        document.addEventListener('htmx:afterRequest', function() {
+            document.getElementById('loading-overlay').classList.remove('active');
+        });
+    </script>
 </body>
 </html>

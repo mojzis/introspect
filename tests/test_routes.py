@@ -1,6 +1,7 @@
 """Tests for introspect web UI routes."""
 
 import json
+import os
 import tempfile
 from contextlib import contextmanager
 from pathlib import Path
@@ -9,7 +10,6 @@ from unittest.mock import patch
 from fastapi.testclient import TestClient
 
 from introspect.api.main import app
-from introspect.db import get_connection
 
 
 def _write_sample_jsonl(tmp_dir: Path) -> Path:
@@ -171,16 +171,23 @@ def _write_sample_jsonl(tmp_dir: Path) -> Path:
 
 @contextmanager
 def _patched_client(tmp_path: Path):
-    """Context manager that yields a TestClient with a patched DB connection."""
+    """Context manager that yields a TestClient with materialized test data."""
     _write_sample_jsonl(tmp_path)
     db_path = tmp_path / "test.duckdb"
     glob_pattern = str(tmp_path / "projects" / "**" / "*.jsonl")
 
-    def _patched_get_connection():
-        return get_connection(db_path, glob_pattern)
-
-    with patch("introspect.api.main.get_connection", _patched_get_connection):
-        yield TestClient(app)
+    with (
+        patch.dict(
+            os.environ,
+            {
+                "INTROSPECT_DB_PATH": str(db_path),
+                "INTROSPECT_JSONL_GLOB": glob_pattern,
+                "INTROSPECT_DAYS": "0",
+            },
+        ),
+        TestClient(app) as client,
+    ):
+        yield client
 
 
 def test_dashboard_returns_200():

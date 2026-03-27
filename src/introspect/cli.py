@@ -328,11 +328,21 @@ def search(
 def serve(
     port: int = typer.Option(8000, help="Port to listen on"),
     host: str = typer.Option("127.0.0.1", help="Host to bind to"),
+    days: int = typer.Option(
+        10, "-d", "--days", help="Days of history to load (0 = no limit)"
+    ),
 ):
     """Launch the web UI."""
+    import os  # noqa: PLC0415
+
     import uvicorn  # noqa: PLC0415
 
+    os.environ["INTROSPECT_DAYS"] = str(days)
     console.print(f"[bold]Starting Introspect web UI on http://{host}:{port}[/bold]")
+    if days > 0:
+        console.print(f"[dim]Loading last {days} days of data...[/dim]")
+    else:
+        console.print("[dim]Loading all data (no day limit)...[/dim]")
     uvicorn.run("introspect.api.main:app", host=host, port=port, log_level="info")
 
 

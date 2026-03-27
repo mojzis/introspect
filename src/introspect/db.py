@@ -19,6 +19,86 @@ def get_connection(
     return conn
 
 
+def materialize_views(
+    conn: duckdb.DuckDBPyConnection,
+    jsonl_glob: str,
+    days: int = 0,
+) -> None:
+    """Materialize raw data into tables for fast querying.
+
+    Args:
+        conn: DuckDB connection.
+        jsonl_glob: Glob pattern for JSONL files.
+        days: Number of days of history to load. 0 means no limit.
+    """
+    day_filter = ""
+    and_day_filter = ""
+    if days > 0:
+        day_filter = (
+            f"WHERE timestamp::TIMESTAMP >= CURRENT_TIMESTAMP - INTERVAL '{days} days'"
+        )
+        and_day_filter = (
+            f"AND timestamp::TIMESTAMP >= CURRENT_TIMESTAMP - INTERVAL '{days} days'"
+        )
+
+    # Drop everything to avoid table/view name conflicts
+    for name in (
+        "sessions",
+        "conversation_turns",
+        "tool_calls",
+        "logical_sessions",
+        "raw_messages",
+        "raw_data",
+        "search_corpus",
+    ):
+        conn.execute(f"DROP VIEW IF EXISTS {name}")  # nosec B608
+        conn.execute(f"DROP TABLE IF EXISTS {name}")  # nosec B608
+
+    conn.execute(f"""
+        CREATE TABLE raw_data AS
+        SELECT *
+        FROM read_json_auto(
+            '{jsonl_glob}',
+            filename=true,
+            format='newline_delimited',
+            union_by_name=true,
+            ignore_errors=true
+        )
+        {day_filter}
+    """)  # nosec B608
+
+    conn.execute(f"""
+        CREATE TABLE raw_messages AS
+        SELECT
+            filename AS file_path,
+            type,
+            timestamp::TIMESTAMP AS timestamp,
+            sessionId AS session_id,
+            uuid,
+            parentUuid AS parent_uuid,
+            isSidechain AS is_sidechain,
+            cwd,
+            version,
+            entrypoint,
+            gitBranch AS git_branch,
+            json_extract_string(message, '$.role') AS role,
+            json_extract_string(message, '$.model') AS model,
+            message,
+            toolUseResult AS tool_use_result,
+        FROM read_json_auto(
+            '{jsonl_glob}',
+            filename=true,
+            format='newline_delimited',
+            union_by_name=true,
+            ignore_errors=true
+        )
+        WHERE type IN ('user', 'assistant')
+        {and_day_filter}
+    """)  # nosec B608
+
+    _create_derived_views(conn)
+
+
 def _create_views(conn: duckdb.DuckDBPyConnection, jsonl_glob: str) -> None:
     """Create lazy views over JSONL files."""
     # Raw data: completely unfiltered JSONL — every field, every row
@@ -35,7 +115,7 @@ def _create_views(conn: duckdb.DuckDBPyConnection, jsonl_glob: str) -> None:
     """)  # nosec B608
 
     # Raw messages: all JSONL lines with parsed fields
-    raw_messages_sql = f"""
+    conn.execute(f"""
         CREATE OR REPLACE VIEW raw_messages AS
         SELECT
             filename AS file_path,
@@ -61,9 +141,13 @@ def _create_views(conn: duckdb.DuckDBPyConnection, jsonl_glob: str) -> None:
             ignore_errors=true
         )
         WHERE type IN ('user', 'assistant')
-    """  # nosec B608
-    conn.execute(raw_messages_sql)
+    """)  # nosec B608
 
+    _create_derived_views(conn)
+
+
+def _create_derived_views(conn: duckdb.DuckDBPyConnection) -> None:
+    """Create views that depend on raw_messages (works with both tables and views)."""
     # Logical sessions: one row per session with summary stats
     conn.execute("""
         CREATE OR REPLACE VIEW logical_sessions AS
