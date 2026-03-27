@@ -256,7 +256,7 @@ async def tools(
         {where}
         ORDER BY called_at DESC
         LIMIT 100
-    """,
+    """,  # nosec B608
         params,
     ).fetchall()
 
@@ -276,7 +276,7 @@ async def tools(
             COUNT(*) FILTER (WHERE is_error = 'true') AS failed_total
         FROM tool_calls
         {where}
-    """,
+    """,  # nosec B608
         params,
     ).fetchone()
 

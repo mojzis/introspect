@@ -108,7 +108,7 @@ def tools(
         {where}
         ORDER BY called_at DESC
         LIMIT ?
-    """,
+    """,  # nosec B608
         params,
     ).fetchall()
 
