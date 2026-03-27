@@ -1,0 +1,201 @@
+"""Tests for introspect database views."""
+
+import json
+import tempfile
+from pathlib import Path
+
+from introspect.db import get_connection
+
+
+def _write_sample_jsonl(tmp_dir: Path) -> Path:
+    """Write a minimal JSONL file for testing."""
+    session_id = "test-session-001"
+    jsonl_path = tmp_dir / "projects" / "test-project" / f"{session_id}.jsonl"
+    jsonl_path.parent.mkdir(parents=True, exist_ok=True)
+
+    lines = [
+        {
+            "type": "user",
+            "timestamp": "2026-03-27T10:00:00.000Z",
+            "sessionId": session_id,
+            "uuid": "u1",
+            "parentUuid": None,
+            "isSidechain": False,
+            "cwd": "/tmp/test",
+            "version": "2.1.0",
+            "entrypoint": "cli",
+            "gitBranch": "main",
+            "message": {"role": "user", "content": "Hello, help me with tests"},
+        },
+        {
+            "type": "assistant",
+            "timestamp": "2026-03-27T10:00:01.000Z",
+            "sessionId": session_id,
+            "uuid": "a1",
+            "parentUuid": "u1",
+            "isSidechain": False,
+            "cwd": "/tmp/test",
+            "version": "2.1.0",
+            "entrypoint": "cli",
+            "gitBranch": "main",
+            "requestId": "req1",
+            "message": {
+                "role": "assistant",
+                "model": "claude-opus-4-6",
+                "id": "msg1",
+                "content": [{"type": "text", "text": "Sure, I can help!"}],
+                "usage": {
+                    "input_tokens": 100,
+                    "output_tokens": 20,
+                },
+            },
+        },
+        {
+            "type": "assistant",
+            "timestamp": "2026-03-27T10:00:02.000Z",
+            "sessionId": session_id,
+            "uuid": "a2",
+            "parentUuid": "a1",
+            "isSidechain": False,
+            "cwd": "/tmp/test",
+            "version": "2.1.0",
+            "entrypoint": "cli",
+            "gitBranch": "main",
+            "requestId": "req2",
+            "message": {
+                "role": "assistant",
+                "model": "claude-opus-4-6",
+                "id": "msg2",
+                "content": [
+                    {
+                        "type": "tool_use",
+                        "id": "toolu_test1",
+                        "name": "Bash",
+                        "input": {"command": "echo hello", "description": "test"},
+                    }
+                ],
+            },
+        },
+        {
+            "type": "user",
+            "timestamp": "2026-03-27T10:00:03.000Z",
+            "sessionId": session_id,
+            "uuid": "u2",
+            "parentUuid": "a2",
+            "isSidechain": False,
+            "cwd": "/tmp/test",
+            "version": "2.1.0",
+            "entrypoint": "cli",
+            "gitBranch": "main",
+            "sourceToolAssistantUUID": "a2",
+            "toolUseResult": {
+                "stdout": "hello\n",
+                "stderr": "",
+                "interrupted": False,
+                "isImage": False,
+                "noOutputExpected": False,
+            },
+            "message": {
+                "role": "user",
+                "content": [
+                    {
+                        "type": "tool_result",
+                        "tool_use_id": "toolu_test1",
+                        "content": "hello\n",
+                        "is_error": False,
+                    }
+                ],
+            },
+        },
+    ]
+
+    with jsonl_path.open("w") as f:
+        for line in lines:
+            f.write(json.dumps(line) + "\n")
+
+    return jsonl_path
+
+
+def test_views_created():
+    """Test that all views are created successfully."""
+    with tempfile.TemporaryDirectory() as tmp:
+        tmp_path = Path(tmp)
+        _write_sample_jsonl(tmp_path)
+
+        db_path = tmp_path / "test.duckdb"
+        glob_pattern = str(tmp_path / "projects" / "**" / "*.jsonl")
+        conn = get_connection(db_path, glob_pattern)
+
+        # Check views exist
+        views = conn.execute("""
+            SELECT table_name FROM information_schema.tables
+            WHERE table_type = 'VIEW'
+        """).fetchall()
+        view_names = {v[0] for v in views}
+        assert "raw_messages" in view_names
+        assert "logical_sessions" in view_names
+        assert "tool_calls" in view_names
+        assert "conversation_turns" in view_names
+        conn.close()
+
+
+def test_raw_messages():
+    """Test raw_messages view returns correct data."""
+    with tempfile.TemporaryDirectory() as tmp:
+        tmp_path = Path(tmp)
+        _write_sample_jsonl(tmp_path)
+
+        db_path = tmp_path / "test.duckdb"
+        glob_pattern = str(tmp_path / "projects" / "**" / "*.jsonl")
+        conn = get_connection(db_path, glob_pattern)
+
+        rows = conn.execute("SELECT * FROM raw_messages").fetchall()
+        assert len(rows) == 4  # noqa: PLR2004
+
+        # Check session_id is consistent
+        session_ids = {r[3] for r in rows}
+        assert session_ids == {"test-session-001"}
+        conn.close()
+
+
+def test_logical_sessions():
+    """Test logical_sessions view aggregation."""
+    with tempfile.TemporaryDirectory() as tmp:
+        tmp_path = Path(tmp)
+        _write_sample_jsonl(tmp_path)
+
+        db_path = tmp_path / "test.duckdb"
+        glob_pattern = str(tmp_path / "projects" / "**" / "*.jsonl")
+        conn = get_connection(db_path, glob_pattern)
+
+        rows = conn.execute("SELECT * FROM logical_sessions").fetchall()
+        assert len(rows) == 1
+
+        session = rows[0]
+        # Fields: session_id, started_at, ended_at, duration,
+        #   user_msgs, asst_msgs, model, cwd, git_branch, entrypoint
+        assert session[0] == "test-session-001"
+        assert session[4] == 1  # user_messages (not tool result)
+        assert session[5] == 2  # noqa: PLR2004
+        conn.close()
+
+
+def test_tool_calls():
+    """Test tool_calls view joins use and result."""
+    with tempfile.TemporaryDirectory() as tmp:
+        tmp_path = Path(tmp)
+        _write_sample_jsonl(tmp_path)
+
+        db_path = tmp_path / "test.duckdb"
+        glob_pattern = str(tmp_path / "projects" / "**" / "*.jsonl")
+        conn = get_connection(db_path, glob_pattern)
+
+        rows = conn.execute("SELECT * FROM tool_calls").fetchall()
+        assert len(rows) == 1
+
+        tool_call = rows[0]
+        # Fields: session_id, called_at, tool_name, tool_use_id,
+        #   tool_input, is_error, tool_use_result, result_at, exec_time
+        assert tool_call[2] == "Bash"
+        assert tool_call[3] == "toolu_test1"
+        conn.close()
