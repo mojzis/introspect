@@ -136,6 +136,7 @@ def test_views_created():
         assert "logical_sessions" in view_names
         assert "tool_calls" in view_names
         assert "conversation_turns" in view_names
+        assert "sessions" in view_names
         conn.close()
 
 
@@ -150,7 +151,7 @@ def test_raw_messages():
         conn = get_connection(db_path, glob_pattern)
 
         rows = conn.execute("SELECT * FROM raw_messages").fetchall()
-        assert len(rows) == 4  # noqa: PLR2004
+        assert len(rows) == 4
 
         # Check session_id is consistent
         session_ids = {r[3] for r in rows}
@@ -176,7 +177,7 @@ def test_logical_sessions():
         #   user_msgs, asst_msgs, model, cwd, git_branch, entrypoint
         assert session[0] == "test-session-001"
         assert session[4] == 1  # user_messages (not tool result)
-        assert session[5] == 2  # noqa: PLR2004
+        assert session[5] == 2
         conn.close()
 
 

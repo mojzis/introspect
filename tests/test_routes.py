@@ -2,6 +2,7 @@
 
 import json
 import tempfile
+from contextlib import contextmanager
 from pathlib import Path
 from unittest.mock import patch
 
@@ -117,8 +118,9 @@ def _write_sample_jsonl(tmp_dir: Path) -> Path:
     return jsonl_path
 
 
-def _make_client(tmp_path: Path) -> TestClient:
-    """Create a test client with a temporary database."""
+@contextmanager
+def _patched_client(tmp_path: Path):
+    """Context manager that yields a TestClient with a patched DB connection."""
     _write_sample_jsonl(tmp_path)
     db_path = tmp_path / "test.duckdb"
     glob_pattern = str(tmp_path / "projects" / "**" / "*.jsonl")
@@ -127,13 +129,12 @@ def _make_client(tmp_path: Path) -> TestClient:
         return get_connection(db_path, glob_pattern)
 
     with patch("introspect.api.main.get_connection", _patched_get_connection):
-        return TestClient(app)
+        yield TestClient(app)
 
 
 def test_dashboard_returns_200():
     """Dashboard page loads without error."""
-    with tempfile.TemporaryDirectory() as tmp:
-        client = _make_client(Path(tmp))
+    with tempfile.TemporaryDirectory() as tmp, _patched_client(Path(tmp)) as client:
         response = client.get("/")
         assert response.status_code == 200
         assert "Dashboard" in response.text
@@ -141,39 +142,34 @@ def test_dashboard_returns_200():
 
 def test_sessions_returns_200():
     """Sessions page loads without error."""
-    with tempfile.TemporaryDirectory() as tmp:
-        client = _make_client(Path(tmp))
+    with tempfile.TemporaryDirectory() as tmp, _patched_client(Path(tmp)) as client:
         response = client.get("/sessions")
         assert response.status_code == 200
 
 
 def test_session_detail_returns_200():
     """Session detail page loads without error."""
-    with tempfile.TemporaryDirectory() as tmp:
-        client = _make_client(Path(tmp))
+    with tempfile.TemporaryDirectory() as tmp, _patched_client(Path(tmp)) as client:
         response = client.get("/sessions/01234567-abcd-abcd-abcd-0123456789ab")
         assert response.status_code == 200
 
 
 def test_search_returns_200():
     """Search page loads without error."""
-    with tempfile.TemporaryDirectory() as tmp:
-        client = _make_client(Path(tmp))
+    with tempfile.TemporaryDirectory() as tmp, _patched_client(Path(tmp)) as client:
         response = client.get("/search")
         assert response.status_code == 200
 
 
 def test_tools_returns_200():
     """Tools page loads without error."""
-    with tempfile.TemporaryDirectory() as tmp:
-        client = _make_client(Path(tmp))
+    with tempfile.TemporaryDirectory() as tmp, _patched_client(Path(tmp)) as client:
         response = client.get("/tools")
         assert response.status_code == 200
 
 
 def test_stats_returns_200():
     """Stats page loads without error."""
-    with tempfile.TemporaryDirectory() as tmp:
-        client = _make_client(Path(tmp))
+    with tempfile.TemporaryDirectory() as tmp, _patched_client(Path(tmp)) as client:
         response = client.get("/stats")
         assert response.status_code == 200
