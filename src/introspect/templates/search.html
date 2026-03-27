@@ -1,0 +1,45 @@
+{% extends "base.html" %}
+{% block title %}Search - Introspect{% endblock %}
+{% block content %}
+<h1>Search</h1>
+
+<div class="card">
+    <form action="/search" method="get" style="display:flex;gap:0.5rem;">
+        <input type="search" name="q" value="{{ query }}" placeholder="Search conversations..." style="flex:1;" />
+        <button type="submit">Search</button>
+    </form>
+</div>
+
+{% if query %}
+<p style="margin-bottom:1rem;color:#666;">{{ results|length }} result(s) for "{{ query }}"</p>
+{% endif %}
+
+{% if results %}
+<div class="card">
+    <table>
+        <thead>
+            <tr>
+                <th>Session ID</th>
+                <th>Timestamp</th>
+                <th>Role</th>
+                <th>Snippet</th>
+                <th>Score</th>
+            </tr>
+        </thead>
+        <tbody>
+            {% for r in results %}
+            <tr>
+                <td><a href="/sessions/{{ r[0] }}" hx-get="/sessions/{{ r[0] }}" hx-target="#content" hx-push-url="true"><span class="truncate">{{ r[0][:12] }}...</span></a></td>
+                <td>{{ (r[1]|string)[:19] }}</td>
+                <td>{{ r[2] or '' }}</td>
+                <td style="max-width:400px;overflow:hidden;text-overflow:ellipsis;">{{ r[3][:200] if r[3] else '' }}</td>
+                <td>{{ '%.4f'|format(r[4]) if r[4] is not none else '' }}</td>
+            </tr>
+            {% endfor %}
+        </tbody>
+    </table>
+</div>
+{% elif query %}
+<div class="card"><p>No results found.</p></div>
+{% endif %}
+{% endblock %}

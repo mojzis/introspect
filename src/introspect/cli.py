@@ -246,6 +246,18 @@ def search(
 
 
 @app.command()
+def serve(
+    port: int = typer.Option(8000, help="Port to listen on"),
+    host: str = typer.Option("127.0.0.1", help="Host to bind to"),
+):
+    """Launch the web UI."""
+    import uvicorn  # noqa: PLC0415
+
+    console.print(f"[bold]Starting Introspect web UI on http://{host}:{port}[/bold]")
+    uvicorn.run("introspect.api.main:app", host=host, port=port, log_level="info")
+
+
+@app.command()
 def refresh():
     """Rebuild the search corpus table and FTS index."""
     conn = _db()

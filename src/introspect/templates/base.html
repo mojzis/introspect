@@ -1,0 +1,66 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>{% block title %}Introspect{% endblock %}</title>
+    <script src="https://unpkg.com/htmx.org@2.0.4"></script>
+    <script defer src="https://unpkg.com/alpinejs@3.14.8/dist/cdn.min.js"></script>
+    <style>
+        * { box-sizing: border-box; margin: 0; padding: 0; }
+        body { font-family: system-ui, -apple-system, sans-serif; background: #f5f5f5; color: #333; line-height: 1.5; }
+        nav { background: #1a1a2e; color: #fff; padding: 0.75rem 1.5rem; display: flex; align-items: center; gap: 2rem; }
+        nav .brand { font-weight: 700; font-size: 1.2rem; color: #e0e0ff; text-decoration: none; }
+        nav a { color: #c0c0e0; text-decoration: none; padding: 0.25rem 0.5rem; border-radius: 4px; }
+        nav a:hover, nav a.active { color: #fff; background: rgba(255,255,255,0.1); }
+        .container { max-width: 1100px; margin: 1.5rem auto; padding: 0 1rem; }
+        .card { background: #fff; border-radius: 8px; padding: 1.25rem; margin-bottom: 1rem; box-shadow: 0 1px 3px rgba(0,0,0,0.08); }
+        table { width: 100%; border-collapse: collapse; font-size: 0.9rem; }
+        th { text-align: left; padding: 0.5rem; border-bottom: 2px solid #e0e0e0; font-weight: 600; color: #555; }
+        td { padding: 0.5rem; border-bottom: 1px solid #eee; }
+        tr:hover { background: #f9f9ff; }
+        a { color: #3b5bdb; }
+        .stat-grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(180px, 1fr)); gap: 1rem; margin-bottom: 1rem; }
+        .stat-card { background: #fff; border-radius: 8px; padding: 1rem; text-align: center; box-shadow: 0 1px 3px rgba(0,0,0,0.08); }
+        .stat-card .value { font-size: 2rem; font-weight: 700; color: #1a1a2e; }
+        .stat-card .label { font-size: 0.85rem; color: #666; }
+        .pagination { display: flex; gap: 0.5rem; justify-content: center; margin: 1rem 0; }
+        .pagination a, .pagination span { padding: 0.4rem 0.8rem; border-radius: 4px; border: 1px solid #ddd; text-decoration: none; color: #333; }
+        .pagination a:hover { background: #e8e8ff; }
+        .pagination .current { background: #1a1a2e; color: #fff; border-color: #1a1a2e; }
+        .badge { display: inline-block; padding: 0.15rem 0.5rem; border-radius: 10px; font-size: 0.75rem; font-weight: 600; }
+        .badge-error { background: #ffe0e0; color: #c00; }
+        .badge-ok { background: #e0ffe0; color: #060; }
+        input[type="text"], input[type="search"] { padding: 0.5rem 0.75rem; border: 1px solid #ccc; border-radius: 4px; font-size: 0.95rem; }
+        button, .btn { padding: 0.5rem 1rem; border: none; border-radius: 4px; background: #1a1a2e; color: #fff; cursor: pointer; font-size: 0.9rem; text-decoration: none; }
+        button:hover, .btn:hover { background: #2a2a4e; }
+        .truncate { max-width: 150px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; display: inline-block; vertical-align: bottom; }
+        h1 { margin-bottom: 1rem; color: #1a1a2e; }
+        h2 { margin-bottom: 0.75rem; color: #1a1a2e; }
+        .msg { padding: 0.75rem 1rem; margin-bottom: 0.5rem; border-radius: 8px; max-width: 85%; }
+        .msg-user { background: #e8f0fe; margin-left: auto; }
+        .msg-assistant { background: #fff; border: 1px solid #e0e0e0; }
+        .msg-role { font-size: 0.75rem; font-weight: 600; color: #666; margin-bottom: 0.25rem; text-transform: uppercase; }
+        .msg-time { font-size: 0.7rem; color: #999; }
+        .msg-tool { background: #f5f0ff; border: 1px solid #e0d8f0; font-family: monospace; font-size: 0.85rem; }
+        .msg-tool-result { background: #f0f5f0; border: 1px solid #d8e0d8; font-family: monospace; font-size: 0.85rem; }
+        .msg-thinking { background: #fffbe6; border: 1px solid #f0e8c0; font-style: italic; font-size: 0.85rem; }
+        .msg-error { background: #fff0f0; border: 1px solid #f0d0d0; }
+        pre { white-space: pre-wrap; word-break: break-word; margin: 0; font-size: 0.85rem; }
+        .filter-bar { display: flex; gap: 0.75rem; align-items: center; flex-wrap: wrap; margin-bottom: 1rem; }
+        label { font-size: 0.9rem; display: flex; align-items: center; gap: 0.3rem; }
+    </style>
+</head>
+<body>
+    <nav>
+        <a href="/" class="brand" hx-get="/" hx-target="#content" hx-push-url="true">Introspect</a>
+        <a href="/" hx-get="/" hx-target="#content" hx-push-url="true">Dashboard</a>
+        <a href="/sessions" hx-get="/sessions" hx-target="#content" hx-push-url="true">Sessions</a>
+        <a href="/search" hx-get="/search" hx-target="#content" hx-push-url="true">Search</a>
+        <a href="/tools" hx-get="/tools" hx-target="#content" hx-push-url="true">Tools</a>
+    </nav>
+    <div class="container" id="content">
+        {% block content %}{% endblock %}
+    </div>
+</body>
+</html>

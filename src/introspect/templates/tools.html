@@ -1,0 +1,67 @@
+{% extends "base.html" %}
+{% block title %}Tools - Introspect{% endblock %}
+{% block content %}
+<h1>Tool Calls</h1>
+
+<div class="card">
+    <form action="/tools" method="get" class="filter-bar">
+        <label>
+            <input type="checkbox" name="failed" value="true" {% if filter_failed %}checked{% endif %} />
+            Failed only
+        </label>
+        <select name="name" style="padding:0.4rem;border:1px solid #ccc;border-radius:4px;">
+            <option value="">All tools</option>
+            {% for tn in tool_names %}
+            <option value="{{ tn }}" {% if filter_name == tn %}selected{% endif %}>{{ tn }}</option>
+            {% endfor %}
+        </select>
+        <button type="submit">Filter</button>
+    </form>
+</div>
+
+{% if stats %}
+<div class="stat-grid">
+    <div class="stat-card">
+        <div class="value">{{ stats[0] }}</div>
+        <div class="label">Matching Calls</div>
+    </div>
+    <div class="stat-card">
+        <div class="value">{{ stats[1] }}</div>
+        <div class="label">Failed</div>
+    </div>
+</div>
+{% endif %}
+
+<div class="card">
+    <table>
+        <thead>
+            <tr>
+                <th>Session ID</th>
+                <th>Called At</th>
+                <th>Tool</th>
+                <th>Status</th>
+                <th>Input Preview</th>
+                <th>Exec Time</th>
+            </tr>
+        </thead>
+        <tbody>
+            {% for tc in tool_calls %}
+            <tr>
+                <td><a href="/sessions/{{ tc[0] }}" hx-get="/sessions/{{ tc[0] }}" hx-target="#content" hx-push-url="true"><span class="truncate">{{ tc[0][:12] }}...</span></a></td>
+                <td>{{ (tc[1]|string)[:19] }}</td>
+                <td>{{ tc[2] or '' }}</td>
+                <td>
+                    {% if tc[3] == 'true' %}
+                    <span class="badge badge-error">FAILED</span>
+                    {% else %}
+                    <span class="badge badge-ok">OK</span>
+                    {% endif %}
+                </td>
+                <td style="max-width:300px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;">{{ tc[4] or '' }}</td>
+                <td>{{ tc[5] or '' }}</td>
+            </tr>
+            {% endfor %}
+        </tbody>
+    </table>
+</div>
+{% endblock %}
