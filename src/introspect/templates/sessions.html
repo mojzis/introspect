@@ -7,27 +7,29 @@
     <table>
         <thead>
             <tr>
-                <th>Session ID</th>
-                <th>Started</th>
-                <th>Ended</th>
+                <th>Title</th>
+                <th>Date</th>
+                <th>Start</th>
+                <th>End</th>
                 <th>Duration</th>
-                <th>User Msgs</th>
-                <th>Asst Msgs</th>
+                <th>Msgs</th>
                 <th>Model</th>
-                <th>CWD</th>
+                <th>Project</th>
+                <th>Branch</th>
             </tr>
         </thead>
         <tbody>
             {% for s in sessions %}
             <tr>
-                <td><a href="/sessions/{{ s[0] }}" hx-get="/sessions/{{ s[0] }}" hx-target="#content" hx-push-url="true"><span class="truncate">{{ (s[0]|string)[:12] }}...</span></a></td>
-                <td>{{ (s[1]|string)[:19] }}</td>
-                <td>{{ (s[2]|string)[:19] }}</td>
-                <td>{{ s[3] or '' }}</td>
-                <td>{{ s[4] or 0 }}</td>
-                <td>{{ s[5] or 0 }}</td>
-                <td>{{ s[6] or '' }}</td>
-                <td><span class="truncate">{{ s[7] or '' }}</span></td>
+                <td><a href="/sessions/{{ s.id }}" hx-get="/sessions/{{ s.id }}" hx-target="#content" hx-push-url="true"><span class="truncate" style="max-width:350px;" title="{{ s.title }}">{{ s.title or '(no title)' }}</span></a></td>
+                <td style="white-space:nowrap;">{{ s.date }}</td>
+                <td style="white-space:nowrap;">{{ s.start_time }}</td>
+                <td style="white-space:nowrap;">{{ s.end_time }}</td>
+                <td style="white-space:nowrap;">{{ s.duration }}</td>
+                <td>{{ s.user_msgs }}/{{ s.asst_msgs }}</td>
+                <td>{{ s.model }}</td>
+                <td><span class="truncate">{{ s.project }}</span></td>
+                <td><span class="truncate">{{ s.branch }}</span></td>
             </tr>
             {% endfor %}
         </tbody>
