@@ -1,0 +1,55 @@
+{% extends "base.html" %}
+{% block title %}Session {{ session_id[:12] }} - Introspect{% endblock %}
+{% block content %}
+<h1>Session Detail</h1>
+
+{% if session %}
+<div class="card">
+    <table>
+        <tr><th>Session ID</th><td>{{ session[0] }}</td></tr>
+        <tr><th>Started</th><td>{{ (session[1]|string)[:19] }}</td></tr>
+        <tr><th>Ended</th><td>{{ (session[2]|string)[:19] }}</td></tr>
+        <tr><th>Duration</th><td>{{ session[3] or '' }}</td></tr>
+        <tr><th>User Messages</th><td>{{ session[4] or 0 }}</td></tr>
+        <tr><th>Assistant Messages</th><td>{{ session[5] or 0 }}</td></tr>
+        <tr><th>Model</th><td>{{ session[6] or '' }}</td></tr>
+        <tr><th>CWD</th><td>{{ session[7] or '' }}</td></tr>
+        <tr><th>Branch</th><td>{{ session[8] or '' }}</td></tr>
+    </table>
+</div>
+{% endif %}
+
+<h2>Messages ({{ messages|length }})</h2>
+
+{% for msg in messages %}
+<div class="msg {% if msg.role == 'user' %}msg-user{% else %}msg-assistant{% endif %}">
+    <div class="msg-role">{{ msg.role }} <span class="msg-time">{{ msg.timestamp }}</span></div>
+    {% for block in msg.content_blocks %}
+        {% if block.type == 'text' %}
+            <pre>{{ block.text }}</pre>
+        {% elif block.type == 'tool_use' %}
+            <div class="msg msg-tool" style="margin-top:0.25rem;">
+                <strong>Tool: {{ block.name }}</strong>
+                <pre>{{ block.input }}</pre>
+            </div>
+        {% elif block.type == 'tool_result' %}
+            <div class="msg {% if block.is_error %}msg-error{% else %}msg-tool-result{% endif %}" style="margin-top:0.25rem;">
+                <strong>Result{% if block.is_error %} (error){% endif %}</strong>
+                <pre>{{ block.content }}</pre>
+            </div>
+        {% elif block.type == 'thinking' %}
+            <div class="msg msg-thinking" style="margin-top:0.25rem;">
+                <strong>Thinking</strong>
+                <pre>{{ block.text }}</pre>
+            </div>
+        {% endif %}
+    {% endfor %}
+</div>
+{% endfor %}
+
+{% if not session %}
+<div class="card">
+    <p>Session not found: {{ session_id }}</p>
+</div>
+{% endif %}
+{% endblock %}
