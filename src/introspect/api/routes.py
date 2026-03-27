@@ -312,10 +312,11 @@ async def tools(
     failed: bool = Query(False),
     name: str = Query("", alias="name"),
 ):
-    """Tool call stats with filtering."""
+    """Tool call stats with filtering (non-MCP tools only)."""
     conn = _conn(request)
 
-    where_clauses = []
+    # Base filter: exclude MCP tools (they have their own page)
+    where_clauses = ["tool_name NOT LIKE 'mcp__%'"]
     params: list[str | int] = []
     if failed:
         where_clauses.append("is_error = 'true'")
@@ -323,31 +324,57 @@ async def tools(
         where_clauses.append("tool_name = ?")
         params.append(name.strip())
 
-    where = "WHERE " + " AND ".join(where_clauses) if where_clauses else ""
+    where = "WHERE " + " AND ".join(where_clauses)
 
     rows = conn.execute(
         f"""
         SELECT
-            session_id,
-            called_at,
-            tool_name,
-            is_error,
-            LEFT(tool_input, 200) AS input_preview,
-            execution_time
-        FROM tool_calls
+            tc.session_id,
+            tc.called_at,
+            tc.tool_name,
+            tc.is_error,
+            LEFT(tc.tool_input, 200) AS input_preview,
+            tc.execution_time,
+            fp.first_prompt
+        FROM tool_calls tc
+        LEFT JOIN (
+            SELECT session_id, first_prompt FROM (
+                SELECT
+                    session_id,
+                    COALESCE(
+                        json_extract_string(message, '$.content[0].text'),
+                        json_extract_string(message, '$.content')
+                    ) AS first_prompt,
+                    ROW_NUMBER() OVER (
+                        PARTITION BY session_id ORDER BY timestamp
+                    ) AS rn
+                FROM raw_messages
+                WHERE type = 'user' AND role = 'user'
+                  AND json_extract_string(
+                      message, '$.content[0].type'
+                  ) IS DISTINCT FROM 'tool_result'
+                  AND COALESCE(
+                      json_extract_string(message, '$.content[0].text'),
+                      json_extract_string(message, '$.content'),
+                      ''
+                  ) NOT LIKE '/clear%'
+            ) sub WHERE rn = 1
+        ) fp ON tc.session_id = fp.session_id
         {where}
-        ORDER BY called_at DESC
+        ORDER BY tc.called_at DESC
         LIMIT 100
     """,  # nosec B608
         params,
     ).fetchall()
 
-    # Get tool name list for filter dropdown
+    # Get tool names with counts for filter buttons (non-MCP only)
     tool_names = conn.execute("""
-        SELECT DISTINCT tool_name
+        SELECT tool_name, COUNT(*) AS cnt
         FROM tool_calls
         WHERE tool_name IS NOT NULL
-        ORDER BY tool_name
+          AND tool_name NOT LIKE 'mcp__%'
+        GROUP BY tool_name
+        ORDER BY cnt DESC
     """).fetchall()
 
     # Stats summary
@@ -368,7 +395,7 @@ async def tools(
         {
             "parent": _parent(request),
             "tool_calls": rows,
-            "tool_names": [t[0] for t in tool_names],
+            "tool_names": tool_names,
             "filter_failed": failed,
             "filter_name": name,
             "stats": stats,
@@ -469,6 +496,132 @@ async def raw_data(
             "filter_session": session,
             "filter_type": record_type,
             "record_types": [r[0] for r in record_types],
+        },
+    )
+
+
+@router.get("/mcps", response_class=HTMLResponse)
+async def mcps(
+    request: Request,
+    server: str = Query("", alias="server"),
+    command: str = Query("", alias="command"),
+    failed: bool = Query(False),
+):
+    """MCP tool analysis with server/command breakdown."""
+    conn = _conn(request)
+
+    # --- Server overview ---
+    mcp_servers = conn.execute("""
+        SELECT
+            split_part(tool_name, '__', 2) AS server_name,
+            COUNT(*) AS cnt,
+            COUNT(DISTINCT split_part(tool_name, '__', 3)) AS command_count,
+            COUNT(*) FILTER (WHERE is_error = 'true') AS failed_count
+        FROM tool_calls
+        WHERE tool_name LIKE 'mcp__%'
+        GROUP BY server_name
+        ORDER BY cnt DESC
+    """).fetchall()
+
+    # --- Commands for selected server (or all) ---
+    cmd_where = ["tool_name LIKE 'mcp__%'"]
+    mcp_params: list[str | int] = []
+    if server.strip():
+        cmd_where.append("split_part(tool_name, '__', 2) = ?")
+        mcp_params.append(server.strip())
+
+    mcp_commands = conn.execute(
+        f"""
+        SELECT
+            split_part(tool_name, '__', 2) AS server_name,
+            split_part(tool_name, '__', 3) AS command_name,
+            COUNT(*) AS cnt,
+            COUNT(*) FILTER (WHERE is_error = 'true') AS failed_count
+        FROM tool_calls
+        WHERE {" AND ".join(cmd_where)}
+        GROUP BY server_name, command_name
+        ORDER BY cnt DESC
+    """,  # nosec B608
+        mcp_params,
+    ).fetchall()
+
+    # --- Filtered call list ---
+    list_where = ["tool_name LIKE 'mcp__%'"]
+    list_params: list[str | int] = []
+    if server.strip():
+        list_where.append("split_part(tc.tool_name, '__', 2) = ?")
+        list_params.append(server.strip())
+    if command.strip():
+        list_where.append("split_part(tc.tool_name, '__', 3) = ?")
+        list_params.append(command.strip())
+    if failed:
+        list_where.append("tc.is_error = 'true'")
+
+    rows = conn.execute(
+        f"""
+        SELECT
+            tc.session_id,
+            tc.called_at,
+            split_part(tc.tool_name, '__', 2) AS server_name,
+            split_part(tc.tool_name, '__', 3) AS command_name,
+            tc.is_error,
+            LEFT(tc.tool_input, 200) AS input_preview,
+            tc.execution_time,
+            fp.first_prompt
+        FROM tool_calls tc
+        LEFT JOIN (
+            SELECT session_id, first_prompt FROM (
+                SELECT
+                    session_id,
+                    COALESCE(
+                        json_extract_string(message, '$.content[0].text'),
+                        json_extract_string(message, '$.content')
+                    ) AS first_prompt,
+                    ROW_NUMBER() OVER (
+                        PARTITION BY session_id ORDER BY timestamp
+                    ) AS rn
+                FROM raw_messages
+                WHERE type = 'user' AND role = 'user'
+                  AND json_extract_string(
+                      message, '$.content[0].type'
+                  ) IS DISTINCT FROM 'tool_result'
+                  AND COALESCE(
+                      json_extract_string(message, '$.content[0].text'),
+                      json_extract_string(message, '$.content'),
+                      ''
+                  ) NOT LIKE '/clear%'
+            ) sub WHERE rn = 1
+        ) fp ON tc.session_id = fp.session_id
+        WHERE {" AND ".join(list_where)}
+        ORDER BY tc.called_at DESC
+        LIMIT 100
+    """,  # nosec B608
+        list_params,
+    ).fetchall()
+
+    mcp_stats = conn.execute(
+        f"""
+        SELECT
+            COUNT(*) AS total,
+            COUNT(*) FILTER (WHERE is_error = 'true') AS failed_total
+        FROM tool_calls tc
+        WHERE {" AND ".join(list_where)}
+    """,  # nosec B608
+        list_params,
+    ).fetchone()
+
+    return templates.TemplateResponse(
+        request,
+        "mcps.html",
+        {
+            "parent": _parent(request),
+            "mcp_servers": mcp_servers,
+            "mcp_commands": mcp_commands,
+            "tool_calls": rows,
+            "filter_server": server,
+            "filter_command": command,
+            "filter_failed": failed,
+            "stats": mcp_stats,
         },
     )
 
