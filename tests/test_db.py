@@ -151,7 +151,7 @@ def test_raw_messages():
         conn = get_connection(db_path, glob_pattern)
 
         rows = conn.execute("SELECT * FROM raw_messages").fetchall()
-        assert len(rows) == 4  # noqa: PLR2004
+        assert len(rows) == 4
 
         # Check session_id is consistent
         session_ids = {r[3] for r in rows}
@@ -177,7 +177,7 @@ def test_logical_sessions():
         #   user_msgs, asst_msgs, model, cwd, git_branch, entrypoint
         assert session[0] == "test-session-001"
         assert session[4] == 1  # user_messages (not tool result)
-        assert session[5] == 2  # noqa: PLR2004
+        assert session[5] == 2
         conn.close()
 
 
