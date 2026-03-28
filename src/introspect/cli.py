@@ -215,13 +215,12 @@ def raw(
     conn = _db()
     try:
         where = ""
-        params: list[str | int] = []
+        params: list[str] = []
         if session:
-            where = "WHERE sessionId LIKE ?"
+            where = "WHERE CAST(sessionId AS VARCHAR) LIKE ?"
             params.append(f"{session}%")
-        params.append(limit)
         result = conn.execute(
-            f"SELECT * FROM raw_data {where} LIMIT ?",  # nosec B608
+            f"SELECT * FROM raw_data {where} LIMIT {limit}",  # nosec B608
             params,
         )
         columns = [desc[0] for desc in result.description]

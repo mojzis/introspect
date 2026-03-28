@@ -15,3 +15,4 @@ uv, ruff (lint/format), ty (type check), pytest, poethepoet (task runner)
 
 - ty is in beta — may produce false positives. Prefer `# ty: ignore[rule]` over blanket suppression.
 - Pre-commit hook auto-fixes and restages files. Only blocks on unfixable issues.
+- **IMPORTANT**: After completing any task, you MUST run the `/python-review` skill to review all changes. Apply all 🔴 Must Fix and 🟡 Should Fix findings before marking work as complete.
