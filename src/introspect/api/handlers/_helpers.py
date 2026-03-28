@@ -101,10 +101,38 @@ TOOL_COUNTS_SUBQUERY = """(
     FROM tool_calls GROUP BY session_id
 ) tc"""
 
-COMMAND_LIST_SUBQUERY = """(
-    SELECT session_id, string_agg(DISTINCT command, ', ' ORDER BY command) AS commands
-    FROM message_commands GROUP BY session_id
-) cmd"""
+# Built-in / meta commands that don't reflect real work — hidden from the UI.
+OBVIOUS_COMMANDS: frozenset[str] = frozenset(
+    {
+        "/clear",
+        "/compact",
+        "/config",
+        "/cost",
+        "/doctor",
+        "/exit",
+        "/fast",
+        "/help",
+        "/init",
+        "/listen",
+        "/login",
+        "/logout",
+        "/model",
+        "/quit",
+        "/status",
+        "/terminal-setup",
+        "/vim",
+    }
+)
+
+OBVIOUS_COMMANDS_SQL = "(" + ", ".join(f"'{c}'" for c in sorted(OBVIOUS_COMMANDS)) + ")"
+
+COMMAND_LIST_SUBQUERY = (
+    "(SELECT session_id,"  # nosec B608
+    " string_agg(DISTINCT command, ', ' ORDER BY command) AS commands"
+    " FROM message_commands"
+    f" WHERE command NOT IN {OBVIOUS_COMMANDS_SQL}"
+    " GROUP BY session_id) cmd"
+)
 
 TOOL_COUNTS_WITH_ERRORS_SUBQUERY = """(
     SELECT session_id,
