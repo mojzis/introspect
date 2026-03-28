@@ -5,9 +5,7 @@ import math
 from fastapi import Request
 from fastapi.responses import HTMLResponse
 
-from ._helpers import conn, parent, templates
-
-MCPS_PAGE_SIZE = 50
+from ._helpers import DEFAULT_PAGE_SIZE, conn, parent, templates
 
 
 async def mcps(
@@ -80,8 +78,8 @@ async def mcps(
         list_params,
     ).fetchone()
 
-    total_pages = max(1, math.ceil(mcp_stats[0] / MCPS_PAGE_SIZE))
-    offset = (page - 1) * MCPS_PAGE_SIZE
+    total_pages = max(1, math.ceil(mcp_stats[0] / DEFAULT_PAGE_SIZE))
+    offset = (page - 1) * DEFAULT_PAGE_SIZE
 
     rows = db.execute(
         f"""
@@ -100,7 +98,7 @@ async def mcps(
         ORDER BY tc.called_at DESC
         LIMIT ? OFFSET ?
     """,  # nosec B608
-        [*list_params, MCPS_PAGE_SIZE, offset],
+        [*list_params, DEFAULT_PAGE_SIZE, offset],
     ).fetchall()
 
     return templates.TemplateResponse(

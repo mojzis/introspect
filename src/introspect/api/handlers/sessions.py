@@ -11,8 +11,10 @@ from ._helpers import (
     SESSIONS_PER_PAGE_DEFAULT,
     SESSIONS_SORT_COLS,
     SESSIONS_SORT_DEFAULT,
+    TOOL_COUNTS_SUBQUERY,
     clean_title,
     conn,
+    fetch_token_usage,
     parent,
     parse_content_block,
     templates,
@@ -81,11 +83,7 @@ async def sessions(  # noqa: PLR0913
             COALESCE(tc.tool_count, 0) AS tool_count
         FROM logical_sessions ls
         LEFT JOIN session_titles fp ON ls.session_id = fp.session_id
-        LEFT JOIN (
-            SELECT session_id, COUNT(*) AS tool_count
-            FROM tool_calls
-            GROUP BY session_id
-        ) tc ON ls.session_id = tc.session_id
+        LEFT JOIN {TOOL_COUNTS_SUBQUERY} ON ls.session_id = tc.session_id
         {where}
         ORDER BY {sort_col} {sort_dir} {nulls}
         LIMIT ? OFFSET ?
@@ -185,27 +183,7 @@ async def session_detail(request: Request, session_id: str) -> HTMLResponse:
         [session_id],
     ).fetchone()
 
-    # Token usage for this session
-    try:
-        token_usage = db.execute(
-            """
-            SELECT
-                SUM(CAST(json_extract(message, '$.usage.input_tokens') AS BIGINT)),
-                SUM(CAST(json_extract(message, '$.usage.output_tokens') AS BIGINT)),
-                SUM(CAST(json_extract(
-                    message, '$.usage.cache_creation_input_tokens'
-                ) AS BIGINT)),
-                SUM(CAST(json_extract(
-                    message, '$.usage.cache_read_input_tokens'
-                ) AS BIGINT))
-            FROM raw_messages
-            WHERE session_id = ? AND type = 'assistant'
-              AND json_extract(message, '$.usage.input_tokens') IS NOT NULL
-        """,
-            [session_id],
-        ).fetchone()
-    except Exception:
-        token_usage = None
+    token_usage = fetch_token_usage(db, session_id=session_id, include_cache=True)
 
     # Tool call summary
     tool_summary = db.execute(

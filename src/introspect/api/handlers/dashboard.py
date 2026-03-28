@@ -3,62 +3,55 @@
 from fastapi import Request
 from fastapi.responses import HTMLResponse
 
-from ._helpers import clean_title, conn, parent, templates
+from ._helpers import (
+    clean_title,
+    conn,
+    fetch_token_usage,
+    format_duration,
+    parent,
+    templates,
+)
 
 
 async def dashboard(request: Request) -> HTMLResponse:
     """Dashboard with session count, recent sessions, and quick stats."""
     db = conn(request)
 
-    session_count = db.execute("SELECT COUNT(*) FROM logical_sessions").fetchone()[0]
-    tool_count = db.execute("SELECT COUNT(*) FROM tool_calls").fetchone()[0]
-    failed_count = db.execute(
-        "SELECT COUNT(*) FROM tool_calls WHERE is_error = 'true'"
-    ).fetchone()[0]
+    # Single scan of logical_sessions for all summary metrics
+    summary = db.execute("""
+        SELECT
+            COUNT(*),
+            COUNT(DISTINCT split_part(rtrim(cwd, '/'), '/', -1))
+                FILTER (WHERE cwd IS NOT NULL),
+            AVG(EXTRACT(EPOCH FROM duration))
+                FILTER (WHERE duration IS NOT NULL),
+            COUNT(*) FILTER (
+                WHERE CAST(started_at AS DATE) = CURRENT_DATE
+            ),
+            COUNT(*) FILTER (
+                WHERE started_at >= date_trunc('week', CURRENT_DATE)
+            )
+        FROM logical_sessions
+    """).fetchone()
+    session_count = summary[0]
+    project_count = summary[1] or 0
+    avg_duration_str = format_duration(summary[2] or 0)
+    activity_today = summary[3] or 0
+    activity_week = summary[4] or 0
+
+    # Single scan of tool_calls for counts
+    tool_stats = db.execute("""
+        SELECT COUNT(*), COUNT(*) FILTER (WHERE is_error = 'true')
+        FROM tool_calls
+    """).fetchone()
+    tool_count = tool_stats[0]
+    failed_count = tool_stats[1]
 
     success_rate = (
         round(100 * (1 - failed_count / tool_count), 1) if tool_count > 0 else 100.0
     )
 
-    # Token usage (best effort)
-    try:
-        token_usage = db.execute("""
-            SELECT
-                SUM(CAST(json_extract(message, '$.usage.input_tokens') AS BIGINT)),
-                SUM(CAST(json_extract(message, '$.usage.output_tokens') AS BIGINT))
-            FROM raw_messages
-            WHERE type = 'assistant'
-              AND json_extract(message, '$.usage.input_tokens') IS NOT NULL
-        """).fetchone()
-    except Exception:
-        token_usage = None
-
-    # Active projects and avg duration
-    extras = db.execute("""
-        SELECT
-            COUNT(DISTINCT split_part(rtrim(cwd, '/'), '/', -1))
-                FILTER (WHERE cwd IS NOT NULL),
-            AVG(EXTRACT(EPOCH FROM duration))
-                FILTER (WHERE duration IS NOT NULL)
-        FROM logical_sessions
-    """).fetchone()
-    project_count = extras[0] or 0
-    avg_secs = extras[1] or 0
-    avg_duration_str = f"{int(avg_secs) // 60}:{int(avg_secs) % 60:02d}"
-
-    # Today / this week activity
-    activity = db.execute("""
-        SELECT
-            COUNT(*) FILTER (
-                WHERE CAST(started_at AS DATE) = CURRENT_DATE
-            ) AS today,
-            COUNT(*) FILTER (
-                WHERE started_at >= date_trunc('week', CURRENT_DATE)
-            ) AS this_week
-        FROM logical_sessions
-    """).fetchone()
-    activity_today = activity[0] or 0
-    activity_week = activity[1] or 0
+    token_usage = fetch_token_usage(db)
 
     # Recent sessions with titles
     recent_sessions = db.execute("""

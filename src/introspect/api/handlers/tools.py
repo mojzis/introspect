@@ -5,9 +5,7 @@ import math
 from fastapi import Request
 from fastapi.responses import HTMLResponse
 
-from ._helpers import conn, parent, templates
-
-TOOLS_PAGE_SIZE = 50
+from ._helpers import DEFAULT_PAGE_SIZE, conn, parent, templates
 
 
 async def tools(
@@ -39,8 +37,8 @@ async def tools(
         params,
     ).fetchone()
 
-    total_pages = max(1, math.ceil(stats[0] / TOOLS_PAGE_SIZE))
-    offset = (page - 1) * TOOLS_PAGE_SIZE
+    total_pages = max(1, math.ceil(stats[0] / DEFAULT_PAGE_SIZE))
+    offset = (page - 1) * DEFAULT_PAGE_SIZE
 
     rows = db.execute(
         f"""
@@ -58,7 +56,7 @@ async def tools(
         ORDER BY tc.called_at DESC
         LIMIT ? OFFSET ?
     """,  # nosec B608
-        [*params, TOOLS_PAGE_SIZE, offset],
+        [*params, DEFAULT_PAGE_SIZE, offset],
     ).fetchall()
 
     # Get tool names with counts and success rate for filter buttons (non-MCP only)

@@ -5,9 +5,7 @@ from fastapi.responses import HTMLResponse
 
 from introspect.search import ensure_search_corpus, fts_search
 
-from ._helpers import conn, parent, templates
-
-SEARCH_PAGE_SIZE = 50
+from ._helpers import DEFAULT_PAGE_SIZE, conn, parent, templates
 
 
 async def search(request: Request, q: str, page: int = 1) -> HTMLResponse:
@@ -18,12 +16,12 @@ async def search(request: Request, q: str, page: int = 1) -> HTMLResponse:
 
     if q.strip():
         ensure_search_corpus(db)
-        offset = (page - 1) * SEARCH_PAGE_SIZE
+        offset = (page - 1) * DEFAULT_PAGE_SIZE
         # Fetch one extra to detect next page
-        results = fts_search(db, q, SEARCH_PAGE_SIZE + 1, offset)
-        if len(results) > SEARCH_PAGE_SIZE:
+        results = fts_search(db, q, DEFAULT_PAGE_SIZE + 1, offset)
+        if len(results) > DEFAULT_PAGE_SIZE:
             has_next = True
-            results = results[:SEARCH_PAGE_SIZE]
+            results = results[:DEFAULT_PAGE_SIZE]
 
     return templates.TemplateResponse(
         request,
