@@ -8,7 +8,6 @@ import duckdb
 from fastapi import FastAPI, Request
 from fastapi.responses import HTMLResponse
 from fastapi.templating import Jinja2Templates
-from starlette.routing import Mount
 
 from introspect.api.routes import router
 from introspect.db import DEFAULT_DB_PATH, DEFAULT_JSONL_GLOB, materialize_views
@@ -37,9 +36,9 @@ async def lifespan(app: FastAPI):
     # Create a fresh MCP server and replace the placeholder mount
     mcp_server = create_mcp_server()
     mcp_app = mcp_server.streamable_http_app()
-    for i, route in enumerate(app.routes):
-        if isinstance(route, Mount) and route.path == "/mcp":
-            app.routes[i] = Mount("/mcp", app=mcp_app)
+    for route in app.routes:
+        if getattr(route, "path", None) == "/mcp":
+            route.app = mcp_app  # ty: ignore[unresolved-attribute]
             break
     # Rebuild middleware stack to pick up the new mount
     app.middleware_stack = app.build_middleware_stack()
