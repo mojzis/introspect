@@ -1,9 +1,11 @@
 """MCP tools route handler."""
 
+import math
+
 from fastapi import Request
 from fastapi.responses import HTMLResponse
 
-from ._helpers import conn, parent, templates
+from ._helpers import DEFAULT_PAGE_SIZE, conn, parent, templates
 
 
 async def mcps(
@@ -11,6 +13,7 @@ async def mcps(
     server: str,
     command: str,
     failed: bool,
+    page: int = 1,
 ) -> HTMLResponse:
     """MCP tool analysis with server/command breakdown."""
     db = conn(request)
@@ -64,6 +67,20 @@ async def mcps(
     if failed:
         list_where.append("tc.is_error = 'true'")
 
+    mcp_stats = db.execute(
+        f"""
+        SELECT
+            COUNT(*) AS total,
+            COUNT(*) FILTER (WHERE is_error = 'true') AS failed_total
+        FROM tool_calls tc
+        WHERE {" AND ".join(list_where)}
+    """,  # nosec B608
+        list_params,
+    ).fetchone()
+
+    total_pages = max(1, math.ceil(mcp_stats[0] / DEFAULT_PAGE_SIZE))
+    offset = (page - 1) * DEFAULT_PAGE_SIZE
+
     rows = db.execute(
         f"""
         SELECT
@@ -79,21 +96,10 @@ async def mcps(
         LEFT JOIN session_titles fp ON tc.session_id = fp.session_id
         WHERE {" AND ".join(list_where)}
         ORDER BY tc.called_at DESC
-        LIMIT 100
+        LIMIT ? OFFSET ?
     """,  # nosec B608
-        list_params,
+        [*list_params, DEFAULT_PAGE_SIZE, offset],
     ).fetchall()
-
-    mcp_stats = db.execute(
-        f"""
-        SELECT
-            COUNT(*) AS total,
-            COUNT(*) FILTER (WHERE is_error = 'true') AS failed_total
-        FROM tool_calls tc
-        WHERE {" AND ".join(list_where)}
-    """,  # nosec B608
-        list_params,
-    ).fetchone()
 
     return templates.TemplateResponse(
         request,
@@ -107,5 +113,7 @@ async def mcps(
             "filter_command": command,
             "filter_failed": failed,
             "stats": mcp_stats,
+            "page": page,
+            "total_pages": total_pages,
         },
     )

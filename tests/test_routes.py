@@ -372,3 +372,190 @@ def test_sessions_filter_by_branch():
     with tempfile.TemporaryDirectory() as tmp, _patched_client(Path(tmp)) as client:
         response = client.get("/sessions?branch=main")
         assert response.status_code == 200
+
+
+# --- Dashboard enrichment tests ---
+
+
+def test_dashboard_shows_success_rate():
+    """Dashboard displays tool success rate percentage."""
+    with tempfile.TemporaryDirectory() as tmp, _patched_client(Path(tmp)) as client:
+        response = client.get("/")
+        assert response.status_code == 200
+        assert "Success Rate" in response.text
+
+
+def test_dashboard_shows_project_count():
+    """Dashboard displays active project count."""
+    with tempfile.TemporaryDirectory() as tmp, _patched_client(Path(tmp)) as client:
+        response = client.get("/")
+        assert response.status_code == 200
+        assert "Projects" in response.text
+
+
+def test_dashboard_shows_avg_duration():
+    """Dashboard displays average session duration."""
+    with tempfile.TemporaryDirectory() as tmp, _patched_client(Path(tmp)) as client:
+        response = client.get("/")
+        assert response.status_code == 200
+        assert "Avg Duration" in response.text
+
+
+def test_dashboard_shows_activity():
+    """Dashboard displays today/this week activity counts."""
+    with tempfile.TemporaryDirectory() as tmp, _patched_client(Path(tmp)) as client:
+        response = client.get("/")
+        assert response.status_code == 200
+        assert "This week:" in response.text
+
+
+def test_dashboard_shows_session_titles():
+    """Dashboard recent sessions show titles instead of just UUIDs."""
+    with tempfile.TemporaryDirectory() as tmp, _patched_client(Path(tmp)) as client:
+        response = client.get("/")
+        assert response.status_code == 200
+        assert "Hello, help me with tests" in response.text
+
+
+# --- Sessions tool count column tests ---
+
+
+def test_sessions_shows_tools_column():
+    """Sessions page has a sortable Tools column."""
+    with tempfile.TemporaryDirectory() as tmp, _patched_client(Path(tmp)) as client:
+        response = client.get("/sessions")
+        assert response.status_code == 200
+        assert "tool_calls" in response.text  # sort link param
+
+
+def test_sessions_sort_by_tool_calls():
+    """Sessions page can sort by tool call count."""
+    with tempfile.TemporaryDirectory() as tmp, _patched_client(Path(tmp)) as client:
+        response = client.get("/sessions?sort=tool_calls&order=desc")
+        assert response.status_code == 200
+
+
+# --- Session detail enrichment tests ---
+
+
+def test_session_detail_shows_token_usage():
+    """Session detail shows token usage stats."""
+    with tempfile.TemporaryDirectory() as tmp, _patched_client(Path(tmp)) as client:
+        response = client.get(f"/sessions/{SID}")
+        assert response.status_code == 200
+        assert "Input Tokens" in response.text
+
+
+def test_session_detail_shows_tool_summary():
+    """Session detail shows tool call summary line."""
+    with tempfile.TemporaryDirectory() as tmp, _patched_client(Path(tmp)) as client:
+        response = client.get(f"/sessions/{SID}")
+        assert response.status_code == 200
+        assert "tool call" in response.text
+
+
+def test_session_detail_expandable_blocks():
+    """Session detail renders tool use blocks with expand support."""
+    with tempfile.TemporaryDirectory() as tmp, _patched_client(Path(tmp)) as client:
+        response = client.get(f"/sessions/{SID}")
+        assert response.status_code == 200
+        # Tool use blocks are rendered (Bash tool call in test data)
+        assert "Bash" in response.text
+
+
+# --- Stats enrichment tests ---
+
+
+def test_stats_shows_avg_duration():
+    """Stats page shows average session duration."""
+    with tempfile.TemporaryDirectory() as tmp, _patched_client(Path(tmp)) as client:
+        response = client.get("/stats")
+        assert response.status_code == 200
+        assert "Avg Duration" in response.text
+
+
+def test_stats_shows_avg_tools_per_session():
+    """Stats page shows average tool calls per session."""
+    with tempfile.TemporaryDirectory() as tmp, _patched_client(Path(tmp)) as client:
+        response = client.get("/stats")
+        assert response.status_code == 200
+        assert "Avg Tools/Session" in response.text
+
+
+def test_stats_shows_distribution_bars():
+    """Stats page renders visual bar charts in distribution tables."""
+    with tempfile.TemporaryDirectory() as tmp, _patched_client(Path(tmp)) as client:
+        response = client.get("/stats")
+        assert response.status_code == 200
+        assert "background:#3b5bdb" in response.text
+
+
+def test_stats_shows_model_breakdown():
+    """Stats page shows per-model breakdown table."""
+    with tempfile.TemporaryDirectory() as tmp, _patched_client(Path(tmp)) as client:
+        response = client.get("/stats")
+        assert response.status_code == 200
+        assert "Per-Model Breakdown" in response.text
+        assert "claude-opus-4-6" in response.text
+
+
+# --- Search pagination tests ---
+
+
+def test_search_pagination_next():
+    """Search page shows page number."""
+    with tempfile.TemporaryDirectory() as tmp, _patched_client(Path(tmp)) as client:
+        response = client.get("/search?q=help&page=1")
+        assert response.status_code == 200
+        assert "Page 1" in response.text
+
+
+def test_search_pagination_param():
+    """Search page accepts page parameter."""
+    with tempfile.TemporaryDirectory() as tmp, _patched_client(Path(tmp)) as client:
+        response = client.get("/search?q=help&page=2")
+        assert response.status_code == 200
+
+
+# --- Tools pagination and success rate tests ---
+
+
+def test_tools_pagination():
+    """Tools page supports pagination."""
+    with tempfile.TemporaryDirectory() as tmp, _patched_client(Path(tmp)) as client:
+        response = client.get("/tools?page=1")
+        assert response.status_code == 200
+        assert "Page 1" in response.text
+
+
+def test_tools_shows_success_rate():
+    """Tools page shows success rate percentage in filter buttons."""
+    with tempfile.TemporaryDirectory() as tmp, _patched_client(Path(tmp)) as client:
+        response = client.get("/tools")
+        assert response.status_code == 200
+        assert "100%" in response.text  # our test tool call succeeds
+
+
+def test_tools_filter_with_pagination():
+    """Tools page preserves filters across pagination."""
+    with tempfile.TemporaryDirectory() as tmp, _patched_client(Path(tmp)) as client:
+        response = client.get("/tools?name=Bash&page=1")
+        assert response.status_code == 200
+
+
+# --- MCPs pagination tests ---
+
+
+def test_mcps_pagination():
+    """MCPs page supports pagination."""
+    with tempfile.TemporaryDirectory() as tmp, _patched_client(Path(tmp)) as client:
+        response = client.get("/mcps?page=1")
+        assert response.status_code == 200
+        assert "Page 1" in response.text
+
+
+def test_mcps_filter_with_pagination():
+    """MCPs page preserves filters across pagination."""
+    with tempfile.TemporaryDirectory() as tmp, _patched_client(Path(tmp)) as client:
+        response = client.get("/mcps?server=github&page=1")
+        assert response.status_code == 200

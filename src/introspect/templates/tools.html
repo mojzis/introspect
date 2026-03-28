@@ -1,28 +1,34 @@
 {% extends parent %}
 {% block title %}Tools - Introspect{% endblock %}
+
+{% macro tool_qs(name='', failed=filter_failed, page=1) -%}
+{% if name %}name={{ name }}&{% endif %}{% if failed %}failed=true&{% endif %}page={{ page }}
+{%- endmacro %}
+
 {% block content %}
 <h1>Tool Calls</h1>
 
 <div class="card">
     <div class="filter-bar" style="flex-wrap:wrap;">
-        <a href="/tools{% if filter_failed %}?failed=true{% endif %}"
-           hx-get="/tools{% if filter_failed %}?failed=true{% endif %}"
+        <a href="/tools?{{ tool_qs() }}"
+           hx-get="/tools?{{ tool_qs() }}"
            hx-target="#content" hx-push-url="true"
            class="tool-btn{% if not filter_name %} tool-btn-active{% endif %}">
             All
         </a>
-        {% for tn, cnt in tool_names %}
-        <a href="/tools?name={{ tn }}{% if filter_failed %}&failed=true{% endif %}"
-           hx-get="/tools?name={{ tn }}{% if filter_failed %}&failed=true{% endif %}"
+        {% for tn in tool_names %}
+        <a href="/tools?{{ tool_qs(name=tn[0]) }}"
+           hx-get="/tools?{{ tool_qs(name=tn[0]) }}"
            hx-target="#content" hx-push-url="true"
-           class="tool-btn{% if filter_name == tn %} tool-btn-active{% endif %}">
-            {{ tn }} <span class="tool-btn-count">{{ cnt }}</span>
+           class="tool-btn{% if filter_name == tn[0] %} tool-btn-active{% endif %}">
+            {{ tn[0] }} <span class="tool-btn-count">{{ tn[1] }}</span>
+            <span class="tool-btn-count" style="background:#e0ffe0;color:#080;">{{ '%.0f'|format(tn[2]) }}%</span>
         </a>
         {% endfor %}
     </div>
     <div class="filter-bar" style="margin-top:0.5rem;">
-        <a href="/tools{% if filter_name %}?name={{ filter_name }}{% endif %}{% if not filter_failed %}{{ '&' if filter_name else '?' }}failed=true{% endif %}"
-           hx-get="/tools{% if filter_name %}?name={{ filter_name }}{% endif %}{% if not filter_failed %}{{ '&' if filter_name else '?' }}failed=true{% endif %}"
+        <a href="/tools?{{ tool_qs(name=filter_name, failed=not filter_failed) }}"
+           hx-get="/tools?{{ tool_qs(name=filter_name, failed=not filter_failed) }}"
            hx-target="#content" hx-push-url="true"
            class="tool-btn tool-btn-sm{% if filter_failed %} tool-btn-active{% endif %}">
             {% if filter_failed %}Show all{% else %}Failed only{% endif %}
@@ -74,5 +80,15 @@
             {% endfor %}
         </tbody>
     </table>
+</div>
+
+<div class="pagination">
+    {% if page > 1 %}
+    <a href="/tools?{{ tool_qs(name=filter_name, page=page - 1) }}" hx-get="/tools?{{ tool_qs(name=filter_name, page=page - 1) }}" hx-target="#content" hx-push-url="true">Prev</a>
+    {% endif %}
+    <span class="current">Page {{ page }} of {{ total_pages }}</span>
+    {% if page < total_pages %}
+    <a href="/tools?{{ tool_qs(name=filter_name, page=page + 1) }}" hx-get="/tools?{{ tool_qs(name=filter_name, page=page + 1) }}" hx-target="#content" hx-push-url="true">Next</a>
+    {% endif %}
 </div>
 {% endblock %}

@@ -11,8 +11,10 @@ from ._helpers import (
     SESSIONS_PER_PAGE_DEFAULT,
     SESSIONS_SORT_COLS,
     SESSIONS_SORT_DEFAULT,
+    TOOL_COUNTS_SUBQUERY,
     clean_title,
     conn,
+    fetch_token_usage,
     parent,
     parse_content_block,
     templates,
@@ -77,9 +79,11 @@ async def sessions(  # noqa: PLR0913
             ls.model,
             ls.cwd,
             ls.git_branch,
-            fp.first_prompt
+            fp.first_prompt,
+            COALESCE(tc.tool_count, 0) AS tool_count
         FROM logical_sessions ls
         LEFT JOIN session_titles fp ON ls.session_id = fp.session_id
+        LEFT JOIN {TOOL_COUNTS_SUBQUERY} ON ls.session_id = tc.session_id
         {where}
         ORDER BY {sort_col} {sort_dir} {nulls}
         LIMIT ? OFFSET ?
@@ -100,6 +104,7 @@ async def sessions(  # noqa: PLR0913
             cwd,
             git_branch,
             first_prompt,
+            tool_count,
         ) = row
         dur_str = ""
         if duration:
@@ -121,6 +126,7 @@ async def sessions(  # noqa: PLR0913
                 "project": proj,
                 "branch": git_branch or "",
                 "title": clean_title(first_prompt or "")[:120],
+                "tool_count": tool_count or 0,
             }
         )
 
@@ -177,6 +183,21 @@ async def session_detail(request: Request, session_id: str) -> HTMLResponse:
         [session_id],
     ).fetchone()
 
+    token_usage = fetch_token_usage(db, session_id=session_id, include_cache=True)
+
+    # Tool call summary
+    tool_summary = db.execute(
+        """
+        SELECT
+            COUNT(*) AS total_calls,
+            COUNT(*) FILTER (WHERE is_error = 'true') AS failed_calls,
+            MODE(tool_name) AS most_used_tool
+        FROM tool_calls
+        WHERE session_id = ?
+    """,
+        [session_id],
+    ).fetchone()
+
     messages = db.execute(
         """
         SELECT timestamp, type, role, message, uuid
@@ -226,5 +247,7 @@ async def session_detail(request: Request, session_id: str) -> HTMLResponse:
             "session": session_info,
             "session_id": session_id,
             "messages": parsed_messages,
+            "token_usage": token_usage,
+            "tool_summary": tool_summary,
         },
     )

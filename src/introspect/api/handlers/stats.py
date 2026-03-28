@@ -1,11 +1,17 @@
 """Stats route handler."""
 
-import logging
-
 from fastapi import Request
 from fastapi.responses import HTMLResponse
 
-from ._helpers import conn, parent, templates
+from ._helpers import (
+    TOOL_COUNTS_SUBQUERY,
+    TOOL_COUNTS_WITH_ERRORS_SUBQUERY,
+    conn,
+    fetch_token_usage,
+    format_duration,
+    parent,
+    templates,
+)
 
 
 async def stats(request: Request) -> HTMLResponse:
@@ -188,7 +194,7 @@ async def stats(request: Request) -> HTMLResponse:
     """).fetchone()
 
     # Longest sessions top 15 with all metrics
-    longest_sessions = db.execute("""
+    longest_sessions = db.execute(f"""
         SELECT
             ls.session_id, ls.started_at, ls.duration, ls.model,
             ls.user_messages, ls.assistant_messages,
@@ -196,20 +202,14 @@ async def stats(request: Request) -> HTMLResponse:
             COALESCE(tc.tool_count, 0) AS tool_count,
             COALESCE(tc.failed_count, 0) AS failed_count
         FROM logical_sessions ls
-        LEFT JOIN (
-            SELECT
-                session_id,
-                COUNT(*) AS tool_count,
-                COUNT(*) FILTER (WHERE is_error = 'true') AS failed_count
-            FROM tool_calls
-            GROUP BY session_id
-        ) tc ON ls.session_id = tc.session_id
+        LEFT JOIN {TOOL_COUNTS_WITH_ERRORS_SUBQUERY}
+            ON ls.session_id = tc.session_id
         ORDER BY ls.duration DESC
         LIMIT 15
-    """).fetchall()
+    """).fetchall()  # nosec B608
 
     # Most tool calls sessions top 15 with all metrics
-    most_tools_sessions = db.execute("""
+    most_tools_sessions = db.execute(f"""
         SELECT
             ls.session_id,
             COALESCE(tc.tool_count, 0) AS tool_count,
@@ -218,17 +218,11 @@ async def stats(request: Request) -> HTMLResponse:
             ls.user_messages, ls.assistant_messages,
             (ls.user_messages + ls.assistant_messages) AS total_turns
         FROM logical_sessions ls
-        LEFT JOIN (
-            SELECT
-                session_id,
-                COUNT(*) AS tool_count,
-                COUNT(*) FILTER (WHERE is_error = 'true') AS failed_count
-            FROM tool_calls
-            GROUP BY session_id
-        ) tc ON ls.session_id = tc.session_id
+        LEFT JOIN {TOOL_COUNTS_WITH_ERRORS_SUBQUERY}
+            ON ls.session_id = tc.session_id
         ORDER BY tc.tool_count DESC NULLS LAST
         LIMIT 15
-    """).fetchall()
+    """).fetchall()  # nosec B608
 
     # Sessions per day
     sessions_per_day = db.execute("""
@@ -241,19 +235,41 @@ async def stats(request: Request) -> HTMLResponse:
         LIMIT 30
     """).fetchall()
 
-    # Token usage summary (best effort)
-    try:
-        token_usage = db.execute("""
-            SELECT
-                SUM(CAST(json_extract(message, '$.usage.input_tokens') AS BIGINT)),
-                SUM(CAST(json_extract(message, '$.usage.output_tokens') AS BIGINT))
-            FROM raw_messages
-            WHERE type = 'assistant'
-              AND json_extract(message, '$.usage.input_tokens') IS NOT NULL
-        """).fetchone()
-    except Exception:
-        logging.getLogger(__name__).debug("token usage query failed", exc_info=True)
-        token_usage = None
+    token_usage = fetch_token_usage(db)
+
+    # Fetch with cache columns: (input, output, cache_creation, cache_read)
+    cache_usage = fetch_token_usage(db, include_cache=True)
+    cache_tokens = (cache_usage[2], cache_usage[3]) if cache_usage else None
+
+    # Per-model breakdown
+    model_breakdown = db.execute(f"""
+        SELECT
+            ls.model,
+            COUNT(*) AS session_count,
+            AVG(EXTRACT(EPOCH FROM ls.duration)) AS avg_duration_secs,
+            AVG(COALESCE(tc.tool_count, 0)) AS avg_tool_calls
+        FROM logical_sessions ls
+        LEFT JOIN {TOOL_COUNTS_SUBQUERY} ON ls.session_id = tc.session_id
+        WHERE ls.model IS NOT NULL
+        GROUP BY ls.model
+        ORDER BY session_count DESC
+    """).fetchall()  # nosec B608
+
+    # Average metrics
+    averages = db.execute(f"""
+        SELECT
+            AVG(EXTRACT(EPOCH FROM ls.duration))
+                FILTER (WHERE ls.duration IS NOT NULL),
+            AVG(COALESCE(tc.tool_count, 0))
+        FROM logical_sessions ls
+        LEFT JOIN {TOOL_COUNTS_SUBQUERY} ON ls.session_id = tc.session_id
+    """).fetchone()  # nosec B608
+    avg_duration_str = format_duration(averages[0] or 0)
+    avg_tool_calls = round(averages[1] or 0, 1)
+
+    # Compute max bucket counts for bar chart widths
+    max_duration_count = max((b[1] for b in duration_buckets), default=1)
+    max_turns_count = max((b[1] for b in turns_buckets), default=1)
 
     return templates.TemplateResponse(
         request,
@@ -278,5 +294,11 @@ async def stats(request: Request) -> HTMLResponse:
             "most_tools_sessions": most_tools_sessions,
             "sessions_per_day": sessions_per_day,
             "token_usage": token_usage,
+            "cache_tokens": cache_tokens,
+            "model_breakdown": model_breakdown,
+            "avg_duration": avg_duration_str,
+            "avg_tool_calls": avg_tool_calls,
+            "max_duration_count": max_duration_count,
+            "max_turns_count": max_turns_count,
         },
     )

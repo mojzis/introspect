@@ -15,4 +15,5 @@ uv, ruff (lint/format), ty (type check), pytest, poethepoet (task runner)
 
 - ty is in beta — may produce false positives. Prefer `# ty: ignore[rule]` over blanket suppression.
 - Pre-commit hook auto-fixes and restages files. Only blocks on unfixable issues.
+- All user-facing features must have tests. When adding new routes, template variables, query parameters, or UI functionality, add corresponding tests in `tests/test_routes.py`.
 - **IMPORTANT**: After completing any task, you MUST run the `/python-review` skill to review all changes. Apply all 🔴 Must Fix and 🟡 Should Fix findings before marking work as complete.

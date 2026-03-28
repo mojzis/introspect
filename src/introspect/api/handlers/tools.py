@@ -1,12 +1,16 @@
 """Tools route handler."""
 
+import math
+
 from fastapi import Request
 from fastapi.responses import HTMLResponse
 
-from ._helpers import conn, parent, templates
+from ._helpers import DEFAULT_PAGE_SIZE, conn, parent, templates
 
 
-async def tools(request: Request, failed: bool, name: str) -> HTMLResponse:
+async def tools(
+    request: Request, failed: bool, name: str, page: int = 1
+) -> HTMLResponse:
     """Tool call stats with filtering (non-MCP tools only)."""
     db = conn(request)
 
@@ -20,6 +24,21 @@ async def tools(request: Request, failed: bool, name: str) -> HTMLResponse:
         params.append(name.strip())
 
     where = "WHERE " + " AND ".join(where_clauses)
+
+    # Stats summary (also gives total count for pagination)
+    stats = db.execute(
+        f"""
+        SELECT
+            COUNT(*) AS total,
+            COUNT(*) FILTER (WHERE is_error = 'true') AS failed_total
+        FROM tool_calls
+        {where}
+    """,  # nosec B608
+        params,
+    ).fetchone()
+
+    total_pages = max(1, math.ceil(stats[0] / DEFAULT_PAGE_SIZE))
+    offset = (page - 1) * DEFAULT_PAGE_SIZE
 
     rows = db.execute(
         f"""
@@ -35,32 +54,24 @@ async def tools(request: Request, failed: bool, name: str) -> HTMLResponse:
         LEFT JOIN session_titles fp ON tc.session_id = fp.session_id
         {where}
         ORDER BY tc.called_at DESC
-        LIMIT 100
+        LIMIT ? OFFSET ?
     """,  # nosec B608
-        params,
+        [*params, DEFAULT_PAGE_SIZE, offset],
     ).fetchall()
 
-    # Get tool names with counts for filter buttons (non-MCP only)
+    # Get tool names with counts and success rate for filter buttons (non-MCP only)
     tool_names = db.execute("""
-        SELECT tool_name, COUNT(*) AS cnt
+        SELECT
+            tool_name,
+            COUNT(*) AS cnt,
+            100.0 * COUNT(*) FILTER (WHERE is_error IS DISTINCT FROM 'true')
+                / COUNT(*) AS success_rate
         FROM tool_calls
         WHERE tool_name IS NOT NULL
           AND tool_name NOT LIKE 'mcp__%'
         GROUP BY tool_name
         ORDER BY cnt DESC
     """).fetchall()
-
-    # Stats summary
-    stats = db.execute(
-        f"""
-        SELECT
-            COUNT(*) AS total,
-            COUNT(*) FILTER (WHERE is_error = 'true') AS failed_total
-        FROM tool_calls
-        {where}
-    """,  # nosec B608
-        params,
-    ).fetchone()
 
     return templates.TemplateResponse(
         request,
@@ -72,5 +83,7 @@ async def tools(request: Request, failed: bool, name: str) -> HTMLResponse:
             "filter_failed": failed,
             "filter_name": name,
             "stats": stats,
+            "page": page,
+            "total_pages": total_pages,
         },
     )

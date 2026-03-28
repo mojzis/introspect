@@ -1,5 +1,10 @@
 {% extends parent %}
 {% block title %}MCPs - Introspect{% endblock %}
+
+{% macro mcp_qs(server='', command='', failed=filter_failed, page=1) -%}
+{% if server %}server={{ server }}&{% endif %}{% if command %}command={{ command }}&{% endif %}{% if failed %}failed=true&{% endif %}page={{ page }}
+{%- endmacro %}
+
 {% block content %}
 <h1>MCP Servers</h1>
 
@@ -7,15 +12,15 @@
 <div class="card">
     <h2 style="margin-bottom:0.5rem;">Servers</h2>
     <div class="filter-bar" style="flex-wrap:wrap;">
-        <a href="/mcps{% if filter_failed %}?failed=true{% endif %}"
-           hx-get="/mcps{% if filter_failed %}?failed=true{% endif %}"
+        <a href="/mcps?{{ mcp_qs() }}"
+           hx-get="/mcps?{{ mcp_qs() }}"
            hx-target="#content" hx-push-url="true"
            class="tool-btn{% if not filter_server %} tool-btn-active{% endif %}">
             All servers
         </a>
         {% for srv in mcp_servers %}
-        <a href="/mcps?server={{ srv[0] }}{% if filter_failed %}&failed=true{% endif %}"
-           hx-get="/mcps?server={{ srv[0] }}{% if filter_failed %}&failed=true{% endif %}"
+        <a href="/mcps?{{ mcp_qs(server=srv[0]) }}"
+           hx-get="/mcps?{{ mcp_qs(server=srv[0]) }}"
            hx-target="#content" hx-push-url="true"
            class="tool-btn{% if filter_server == srv[0] %} tool-btn-active{% endif %}">
             {{ srv[0] }} <span class="tool-btn-count">{{ srv[1] }}</span>
@@ -31,16 +36,16 @@
     <h2 style="margin-bottom:0.5rem;">Commands{% if filter_server %} &mdash; {{ filter_server }}{% endif %}</h2>
     <div class="filter-bar" style="flex-wrap:wrap;">
         {% if filter_server %}
-        <a href="/mcps?server={{ filter_server }}{% if filter_failed %}&failed=true{% endif %}"
-           hx-get="/mcps?server={{ filter_server }}{% if filter_failed %}&failed=true{% endif %}"
+        <a href="/mcps?{{ mcp_qs(server=filter_server) }}"
+           hx-get="/mcps?{{ mcp_qs(server=filter_server) }}"
            hx-target="#content" hx-push-url="true"
            class="tool-btn{% if not filter_command %} tool-btn-active{% endif %}">
             All commands
         </a>
         {% endif %}
         {% for cmd in mcp_commands %}
-        <a href="/mcps?server={{ cmd[0] }}&command={{ cmd[1] }}{% if filter_failed %}&failed=true{% endif %}"
-           hx-get="/mcps?server={{ cmd[0] }}&command={{ cmd[1] }}{% if filter_failed %}&failed=true{% endif %}"
+        <a href="/mcps?{{ mcp_qs(server=cmd[0], command=cmd[1]) }}"
+           hx-get="/mcps?{{ mcp_qs(server=cmd[0], command=cmd[1]) }}"
            hx-target="#content" hx-push-url="true"
            class="tool-btn{% if filter_command == cmd[1] and filter_server == cmd[0] %} tool-btn-active{% endif %}">
             {% if not filter_server %}<span style="color:#888;">{{ cmd[0] }}/</span>{% endif %}{{ cmd[1] }}
@@ -50,8 +55,8 @@
         {% endfor %}
     </div>
     <div class="filter-bar" style="margin-top:0.5rem;">
-        <a href="/mcps{% if filter_server %}?server={{ filter_server }}{% endif %}{% if filter_command %}{{ '&' if filter_server else '?' }}command={{ filter_command }}{% endif %}{% if not filter_failed %}{{ '&' if filter_server or filter_command else '?' }}failed=true{% endif %}"
-           hx-get="/mcps{% if filter_server %}?server={{ filter_server }}{% endif %}{% if filter_command %}{{ '&' if filter_server else '?' }}command={{ filter_command }}{% endif %}{% if not filter_failed %}{{ '&' if filter_server or filter_command else '?' }}failed=true{% endif %}"
+        <a href="/mcps?{{ mcp_qs(server=filter_server, command=filter_command, failed=not filter_failed) }}"
+           hx-get="/mcps?{{ mcp_qs(server=filter_server, command=filter_command, failed=not filter_failed) }}"
            hx-target="#content" hx-push-url="true"
            class="tool-btn tool-btn-sm{% if filter_failed %} tool-btn-active{% endif %}">
             {% if filter_failed %}Show all{% else %}Failed only{% endif %}
@@ -106,5 +111,15 @@
             {% endfor %}
         </tbody>
     </table>
+</div>
+
+<div class="pagination">
+    {% if page > 1 %}
+    <a href="/mcps?{{ mcp_qs(server=filter_server, command=filter_command, page=page - 1) }}" hx-get="/mcps?{{ mcp_qs(server=filter_server, command=filter_command, page=page - 1) }}" hx-target="#content" hx-push-url="true">Prev</a>
+    {% endif %}
+    <span class="current">Page {{ page }} of {{ total_pages }}</span>
+    {% if page < total_pages %}
+    <a href="/mcps?{{ mcp_qs(server=filter_server, command=filter_command, page=page + 1) }}" hx-get="/mcps?{{ mcp_qs(server=filter_server, command=filter_command, page=page + 1) }}" hx-target="#content" hx-push-url="true">Next</a>
+    {% endif %}
 </div>
 {% endblock %}

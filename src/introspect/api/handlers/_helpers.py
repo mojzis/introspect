@@ -1,11 +1,15 @@
 """Shared helpers, constants, and template setup for route handlers."""
 
 import json
+import logging
 import re
 from pathlib import Path
 
+import duckdb
 from fastapi import Request
 from fastapi.templating import Jinja2Templates
+
+log = logging.getLogger(__name__)
 
 TEMPLATE_DIR = Path(__file__).resolve().parent.parent.parent / "templates"
 templates = Jinja2Templates(directory=str(TEMPLATE_DIR))
@@ -19,6 +23,7 @@ SESSIONS_SORT_COLS = {
     "duration": "ls.duration",
     "user_msgs": "ls.user_messages",
     "asst_msgs": "ls.assistant_messages",
+    "tool_calls": "tc.tool_count",
     "model": "ls.model",
     "project": "ls.cwd",
     "branch": "ls.git_branch",
@@ -29,8 +34,10 @@ RAW_PER_PAGE = 20
 
 _XML_TAG_PREFIX_RE = re.compile(r"^<[^>]+>")
 
-# Max chars to include in content block previews (tool inputs, results, etc.)
-_CONTENT_PREVIEW_MAX = 500
+# Raised from 500 to allow expand/collapse UI in session_detail to show
+# meaningful content.  The template truncates at 200 chars for the collapsed
+# view; the full value is hidden behind an Alpine.js toggle.
+_CONTENT_PREVIEW_MAX = 5000
 
 
 def clean_title(raw: str) -> str:
@@ -83,3 +90,71 @@ def parse_content_block(block) -> dict:  # noqa: PLR0911
 def conn(request: Request):
     """Get the DuckDB connection from request state."""
     return request.state.conn
+
+
+DEFAULT_PAGE_SIZE = 50
+
+# Reusable SQL fragment for per-session tool counts.
+TOOL_COUNTS_SUBQUERY = """(
+    SELECT session_id, COUNT(*) AS tool_count
+    FROM tool_calls GROUP BY session_id
+) tc"""
+
+TOOL_COUNTS_WITH_ERRORS_SUBQUERY = """(
+    SELECT session_id,
+           COUNT(*) AS tool_count,
+           COUNT(*) FILTER (WHERE is_error = 'true') AS failed_count
+    FROM tool_calls GROUP BY session_id
+) tc"""
+
+
+def format_duration(total_seconds: float) -> str:
+    """Format seconds as M:SS string."""
+    secs = int(total_seconds)
+    return f"{secs // 60}:{secs % 60:02d}"
+
+
+def fetch_token_usage(
+    db: duckdb.DuckDBPyConnection,
+    *,
+    session_id: str | None = None,
+    include_cache: bool = False,
+) -> tuple | None:
+    """Fetch token usage sums. Returns None on error.
+
+    Without session_id: returns (input_tokens, output_tokens).
+    With include_cache: appends (cache_creation_tokens, cache_read_tokens).
+    """
+    cache_cols = ""
+    if include_cache:
+        cache_cols = """,
+            SUM(CAST(json_extract(
+                message, '$.usage.cache_creation_input_tokens'
+            ) AS BIGINT)),
+            SUM(CAST(json_extract(
+                message, '$.usage.cache_read_input_tokens'
+            ) AS BIGINT))"""
+
+    session_filter = ""
+    params: list[str] = []
+    if session_id is not None:
+        session_filter = "AND session_id = ?"
+        params.append(session_id)
+
+    try:
+        return db.execute(
+            f"""
+            SELECT
+                SUM(CAST(json_extract(message, '$.usage.input_tokens') AS BIGINT)),
+                SUM(CAST(json_extract(message, '$.usage.output_tokens') AS BIGINT))
+                {cache_cols}
+            FROM raw_messages
+            WHERE type = 'assistant'
+              AND json_extract(message, '$.usage.input_tokens') IS NOT NULL
+              {session_filter}
+        """,  # nosec B608
+            params,
+        ).fetchone()
+    except Exception:
+        log.debug("token usage query failed", exc_info=True)
+        return None
