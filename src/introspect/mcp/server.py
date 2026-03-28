@@ -4,9 +4,6 @@ from mcp.server.fastmcp import FastMCP
 
 from introspect.mcp._register import register_tools
 
-mcp = FastMCP("introspect")
-register_tools(mcp)
-
 
 def create_mcp_server() -> FastMCP:
     """Create a fresh MCP server instance with all tools registered."""

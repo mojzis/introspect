@@ -45,7 +45,7 @@ def get_read_connection(
             if tables:
                 return conn
             conn.close()
-        except Exception:  # nosec B110
+        except duckdb.Error:
             pass
     return get_connection(db_path, jsonl_glob)
 
