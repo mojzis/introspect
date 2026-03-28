@@ -450,9 +450,9 @@ async def raw_data(
     conn = _conn(request)
 
     where_clauses: list[str] = []
-    params: list[str | int] = []
+    params: list[str] = []
     if session.strip():
-        where_clauses.append("sessionId LIKE ?")
+        where_clauses.append("CAST(sessionId AS VARCHAR) LIKE ?")
         params.append(f"{session.strip()}%")
     if record_type.strip():
         where_clauses.append("type = ?")
@@ -467,9 +467,10 @@ async def raw_data(
     total_pages = max(1, math.ceil(total / RAW_PER_PAGE))
     offset = (page - 1) * RAW_PER_PAGE
 
+    limit = int(RAW_PER_PAGE)
     result = conn.execute(
-        f"SELECT * FROM raw_data {where} LIMIT ? OFFSET ?",  # nosec B608
-        [*params, RAW_PER_PAGE, offset],
+        f"SELECT * FROM raw_data {where} LIMIT {limit} OFFSET {int(offset)}",  # nosec B608
+        params,
     )
     columns = [desc[0] for desc in result.description]
     rows = result.fetchall()

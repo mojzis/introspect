@@ -217,7 +217,7 @@ def raw(
         where = ""
         params: list[str | int] = []
         if session:
-            where = "WHERE sessionId LIKE ?"
+            where = "WHERE CAST(sessionId AS VARCHAR) LIKE ?"
             params.append(f"{session}%")
         params.append(limit)
         result = conn.execute(

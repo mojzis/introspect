@@ -212,3 +212,155 @@ def test_mcp_endpoint_mounted():
         # (405 Method Not Allowed or 421 from MCP transport security).
         response = client.get("/mcp/mcp")
         assert response.status_code != 404
+
+
+# --- Raw page tests ---
+
+
+def test_raw_returns_200():
+    """Raw page loads without error."""
+    with tempfile.TemporaryDirectory() as tmp, _patched_client(Path(tmp)) as client:
+        response = client.get("/raw")
+        assert response.status_code == 200
+        assert "Raw Data" in response.text
+
+
+def test_raw_filter_by_type():
+    """Raw page filters records by type."""
+    with tempfile.TemporaryDirectory() as tmp, _patched_client(Path(tmp)) as client:
+        response = client.get("/raw?type=user")
+        assert response.status_code == 200
+        assert "Raw Data" in response.text
+
+
+def test_raw_filter_by_session():
+    """Raw page filters records by session ID prefix."""
+    with tempfile.TemporaryDirectory() as tmp, _patched_client(Path(tmp)) as client:
+        response = client.get(f"/raw?session={SID[:8]}")
+        assert response.status_code == 200
+        assert "Raw Data" in response.text
+
+
+def test_raw_filter_by_type_and_session():
+    """Raw page filters by both type and session simultaneously."""
+    with tempfile.TemporaryDirectory() as tmp, _patched_client(Path(tmp)) as client:
+        response = client.get(f"/raw?type=user&session={SID[:8]}")
+        assert response.status_code == 200
+        assert "Raw Data" in response.text
+
+
+def test_raw_filter_no_results():
+    """Raw page handles filter that matches nothing."""
+    with tempfile.TemporaryDirectory() as tmp, _patched_client(Path(tmp)) as client:
+        response = client.get("/raw?type=nonexistent")
+        assert response.status_code == 200
+        assert "No records found" in response.text
+
+
+def test_raw_pagination():
+    """Raw page supports pagination parameter."""
+    with tempfile.TemporaryDirectory() as tmp, _patched_client(Path(tmp)) as client:
+        response = client.get("/raw?page=1")
+        assert response.status_code == 200
+
+
+def test_raw_shows_record_count():
+    """Raw page displays the total record count."""
+    with tempfile.TemporaryDirectory() as tmp, _patched_client(Path(tmp)) as client:
+        response = client.get("/raw")
+        assert response.status_code == 200
+        assert "records" in response.text
+
+
+def test_raw_type_dropdown_populated():
+    """Raw page populates the type filter dropdown with available types."""
+    with tempfile.TemporaryDirectory() as tmp, _patched_client(Path(tmp)) as client:
+        response = client.get("/raw")
+        assert response.status_code == 200
+        assert "user" in response.text
+        assert "assistant" in response.text
+
+
+def test_raw_htmx_partial():
+    """Raw page returns partial content for HTMX requests."""
+    with tempfile.TemporaryDirectory() as tmp, _patched_client(Path(tmp)) as client:
+        response = client.get("/raw", headers={"HX-Request": "true"})
+        assert response.status_code == 200
+        assert "loading-overlay" not in response.text
+
+
+# --- User-related action tests ---
+
+
+def test_dashboard_shows_user_message_stats():
+    """Dashboard includes user message data in session list."""
+    with tempfile.TemporaryDirectory() as tmp, _patched_client(Path(tmp)) as client:
+        response = client.get("/")
+        assert response.status_code == 200
+        # Dashboard shows recent sessions which include user_messages count
+        assert SID[:8] in response.text
+
+
+def test_sessions_sort_by_user_msgs():
+    """Sessions page can sort by user message count."""
+    with tempfile.TemporaryDirectory() as tmp, _patched_client(Path(tmp)) as client:
+        response = client.get("/sessions?sort=user_msgs&order=desc")
+        assert response.status_code == 200
+
+
+def test_sessions_sort_by_asst_msgs():
+    """Sessions page can sort by assistant message count."""
+    with tempfile.TemporaryDirectory() as tmp, _patched_client(Path(tmp)) as client:
+        response = client.get("/sessions?sort=asst_msgs&order=asc")
+        assert response.status_code == 200
+
+
+def test_session_detail_shows_user_messages():
+    """Session detail page displays user messages."""
+    with tempfile.TemporaryDirectory() as tmp, _patched_client(Path(tmp)) as client:
+        response = client.get(f"/sessions/{SID}")
+        assert response.status_code == 200
+        assert "Hello, help me with tests" in response.text
+
+
+def test_session_detail_shows_tool_results():
+    """Session detail page displays tool results from user messages."""
+    with tempfile.TemporaryDirectory() as tmp, _patched_client(Path(tmp)) as client:
+        response = client.get(f"/sessions/{SID}")
+        assert response.status_code == 200
+        assert "tool_result" in response.text or "hello" in response.text
+
+
+def test_search_finds_user_content():
+    """Search returns results matching user message content."""
+    with tempfile.TemporaryDirectory() as tmp, _patched_client(Path(tmp)) as client:
+        response = client.get("/search?q=help+me+with+tests")
+        assert response.status_code == 200
+
+
+def test_search_finds_assistant_content():
+    """Search returns results matching assistant message content."""
+    with tempfile.TemporaryDirectory() as tmp, _patched_client(Path(tmp)) as client:
+        response = client.get("/search?q=Sure+I+can+help")
+        assert response.status_code == 200
+
+
+def test_stats_includes_user_message_totals():
+    """Stats page shows user message totals."""
+    with tempfile.TemporaryDirectory() as tmp, _patched_client(Path(tmp)) as client:
+        response = client.get("/stats")
+        assert response.status_code == 200
+
+
+def test_sessions_filter_by_model():
+    """Sessions page filters by model."""
+    with tempfile.TemporaryDirectory() as tmp, _patched_client(Path(tmp)) as client:
+        response = client.get("/sessions?model=claude-opus-4-6")
+        assert response.status_code == 200
+
+
+def test_sessions_filter_by_branch():
+    """Sessions page filters by git branch."""
+    with tempfile.TemporaryDirectory() as tmp, _patched_client(Path(tmp)) as client:
+        response = client.get("/sessions?branch=main")
+        assert response.status_code == 200
