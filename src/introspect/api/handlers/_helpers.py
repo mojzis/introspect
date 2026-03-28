@@ -14,7 +14,7 @@ SESSIONS_PER_PAGE_DEFAULT = 50
 SESSIONS_PAGE_SIZES = [25, 50, 100, 200]
 
 # Allowed sort columns for sessions page
-_SESSIONS_SORT_COLS = {
+SESSIONS_SORT_COLS = {
     "started_at": "ls.started_at",
     "duration": "ls.duration",
     "user_msgs": "ls.user_messages",
@@ -23,11 +23,14 @@ _SESSIONS_SORT_COLS = {
     "project": "ls.cwd",
     "branch": "ls.git_branch",
 }
-_SESSIONS_SORT_DEFAULT = "started_at"
+SESSIONS_SORT_DEFAULT = "started_at"
 
 RAW_PER_PAGE = 20
 
 _XML_TAG_PREFIX_RE = re.compile(r"^<[^>]+>")
+
+# Max chars to include in content block previews (tool inputs, results, etc.)
+_CONTENT_PREVIEW_MAX = 500
 
 
 def clean_title(raw: str) -> str:
@@ -47,7 +50,7 @@ def parse_content_block(block) -> dict:  # noqa: PLR0911
     if isinstance(block, str):
         return {"type": "text", "text": block}
     if not isinstance(block, dict):
-        return {"type": "text", "text": str(block)[:500]}
+        return {"type": "text", "text": str(block)[:_CONTENT_PREVIEW_MAX]}
 
     block_type = block.get("type", "text")
     if block_type == "text":
@@ -60,7 +63,7 @@ def parse_content_block(block) -> dict:  # noqa: PLR0911
             "type": "tool_use",
             "name": block.get("name", ""),
             "tool_use_id": block.get("id", ""),
-            "input": str(input_str)[:500],
+            "input": str(input_str)[:_CONTENT_PREVIEW_MAX],
         }
     if block_type == "tool_result":
         result_content = block.get("content", "")
@@ -69,12 +72,12 @@ def parse_content_block(block) -> dict:  # noqa: PLR0911
         return {
             "type": "tool_result",
             "tool_use_id": block.get("tool_use_id", ""),
-            "content": str(result_content)[:500],
+            "content": str(result_content)[:_CONTENT_PREVIEW_MAX],
             "is_error": block.get("is_error", False),
         }
     if block_type == "thinking":
         return {"type": "thinking", "text": block.get("thinking", "")}
-    return {"type": "text", "text": str(block)[:500]}
+    return {"type": "text", "text": str(block)[:_CONTENT_PREVIEW_MAX]}
 
 
 def conn(request: Request):

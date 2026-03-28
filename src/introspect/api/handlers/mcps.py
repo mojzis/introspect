@@ -14,6 +14,8 @@ async def mcps(
 ) -> HTMLResponse:
     """MCP tool analysis with server/command breakdown."""
     db = conn(request)
+    server_name = server.strip()
+    command_name = command.strip()
 
     # --- Server overview ---
     mcp_servers = db.execute("""
@@ -31,9 +33,9 @@ async def mcps(
     # --- Commands for selected server (or all) ---
     cmd_where = ["tool_name LIKE 'mcp__%'"]
     mcp_params: list[str | int] = []
-    if server.strip():
+    if server_name:
         cmd_where.append("split_part(tool_name, '__', 2) = ?")
-        mcp_params.append(server.strip())
+        mcp_params.append(server_name)
 
     mcp_commands = db.execute(
         f"""
@@ -53,12 +55,12 @@ async def mcps(
     # --- Filtered call list ---
     list_where = ["tool_name LIKE 'mcp__%'"]
     list_params: list[str | int] = []
-    if server.strip():
+    if server_name:
         list_where.append("split_part(tc.tool_name, '__', 2) = ?")
-        list_params.append(server.strip())
-    if command.strip():
+        list_params.append(server_name)
+    if command_name:
         list_where.append("split_part(tc.tool_name, '__', 3) = ?")
-        list_params.append(command.strip())
+        list_params.append(command_name)
     if failed:
         list_where.append("tc.is_error = 'true'")
 

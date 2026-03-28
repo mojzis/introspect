@@ -7,10 +7,10 @@ from fastapi import Request
 from fastapi.responses import HTMLResponse
 
 from ._helpers import (
-    _SESSIONS_SORT_COLS,
-    _SESSIONS_SORT_DEFAULT,
     SESSIONS_PAGE_SIZES,
     SESSIONS_PER_PAGE_DEFAULT,
+    SESSIONS_SORT_COLS,
+    SESSIONS_SORT_DEFAULT,
     clean_title,
     conn,
     parent,
@@ -60,8 +60,8 @@ async def sessions(  # noqa: PLR0913
     offset = (page - 1) * page_size
 
     # Resolve sort column
-    default_col = _SESSIONS_SORT_COLS[_SESSIONS_SORT_DEFAULT]
-    sort_col = _SESSIONS_SORT_COLS.get(sort, default_col)
+    default_col = SESSIONS_SORT_COLS[SESSIONS_SORT_DEFAULT]
+    sort_col = SESSIONS_SORT_COLS.get(sort, default_col)
     sort_dir = "ASC" if order.lower() == "asc" else "DESC"
     nulls = "NULLS LAST" if sort_dir == "DESC" else "NULLS FIRST"
 

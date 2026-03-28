@@ -7,8 +7,8 @@ from fastapi import APIRouter, Query, Request
 from fastapi.responses import HTMLResponse
 
 from introspect.api.handlers._helpers import (
-    _SESSIONS_SORT_DEFAULT,
     SESSIONS_PER_PAGE_DEFAULT,
+    SESSIONS_SORT_DEFAULT,
 )
 from introspect.api.handlers.dashboard import dashboard as _dashboard
 from introspect.api.handlers.mcps import mcps as _mcps
@@ -32,7 +32,7 @@ async def sessions(  # noqa: PLR0913
     request: Request,
     page: int = Query(1, ge=1),
     page_size: int = Query(SESSIONS_PER_PAGE_DEFAULT, ge=1, le=500),
-    sort: str = Query(_SESSIONS_SORT_DEFAULT),
+    sort: str = Query(SESSIONS_SORT_DEFAULT),
     order: str = Query("desc"),
     model: str = Query("", alias="model"),
     project: str = Query("", alias="project"),

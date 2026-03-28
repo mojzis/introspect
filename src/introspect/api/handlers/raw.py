@@ -37,8 +37,8 @@ async def raw_data(
     offset = (page - 1) * RAW_PER_PAGE
 
     result = db.execute(
-        f"SELECT * FROM raw_data {where} LIMIT {RAW_PER_PAGE} OFFSET {offset}",  # nosec B608
-        params,
+        f"SELECT * FROM raw_data {where} LIMIT ? OFFSET ?",  # nosec B608
+        [*params, RAW_PER_PAGE, offset],
     )
     columns = [desc[0] for desc in result.description]
     rows = result.fetchall()

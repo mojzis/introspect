@@ -1,5 +1,7 @@
 """Stats route handler."""
 
+import logging
+
 from fastapi import Request
 from fastapi.responses import HTMLResponse
 
@@ -250,6 +252,7 @@ async def stats(request: Request) -> HTMLResponse:
               AND json_extract(message, '$.usage.input_tokens') IS NOT NULL
         """).fetchone()
     except Exception:
+        logging.getLogger(__name__).debug("token usage query failed", exc_info=True)
         token_usage = None
 
     return templates.TemplateResponse(
