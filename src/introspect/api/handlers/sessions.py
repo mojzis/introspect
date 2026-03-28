@@ -6,18 +6,20 @@ import math
 from fastapi import Request
 from fastapi.responses import HTMLResponse
 
+from introspect.search import ensure_search_corpus, fts_available
+
 from ._helpers import (
-    COMMAND_LIST_SUBQUERY,
+    SESSION_INFO_JOINS,
+    SESSION_INFO_SELECT,
     SESSIONS_PAGE_SIZES,
     SESSIONS_PER_PAGE_DEFAULT,
     SESSIONS_SORT_COLS,
     SESSIONS_SORT_DEFAULT,
-    TOOL_COUNTS_SUBQUERY,
-    clean_title,
     conn,
     fetch_token_usage,
     parent,
     parse_content_block,
+    session_row_to_dict,
     templates,
 )
 
@@ -32,6 +34,7 @@ async def sessions(  # noqa: PLR0913
     project: str,
     branch: str,
     command: str,
+    q: str,
 ) -> HTMLResponse:
     """Paginated session list with filtering and sorting."""
     db = conn(request)
@@ -58,6 +61,24 @@ async def sessions(  # noqa: PLR0913
             " WHERE mc.session_id = ls.session_id AND mc.command = ?)"
         )
         params.append(command.strip())
+    search_query = q.strip()
+    if search_query:
+        ensure_search_corpus(db)
+        if fts_available(db):
+            where_clauses.append(
+                "EXISTS (SELECT 1 FROM (SELECT *, "
+                "fts_main_search_corpus.match_bm25(rowid, ?) AS score "
+                "FROM search_corpus) sc "
+                "WHERE sc.session_id = ls.session_id AND sc.score IS NOT NULL)"
+            )
+            params.append(search_query)
+        else:
+            where_clauses.append(
+                "EXISTS (SELECT 1 FROM search_corpus sc"
+                " WHERE sc.session_id = ls.session_id"
+                " AND sc.content_text ILIKE ?)"
+            )
+            params.append(f"%{search_query}%")
 
     where = "WHERE " + " AND ".join(where_clauses) if where_clauses else ""
 
@@ -77,24 +98,9 @@ async def sessions(  # noqa: PLR0913
 
     rows = db.execute(
         f"""
-        SELECT
-            ls.session_id,
-            ls.started_at,
-            ls.ended_at,
-            ls.duration,
-            ls.user_messages,
-            ls.assistant_messages,
-            ls.model,
-            ls.cwd,
-            ls.project,
-            ls.git_branch,
-            fp.first_prompt,
-            COALESCE(tc.tool_count, 0) AS tool_count,
-            cmd.commands
+        SELECT {SESSION_INFO_SELECT}
         FROM logical_sessions ls
-        LEFT JOIN session_titles fp ON ls.session_id = fp.session_id
-        LEFT JOIN {TOOL_COUNTS_SUBQUERY} ON ls.session_id = tc.session_id
-        LEFT JOIN {COMMAND_LIST_SUBQUERY} ON ls.session_id = cmd.session_id
+        {SESSION_INFO_JOINS}
         {where}
         ORDER BY {sort_col} {sort_dir} {nulls}
         LIMIT ? OFFSET ?
@@ -102,44 +108,7 @@ async def sessions(  # noqa: PLR0913
         [*params, page_size, offset],
     ).fetchall()
 
-    session_list = []
-    for row in rows:
-        (
-            session_id,
-            started_at,
-            ended_at,
-            duration,
-            user_msgs,
-            asst_msgs,
-            _model,
-            _cwd,
-            proj,
-            git_branch,
-            first_prompt,
-            tool_count,
-            commands,
-        ) = row
-        dur_str = ""
-        if duration:
-            total_secs = int(duration.total_seconds())
-            dur_str = f"{total_secs // 60}:{total_secs % 60:02d}"
-        session_list.append(
-            {
-                "id": session_id,
-                "date": str(started_at)[5:10] if started_at else "",
-                "start_time": str(started_at)[11:16] if started_at else "",
-                "end_time": str(ended_at)[11:16] if ended_at else "",
-                "duration": dur_str,
-                "user_msgs": user_msgs or 0,
-                "asst_msgs": asst_msgs or 0,
-                "model": _model or "",
-                "project": proj or "",
-                "branch": git_branch or "",
-                "title": clean_title(first_prompt or "")[:120],
-                "tool_count": tool_count or 0,
-                "commands": commands or "",
-            }
-        )
+    session_list = [session_row_to_dict(row) for row in rows]
 
     # Get distinct values for filter dropdowns
     models = db.execute("""
@@ -178,6 +147,7 @@ async def sessions(  # noqa: PLR0913
             "filter_project": project,
             "filter_branch": branch,
             "filter_command": command,
+            "filter_q": search_query,
             "models": [r[0] for r in models],
             "projects": [r[0] for r in projects],
             "branches": [r[0] for r in branches],

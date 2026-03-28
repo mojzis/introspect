@@ -26,8 +26,12 @@
     <table>
         <thead>
             <tr>
-                <th>Session ID</th>
-                <th>Timestamp</th>
+                <th>Project</th>
+                <th>Branch</th>
+                <th>Title</th>
+                <th>Date</th>
+                <th>Duration</th>
+                <th>Model</th>
                 <th>Role</th>
                 <th>Snippet</th>
                 <th>Score</th>
@@ -36,11 +40,15 @@
         <tbody>
             {% for r in results %}
             <tr>
-                <td><a href="/sessions/{{ r[0] }}" hx-get="/sessions/{{ r[0] }}" hx-target="#content" hx-push-url="true"><span class="truncate">{{ (r[0]|string)[:12] }}...</span></a></td>
-                <td>{{ (r[1]|string)[:19] }}</td>
-                <td>{{ r[2] or '' }}</td>
-                <td style="max-width:400px;overflow:hidden;text-overflow:ellipsis;">{{ r[3][:200] if r[3] else '' }}</td>
-                <td>{{ '%.4f'|format(r[4]) if r[4] is not none else '' }}</td>
+                <td><span class="truncate">{{ r.project }}</span></td>
+                <td><span class="truncate">{{ r.branch }}</span></td>
+                <td><a href="/sessions/{{ r.session_id }}" hx-get="/sessions/{{ r.session_id }}" hx-target="#content" hx-push-url="true"><span class="truncate" style="max-width:250px;" title="{{ r.title }}">{{ r.title or '(no title)' }}</span></a></td>
+                <td style="white-space:nowrap;">{{ r.date }}</td>
+                <td style="white-space:nowrap;">{{ r.duration }}</td>
+                <td>{{ r.model }}</td>
+                <td>{{ r.role }}</td>
+                <td style="max-width:400px;overflow:hidden;text-overflow:ellipsis;">{{ r.snippet }}</td>
+                <td>{{ '%.4f'|format(r.score) if r.score is not none else '' }}</td>
             </tr>
             {% endfor %}
         </tbody>

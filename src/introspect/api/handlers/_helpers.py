@@ -120,6 +120,78 @@ def format_duration(total_seconds: float) -> str:
     return f"{secs // 60}:{secs % 60:02d}"
 
 
+# Columns selected by SESSION_INFO_SELECT (positional).
+SESSION_INFO_SELECT = """
+    ls.session_id,
+    ls.started_at,
+    ls.ended_at,
+    ls.duration,
+    ls.user_messages,
+    ls.assistant_messages,
+    ls.model,
+    ls.project,
+    ls.git_branch,
+    fp.first_prompt,
+    COALESCE(tc.tool_count, 0) AS tool_count,
+    cmd.commands
+"""
+
+SESSION_INFO_JOINS = f"""
+    LEFT JOIN session_titles fp ON ls.session_id = fp.session_id
+    LEFT JOIN {TOOL_COUNTS_SUBQUERY} ON ls.session_id = tc.session_id
+    LEFT JOIN {COMMAND_LIST_SUBQUERY} ON ls.session_id = cmd.session_id
+"""
+
+_EMPTY_SESSION_INFO: dict[str, object] = {
+    "date": "",
+    "start_time": "",
+    "end_time": "",
+    "duration": "",
+    "user_msgs": 0,
+    "asst_msgs": 0,
+    "model": "",
+    "project": "",
+    "branch": "",
+    "title": "",
+    "tool_count": 0,
+    "commands": "",
+}
+
+
+def session_row_to_dict(row: tuple) -> dict:
+    """Convert a SESSION_INFO_SELECT row to a template-friendly dict."""
+    (
+        session_id,
+        started_at,
+        ended_at,
+        duration,
+        user_msgs,
+        asst_msgs,
+        model,
+        project,
+        git_branch,
+        first_prompt,
+        tool_count,
+        commands,
+    ) = row
+    dur_str = format_duration(duration.total_seconds()) if duration else ""
+    return {
+        "id": session_id,
+        "date": str(started_at)[5:10] if started_at else "",
+        "start_time": str(started_at)[11:16] if started_at else "",
+        "end_time": str(ended_at)[11:16] if ended_at else "",
+        "duration": dur_str,
+        "user_msgs": user_msgs or 0,
+        "asst_msgs": asst_msgs or 0,
+        "model": model or "",
+        "project": project or "",
+        "branch": git_branch or "",
+        "title": clean_title(first_prompt or "")[:120],
+        "tool_count": tool_count or 0,
+        "commands": commands or "",
+    }
+
+
 def fetch_token_usage(
     db: duckdb.DuckDBPyConnection,
     *,
