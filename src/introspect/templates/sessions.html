@@ -1,8 +1,50 @@
 {% extends parent %}
 {% block title %}Sessions - Introspect{% endblock %}
+
+{# Build query string helper — keeps all current params, overrides given ones #}
+{% macro qs(page=page, page_size=page_size, sort=sort, order=order, model=filter_model, project=filter_project, branch=filter_branch) -%}
+page={{ page }}&page_size={{ page_size }}&sort={{ sort }}&order={{ order }}&model={{ model }}&project={{ project }}&branch={{ branch }}
+{%- endmacro %}
+
+{# Sortable column header #}
+{% macro sort_header(label, col) %}
+{% set new_order = 'asc' if sort == col and order == 'desc' else 'desc' %}
+{% set arrow = '' %}
+{% if sort == col %}
+  {% set arrow = ' ▲' if order == 'asc' else ' ▼' %}
+{% endif %}
+<th><a href="/sessions?{{ qs(page=1, sort=col, order=new_order) }}" hx-get="/sessions?{{ qs(page=1, sort=col, order=new_order) }}" hx-target="#content" hx-push-url="true" style="color:#555;text-decoration:none;">{{ label }}{{ arrow }}</a></th>
+{% endmacro %}
+
 {% block content %}
 <h1>Sessions <span style="font-size:0.9rem;color:#666;">({{ total }} total)</span></h1>
 
+{# ── Filter bar ── #}
+<div class="filter-bar">
+    <select onchange="window.location='/sessions?{{ qs(page=1) }}'.replace('model={{ filter_model }}', 'model='+this.value)" style="padding:0.4rem 0.6rem;border:1px solid #ccc;border-radius:4px;font-size:0.85rem;">
+        <option value="">All models</option>
+        {% for m in models %}
+        <option value="{{ m }}" {{ 'selected' if m == filter_model else '' }}>{{ m }}</option>
+        {% endfor %}
+    </select>
+    <select onchange="window.location='/sessions?{{ qs(page=1) }}'.replace('project={{ filter_project }}', 'project='+this.value)" style="padding:0.4rem 0.6rem;border:1px solid #ccc;border-radius:4px;font-size:0.85rem;">
+        <option value="">All projects</option>
+        {% for p in projects %}
+        <option value="{{ p }}" {{ 'selected' if p == filter_project else '' }}>{{ p }}</option>
+        {% endfor %}
+    </select>
+    <select onchange="window.location='/sessions?{{ qs(page=1) }}'.replace('branch={{ filter_branch }}', 'branch='+this.value)" style="padding:0.4rem 0.6rem;border:1px solid #ccc;border-radius:4px;font-size:0.85rem;">
+        <option value="">All branches</option>
+        {% for b in branches %}
+        <option value="{{ b }}" {{ 'selected' if b == filter_branch else '' }}>{{ b }}</option>
+        {% endfor %}
+    </select>
+    {% if filter_model or filter_project or filter_branch %}
+    <a href="/sessions?{{ qs(page=1, model='', project='', branch='') }}" hx-get="/sessions?{{ qs(page=1, model='', project='', branch='') }}" hx-target="#content" hx-push-url="true" class="tool-btn tool-btn-sm">Clear filters</a>
+    {% endif %}
+</div>
+
+{# ── Sessions table ── #}
 <div class="card">
     <table>
         <thead>
@@ -11,11 +53,12 @@
                 <th>Date</th>
                 <th>Start</th>
                 <th>End</th>
-                <th>Duration</th>
-                <th>Msgs</th>
-                <th>Model</th>
-                <th>Project</th>
-                <th>Branch</th>
+                {{ sort_header('Duration', 'duration') }}
+                {{ sort_header('User', 'user_msgs') }}
+                {{ sort_header('Asst', 'asst_msgs') }}
+                {{ sort_header('Model', 'model') }}
+                {{ sort_header('Project', 'project') }}
+                {{ sort_header('Branch', 'branch') }}
             </tr>
         </thead>
         <tbody>
@@ -26,7 +69,8 @@
                 <td style="white-space:nowrap;">{{ s.start_time }}</td>
                 <td style="white-space:nowrap;">{{ s.end_time }}</td>
                 <td style="white-space:nowrap;">{{ s.duration }}</td>
-                <td>{{ s.user_msgs }}/{{ s.asst_msgs }}</td>
+                <td>{{ s.user_msgs }}</td>
+                <td>{{ s.asst_msgs }}</td>
                 <td>{{ s.model }}</td>
                 <td><span class="truncate">{{ s.project }}</span></td>
                 <td><span class="truncate">{{ s.branch }}</span></td>
@@ -36,13 +80,26 @@
     </table>
 </div>
 
+{# ── Pagination + page size ── #}
 <div class="pagination">
     {% if page > 1 %}
-    <a href="/sessions?page={{ page - 1 }}" hx-get="/sessions?page={{ page - 1 }}" hx-target="#content" hx-push-url="true">Prev</a>
+    <a href="/sessions?{{ qs(page=page - 1) }}" hx-get="/sessions?{{ qs(page=page - 1) }}" hx-target="#content" hx-push-url="true">Prev</a>
     {% endif %}
     <span class="current">Page {{ page }} of {{ total_pages }}</span>
     {% if page < total_pages %}
-    <a href="/sessions?page={{ page + 1 }}" hx-get="/sessions?page={{ page + 1 }}" hx-target="#content" hx-push-url="true">Next</a>
+    <a href="/sessions?{{ qs(page=page + 1) }}" hx-get="/sessions?{{ qs(page=page + 1) }}" hx-target="#content" hx-push-url="true">Next</a>
     {% endif %}
+    <span style="margin-left:1rem;font-size:0.85rem;color:#666;">
+        Show
+        {% for ps in page_sizes %}
+            {% if ps == page_size %}
+                <strong>{{ ps }}</strong>
+            {% else %}
+                <a href="/sessions?{{ qs(page=1, page_size=ps) }}" hx-get="/sessions?{{ qs(page=1, page_size=ps) }}" hx-target="#content" hx-push-url="true">{{ ps }}</a>
+            {% endif %}
+            {% if not loop.last %}/{% endif %}
+        {% endfor %}
+        per page
+    </span>
 </div>
 {% endblock %}
