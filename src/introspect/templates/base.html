@@ -84,6 +84,9 @@
         document.addEventListener('htmx:afterRequest', function() {
             document.getElementById('loading-overlay').classList.remove('active');
         });
+        document.addEventListener('htmx:historyRestore', function() {
+            document.getElementById('loading-overlay').classList.remove('active');
+        });
     </script>
 </body>
 </html>
