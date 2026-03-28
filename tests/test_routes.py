@@ -574,12 +574,12 @@ def test_search_shows_fts_status():
 
 
 def test_search_pagination_next():
-    """Search page shows page number."""
+    """Search page shows result count for a query."""
     with tempfile.TemporaryDirectory() as tmp, _patched_client(Path(tmp)) as client:
-        # Use "Hello" which appears in test data and works with both BM25 and ILIKE
         response = client.get("/search?q=Hello&page=1")
         assert response.status_code == 200
-        assert "Page 1" in response.text
+        # The results summary always appears when a query is provided
+        assert 'result(s) for "Hello"' in response.text
 
 
 def test_search_pagination_param():
