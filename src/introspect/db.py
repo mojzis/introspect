@@ -71,8 +71,8 @@ def materialize_views(
         "raw_data",
         "search_corpus",
     ):
-        conn.execute(f"DROP VIEW IF EXISTS {name}")  # nosec B608
         conn.execute(f"DROP TABLE IF EXISTS {name}")  # nosec B608
+        conn.execute(f"DROP VIEW IF EXISTS {name}")  # nosec B608
 
     conn.execute(f"""
         CREATE TABLE raw_data AS
