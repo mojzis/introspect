@@ -680,3 +680,62 @@ def test_sessions_command_dropdown_populated():
         assert response.status_code == 200
         assert "All commands" in response.text
         assert "/commit" in response.text
+
+
+# --- Sessions search tests ---
+
+
+def test_sessions_search_filters_by_content():
+    """Sessions page filters to sessions containing search query."""
+    with tempfile.TemporaryDirectory() as tmp, _patched_client(Path(tmp)) as client:
+        response = client.get("/sessions?q=help+me+with+tests")
+        assert response.status_code == 200
+        assert SID[:8] in response.text
+
+
+def test_sessions_search_no_match():
+    """Sessions search returns no sessions for unmatched query."""
+    with tempfile.TemporaryDirectory() as tmp, _patched_client(Path(tmp)) as client:
+        response = client.get("/sessions?q=xyznonexistent999")
+        assert response.status_code == 200
+        assert SID[:8] not in response.text
+
+
+def test_sessions_search_box_present():
+    """Sessions page has a search input box."""
+    with tempfile.TemporaryDirectory() as tmp, _patched_client(Path(tmp)) as client:
+        response = client.get("/sessions")
+        assert response.status_code == 200
+        assert 'placeholder="Search content..."' in response.text
+
+
+def test_sessions_search_preserves_query():
+    """Sessions page preserves the search query in the input."""
+    with tempfile.TemporaryDirectory() as tmp, _patched_client(Path(tmp)) as client:
+        response = client.get("/sessions?q=hello")
+        assert response.status_code == 200
+        assert 'value="hello"' in response.text
+
+
+# --- Search results enrichment tests ---
+
+
+def test_search_results_show_session_info():
+    """Search results include session metadata columns."""
+    with tempfile.TemporaryDirectory() as tmp, _patched_client(Path(tmp)) as client:
+        response = client.get("/search?q=help+me+with+tests")
+        assert response.status_code == 200
+        # Should show session-level columns
+        assert "Project" in response.text
+        assert "Branch" in response.text
+        assert "Title" in response.text
+        assert "Duration" in response.text
+        assert "Model" in response.text
+
+
+def test_search_results_link_to_session():
+    """Search results link to the session detail page."""
+    with tempfile.TemporaryDirectory() as tmp, _patched_client(Path(tmp)) as client:
+        response = client.get("/search?q=help+me+with+tests")
+        assert response.status_code == 200
+        assert f"/sessions/{SID}" in response.text

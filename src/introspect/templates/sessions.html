@@ -2,8 +2,8 @@
 {% block title %}Sessions - Introspect{% endblock %}
 
 {# Build query string helper — keeps all current params, overrides given ones #}
-{% macro qs(page=page, page_size=page_size, sort=sort, order=order, model=filter_model, project=filter_project, branch=filter_branch, command=filter_command) -%}
-page={{ page }}&page_size={{ page_size }}&sort={{ sort }}&order={{ order }}&model={{ model }}&project={{ project }}&branch={{ branch }}&command={{ command }}
+{% macro qs(page=page, page_size=page_size, sort=sort, order=order, model=filter_model, project=filter_project, branch=filter_branch, command=filter_command, q=filter_q) -%}
+page={{ page }}&page_size={{ page_size }}&sort={{ sort }}&order={{ order }}&model={{ model }}&project={{ project }}&branch={{ branch }}&command={{ command }}&q={{ q }}
 {%- endmacro %}
 
 {# Sortable column header #}
@@ -21,6 +21,18 @@ page={{ page }}&page_size={{ page_size }}&sort={{ sort }}&order={{ order }}&mode
 
 {# ── Filter bar ── #}
 <div class="filter-bar">
+    <form action="/sessions" method="get" style="display:inline-flex;gap:0.3rem;margin-right:0.5rem;">
+        <input type="hidden" name="page" value="1" />
+        <input type="hidden" name="page_size" value="{{ page_size }}" />
+        <input type="hidden" name="sort" value="{{ sort }}" />
+        <input type="hidden" name="order" value="{{ order }}" />
+        <input type="hidden" name="model" value="{{ filter_model }}" />
+        <input type="hidden" name="project" value="{{ filter_project }}" />
+        <input type="hidden" name="branch" value="{{ filter_branch }}" />
+        <input type="hidden" name="command" value="{{ filter_command }}" />
+        <input type="search" name="q" value="{{ filter_q }}" placeholder="Search content..." style="padding:0.4rem 0.6rem;border:1px solid #ccc;border-radius:4px;font-size:0.85rem;width:160px;" />
+        <button type="submit" style="padding:0.4rem 0.6rem;font-size:0.85rem;">Search</button>
+    </form>
     <select onchange="window.location='/sessions?{{ qs(page=1) }}'.replace('model={{ filter_model }}', 'model='+this.value)" style="padding:0.4rem 0.6rem;border:1px solid #ccc;border-radius:4px;font-size:0.85rem;">
         <option value="">All models</option>
         {% for m in models %}
@@ -45,8 +57,8 @@ page={{ page }}&page_size={{ page_size }}&sort={{ sort }}&order={{ order }}&mode
         <option value="{{ c }}" {{ 'selected' if c == filter_command else '' }}>{{ c }}</option>
         {% endfor %}
     </select>
-    {% if filter_model or filter_project or filter_branch or filter_command %}
-    <a href="/sessions?{{ qs(page=1, model='', project='', branch='', command='') }}" hx-get="/sessions?{{ qs(page=1, model='', project='', branch='', command='') }}" hx-target="#content" hx-push-url="true" class="tool-btn tool-btn-sm">Clear filters</a>
+    {% if filter_model or filter_project or filter_branch or filter_command or filter_q %}
+    <a href="/sessions?{{ qs(page=1, model='', project='', branch='', command='', q='') }}" hx-get="/sessions?{{ qs(page=1, model='', project='', branch='', command='', q='') }}" hx-target="#content" hx-push-url="true" class="tool-btn tool-btn-sm">Clear filters</a>
     {% endif %}
 </div>
 
