@@ -100,6 +100,11 @@ TOOL_COUNTS_SUBQUERY = """(
     FROM tool_calls GROUP BY session_id
 ) tc"""
 
+COMMAND_LIST_SUBQUERY = """(
+    SELECT session_id, string_agg(DISTINCT command, ', ' ORDER BY command) AS commands
+    FROM message_commands GROUP BY session_id
+) cmd"""
+
 TOOL_COUNTS_WITH_ERRORS_SUBQUERY = """(
     SELECT session_id,
            COUNT(*) AS tool_count,

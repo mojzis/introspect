@@ -104,6 +104,13 @@ def _write_sample_jsonl(tmp_dir: Path) -> Path:
             tool_use_result={},
             source_tool_uuid="a3",
         ),
+        make_user_message(
+            SID,
+            "u4",
+            "u3",
+            "2026-03-27T10:00:06.000Z",
+            "<command-name>/commit</command-name>\nCommit my changes",
+        ),
     ]
     return write_jsonl(tmp_dir, SID, lines)
 
@@ -231,8 +238,8 @@ def test_raw_filter_by_type():
         response = client.get("/raw?type=user")
         assert response.status_code == 200
         assert "Raw Data" in response.text
-        # Should show only user records (3 user messages in sample data)
-        assert "3 records" in response.text
+        # Should show only user records (4 user messages in sample data)
+        assert "4 records" in response.text
 
 
 def test_raw_filter_by_session():
@@ -559,3 +566,40 @@ def test_mcps_filter_with_pagination():
     with tempfile.TemporaryDirectory() as tmp, _patched_client(Path(tmp)) as client:
         response = client.get("/mcps?server=github&page=1")
         assert response.status_code == 200
+
+
+# --- Command parsing and filtering tests ---
+
+
+def test_sessions_shows_commands_column():
+    """Sessions page has a Commands column with parsed command badges."""
+    with tempfile.TemporaryDirectory() as tmp, _patched_client(Path(tmp)) as client:
+        response = client.get("/sessions")
+        assert response.status_code == 200
+        assert "Commands" in response.text
+        assert "/commit" in response.text
+
+
+def test_sessions_filter_by_command():
+    """Sessions page filters by command."""
+    with tempfile.TemporaryDirectory() as tmp, _patched_client(Path(tmp)) as client:
+        response = client.get("/sessions?command=/commit")
+        assert response.status_code == 200
+        assert SID[:8] in response.text
+
+
+def test_sessions_filter_by_command_no_results():
+    """Sessions page returns no sessions for unknown command."""
+    with tempfile.TemporaryDirectory() as tmp, _patched_client(Path(tmp)) as client:
+        response = client.get("/sessions?command=/nonexistent")
+        assert response.status_code == 200
+        assert SID[:8] not in response.text
+
+
+def test_sessions_command_dropdown_populated():
+    """Sessions page populates the command filter dropdown."""
+    with tempfile.TemporaryDirectory() as tmp, _patched_client(Path(tmp)) as client:
+        response = client.get("/sessions")
+        assert response.status_code == 200
+        assert "All commands" in response.text
+        assert "/commit" in response.text

@@ -37,9 +37,10 @@ async def sessions(  # noqa: PLR0913
     model: str = Query("", alias="model"),
     project: str = Query("", alias="project"),
     branch: str = Query("", alias="branch"),
+    command: str = Query("", alias="command"),
 ):
     return await _sessions(
-        request, page, page_size, sort, order, model, project, branch
+        request, page, page_size, sort, order, model, project, branch, command
     )
 
 
