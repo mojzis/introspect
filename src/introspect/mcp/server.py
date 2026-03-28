@@ -2,7 +2,14 @@
 
 from mcp.server.fastmcp import FastMCP
 
-mcp = FastMCP("introspect")
+from introspect.mcp._register import register_tools
 
-# Register tools by importing the module (side effect: decorators run)
-import introspect.mcp.tools as _tools  # noqa: F401, E402
+mcp = FastMCP("introspect")
+register_tools(mcp)
+
+
+def create_mcp_server() -> FastMCP:
+    """Create a fresh MCP server instance with all tools registered."""
+    server = FastMCP("introspect")
+    register_tools(server)
+    return server

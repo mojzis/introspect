@@ -11,6 +11,7 @@ from fastapi.templating import Jinja2Templates
 
 from introspect.api.routes import router
 from introspect.db import DEFAULT_DB_PATH, DEFAULT_JSONL_GLOB, materialize_views
+from introspect.mcp.server import create_mcp_server
 from introspect.search import build_search_corpus
 
 TEMPLATE_DIR = Path(__file__).resolve().parent.parent / "templates"
@@ -19,7 +20,7 @@ templates = Jinja2Templates(directory=str(TEMPLATE_DIR))
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
-    """Materialize views on startup for fast querying."""
+    """Materialize views on startup, then start MCP session manager."""
     db_path = Path(os.environ.get("INTROSPECT_DB_PATH", str(DEFAULT_DB_PATH)))
     jsonl_glob = os.environ.get("INTROSPECT_JSONL_GLOB", DEFAULT_JSONL_GLOB)
     days = int(os.environ.get("INTROSPECT_DAYS", "10"))
@@ -31,7 +32,18 @@ async def lifespan(app: FastAPI):
     finally:
         conn.close()
     app.state.db_path = db_path
-    yield
+
+    # Create a fresh MCP server and replace the placeholder mount
+    mcp_server = create_mcp_server()
+    mcp_app = mcp_server.streamable_http_app()
+    for route in app.routes:
+        if getattr(route, "path", None) == "/mcp":
+            route.app = mcp_app  # ty: ignore[unresolved-attribute]
+            break
+    # Rebuild middleware stack to pick up the new mount
+    app.middleware_stack = app.build_middleware_stack()
+    async with mcp_server.session_manager.run():
+        yield
 
 
 app = FastAPI(title="Introspect", lifespan=lifespan)
@@ -51,6 +63,8 @@ async def db_middleware(request: Request, call_next):
 
 
 app.include_router(router)
+# Placeholder mount — replaced with a fresh MCP app in lifespan
+app.mount("/mcp", FastAPI())
 
 
 @app.get("/favicon.ico", include_in_schema=False)

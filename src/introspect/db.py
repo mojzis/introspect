@@ -8,6 +8,26 @@ DEFAULT_DB_PATH = Path.home() / ".introspect" / "introspect.duckdb"
 DEFAULT_JSONL_GLOB = str(Path.home() / ".claude" / "projects" / "**" / "*.jsonl")
 
 
+def get_read_connection(
+    db_path: Path = DEFAULT_DB_PATH,
+    jsonl_glob: str = DEFAULT_JSONL_GLOB,
+) -> duckdb.DuckDBPyConnection:
+    """Open materialized DB read-only, falling back to lazy views."""
+    if db_path.exists():
+        try:
+            conn = duckdb.connect(str(db_path), read_only=True)
+            tables = conn.execute(
+                "SELECT table_name FROM information_schema.tables "
+                "WHERE table_name = 'raw_messages' AND table_type = 'BASE TABLE'"
+            ).fetchall()
+            if tables:
+                return conn
+            conn.close()
+        except Exception:  # nosec B110
+            pass
+    return get_connection(db_path, jsonl_glob)
+
+
 def get_connection(
     db_path: Path = DEFAULT_DB_PATH,
     jsonl_glob: str = DEFAULT_JSONL_GLOB,
