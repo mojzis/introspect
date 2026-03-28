@@ -86,6 +86,7 @@ def materialize_views(
 
     # Drop everything to avoid table/view name conflicts
     for name in (
+        "message_commands",
         "session_titles",
         "conversation_turns",
         "tool_calls",
@@ -305,4 +306,26 @@ def _create_derived_views(conn: duckdb.DuckDBPyConnection) -> None:
                   ''
               ) NOT LIKE '<local-command-caveat>%'
         ) sub WHERE rn = 1
+    """)
+
+    # Commands: extract <command-name>...</command-name> tags from user messages.
+    conn.execute("""
+        CREATE OR REPLACE VIEW message_commands AS
+        WITH msg_text AS (
+            SELECT session_id, uuid, timestamp,
+                   COALESCE(
+                       json_extract_string(message, '$.content[0].text'),
+                       json_extract_string(message, '$.content')
+                   ) AS body
+            FROM raw_messages
+            WHERE type = 'user' AND role = 'user'
+        )
+        SELECT session_id, uuid, timestamp,
+               unnest(regexp_extract_all(
+                   body, '<command-name>([^<]+)</command-name>', 1
+               )) AS command
+        FROM msg_text
+        WHERE len(regexp_extract_all(
+            body, '<command-name>([^<]+)</command-name>', 1
+        )) > 0
     """)

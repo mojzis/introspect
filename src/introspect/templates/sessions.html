@@ -2,8 +2,8 @@
 {% block title %}Sessions - Introspect{% endblock %}
 
 {# Build query string helper — keeps all current params, overrides given ones #}
-{% macro qs(page=page, page_size=page_size, sort=sort, order=order, model=filter_model, project=filter_project, branch=filter_branch) -%}
-page={{ page }}&page_size={{ page_size }}&sort={{ sort }}&order={{ order }}&model={{ model }}&project={{ project }}&branch={{ branch }}
+{% macro qs(page=page, page_size=page_size, sort=sort, order=order, model=filter_model, project=filter_project, branch=filter_branch, command=filter_command) -%}
+page={{ page }}&page_size={{ page_size }}&sort={{ sort }}&order={{ order }}&model={{ model }}&project={{ project }}&branch={{ branch }}&command={{ command }}
 {%- endmacro %}
 
 {# Sortable column header #}
@@ -39,8 +39,14 @@ page={{ page }}&page_size={{ page_size }}&sort={{ sort }}&order={{ order }}&mode
         <option value="{{ b }}" {{ 'selected' if b == filter_branch else '' }}>{{ b }}</option>
         {% endfor %}
     </select>
-    {% if filter_model or filter_project or filter_branch %}
-    <a href="/sessions?{{ qs(page=1, model='', project='', branch='') }}" hx-get="/sessions?{{ qs(page=1, model='', project='', branch='') }}" hx-target="#content" hx-push-url="true" class="tool-btn tool-btn-sm">Clear filters</a>
+    <select onchange="window.location='/sessions?{{ qs(page=1) }}'.replace('command={{ filter_command }}', 'command='+this.value)" style="padding:0.4rem 0.6rem;border:1px solid #ccc;border-radius:4px;font-size:0.85rem;">
+        <option value="">All commands</option>
+        {% for c in commands_list %}
+        <option value="{{ c }}" {{ 'selected' if c == filter_command else '' }}>{{ c }}</option>
+        {% endfor %}
+    </select>
+    {% if filter_model or filter_project or filter_branch or filter_command %}
+    <a href="/sessions?{{ qs(page=1, model='', project='', branch='', command='') }}" hx-get="/sessions?{{ qs(page=1, model='', project='', branch='', command='') }}" hx-target="#content" hx-push-url="true" class="tool-btn tool-btn-sm">Clear filters</a>
     {% endif %}
 </div>
 
@@ -57,6 +63,7 @@ page={{ page }}&page_size={{ page_size }}&sort={{ sort }}&order={{ order }}&mode
                 {{ sort_header('User', 'user_msgs') }}
                 {{ sort_header('Asst', 'asst_msgs') }}
                 {{ sort_header('Tools', 'tool_calls') }}
+                <th>Commands</th>
                 {{ sort_header('Model', 'model') }}
                 {{ sort_header('Project', 'project') }}
                 {{ sort_header('Branch', 'branch') }}
@@ -73,6 +80,7 @@ page={{ page }}&page_size={{ page_size }}&sort={{ sort }}&order={{ order }}&mode
                 <td>{{ s.user_msgs }}</td>
                 <td>{{ s.asst_msgs }}</td>
                 <td>{{ s.tool_count }}</td>
+                <td>{% if s.commands %}{% for c in s.commands.split(', ') %}<span class="tool-btn tool-btn-sm" style="font-size:0.75rem;padding:0.1rem 0.4rem;margin:0.1rem;">{{ c }}</span>{% endfor %}{% endif %}</td>
                 <td>{{ s.model }}</td>
                 <td><span class="truncate">{{ s.project }}</span></td>
                 <td><span class="truncate">{{ s.branch }}</span></td>

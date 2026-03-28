@@ -7,6 +7,7 @@ from fastapi import Request
 from fastapi.responses import HTMLResponse
 
 from ._helpers import (
+    COMMAND_LIST_SUBQUERY,
     SESSIONS_PAGE_SIZES,
     SESSIONS_PER_PAGE_DEFAULT,
     SESSIONS_SORT_COLS,
@@ -30,6 +31,7 @@ async def sessions(  # noqa: PLR0913
     model: str,
     project: str,
     branch: str,
+    command: str,
 ) -> HTMLResponse:
     """Paginated session list with filtering and sorting."""
     db = conn(request)
@@ -50,6 +52,12 @@ async def sessions(  # noqa: PLR0913
     if branch.strip():
         where_clauses.append("ls.git_branch = ?")
         params.append(branch.strip())
+    if command.strip():
+        where_clauses.append(
+            "EXISTS (SELECT 1 FROM message_commands mc"
+            " WHERE mc.session_id = ls.session_id AND mc.command = ?)"
+        )
+        params.append(command.strip())
 
     where = "WHERE " + " AND ".join(where_clauses) if where_clauses else ""
 
@@ -80,10 +88,12 @@ async def sessions(  # noqa: PLR0913
             ls.cwd,
             ls.git_branch,
             fp.first_prompt,
-            COALESCE(tc.tool_count, 0) AS tool_count
+            COALESCE(tc.tool_count, 0) AS tool_count,
+            cmd.commands
         FROM logical_sessions ls
         LEFT JOIN session_titles fp ON ls.session_id = fp.session_id
         LEFT JOIN {TOOL_COUNTS_SUBQUERY} ON ls.session_id = tc.session_id
+        LEFT JOIN {COMMAND_LIST_SUBQUERY} ON ls.session_id = cmd.session_id
         {where}
         ORDER BY {sort_col} {sort_dir} {nulls}
         LIMIT ? OFFSET ?
@@ -105,6 +115,7 @@ async def sessions(  # noqa: PLR0913
             git_branch,
             first_prompt,
             tool_count,
+            commands,
         ) = row
         dur_str = ""
         if duration:
@@ -127,6 +138,7 @@ async def sessions(  # noqa: PLR0913
                 "branch": git_branch or "",
                 "title": clean_title(first_prompt or "")[:120],
                 "tool_count": tool_count or 0,
+                "commands": commands or "",
             }
         )
 
@@ -145,6 +157,10 @@ async def sessions(  # noqa: PLR0913
         SELECT DISTINCT git_branch FROM logical_sessions
         WHERE git_branch IS NOT NULL ORDER BY git_branch
     """).fetchall()
+    commands_list = db.execute("""
+        SELECT DISTINCT command FROM message_commands
+        ORDER BY command
+    """).fetchall()
 
     return templates.TemplateResponse(
         request,
@@ -162,9 +178,11 @@ async def sessions(  # noqa: PLR0913
             "filter_model": model,
             "filter_project": project,
             "filter_branch": branch,
+            "filter_command": command,
             "models": [r[0] for r in models],
             "projects": [r[0] for r in projects],
             "branches": [r[0] for r in branches],
+            "commands_list": [r[0] for r in commands_list],
         },
     )
 
