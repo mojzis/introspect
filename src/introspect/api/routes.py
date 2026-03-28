@@ -15,7 +15,20 @@ router = APIRouter()
 TEMPLATE_DIR = Path(__file__).resolve().parent.parent / "templates"
 templates = Jinja2Templates(directory=str(TEMPLATE_DIR))
 
-SESSIONS_PER_PAGE = 20
+SESSIONS_PER_PAGE_DEFAULT = 50
+SESSIONS_PAGE_SIZES = [25, 50, 100, 200]
+
+# Allowed sort columns for sessions page
+_SESSIONS_SORT_COLS = {
+    "started_at": "ls.started_at",
+    "duration": "ls.duration",
+    "user_msgs": "ls.user_messages",
+    "asst_msgs": "ls.assistant_messages",
+    "model": "ls.model",
+    "project": "ls.cwd",
+    "branch": "ls.git_branch",
+}
+_SESSIONS_SORT_DEFAULT = "started_at"
 
 
 def _parent(request: Request) -> str:
@@ -107,16 +120,54 @@ async def dashboard(request: Request):
 
 
 @router.get("/sessions", response_class=HTMLResponse)
-async def sessions(request: Request, page: int = Query(1, ge=1)):
-    """Paginated session list."""
+async def sessions(  # noqa: PLR0913
+    request: Request,
+    page: int = Query(1, ge=1),
+    page_size: int = Query(SESSIONS_PER_PAGE_DEFAULT, ge=1, le=500),
+    sort: str = Query(_SESSIONS_SORT_DEFAULT),
+    order: str = Query("desc"),
+    model: str = Query("", alias="model"),
+    project: str = Query("", alias="project"),
+    branch: str = Query("", alias="branch"),
+):
+    """Paginated session list with filtering and sorting."""
     conn = _conn(request)
 
-    total = conn.execute("SELECT COUNT(*) FROM logical_sessions").fetchone()[0]
-    total_pages = max(1, math.ceil(total / SESSIONS_PER_PAGE))
-    offset = (page - 1) * SESSIONS_PER_PAGE
+    # Clamp page_size to allowed values
+    if page_size not in SESSIONS_PAGE_SIZES:
+        page_size = SESSIONS_PER_PAGE_DEFAULT
+
+    # Build WHERE clause from filters
+    where_clauses: list[str] = []
+    params: list[str | int] = []
+    if model.strip():
+        where_clauses.append("ls.model = ?")
+        params.append(model.strip())
+    if project.strip():
+        where_clauses.append("ls.cwd LIKE ?")
+        params.append(f"%/{project.strip()}")
+    if branch.strip():
+        where_clauses.append("ls.git_branch = ?")
+        params.append(branch.strip())
+
+    where = "WHERE " + " AND ".join(where_clauses) if where_clauses else ""
+
+    # Count with filters
+    total = conn.execute(
+        f"SELECT COUNT(*) FROM logical_sessions ls {where}",  # nosec B608
+        params,
+    ).fetchone()[0]
+    total_pages = max(1, math.ceil(total / page_size))
+    offset = (page - 1) * page_size
+
+    # Resolve sort column
+    default_col = _SESSIONS_SORT_COLS[_SESSIONS_SORT_DEFAULT]
+    sort_col = _SESSIONS_SORT_COLS.get(sort, default_col)
+    sort_dir = "ASC" if order.lower() == "asc" else "DESC"
+    nulls = "NULLS LAST" if sort_dir == "DESC" else "NULLS FIRST"
 
     rows = conn.execute(
-        """
+        f"""
         SELECT
             ls.session_id,
             ls.started_at,
@@ -152,13 +203,14 @@ async def sessions(request: Request, page: int = Query(1, ge=1)):
                   ) NOT LIKE '/clear%'
             ) sub WHERE rn = 1
         ) fp ON ls.session_id = fp.session_id
-        ORDER BY ls.started_at DESC
+        {where}
+        ORDER BY {sort_col} {sort_dir} {nulls}
         LIMIT ? OFFSET ?
     """,  # nosec B608
-        [SESSIONS_PER_PAGE, offset],
+        [*params, page_size, offset],
     ).fetchall()
 
-    sessions = []
+    session_list = []
     for row in rows:
         (
             session_id,
@@ -167,21 +219,19 @@ async def sessions(request: Request, page: int = Query(1, ge=1)):
             duration,
             user_msgs,
             asst_msgs,
-            model,
+            _model,
             cwd,
             git_branch,
             first_prompt,
         ) = row
-        # Format duration as mm:ss
         dur_str = ""
         if duration:
             total_secs = int(duration.total_seconds())
             dur_str = f"{total_secs // 60}:{total_secs % 60:02d}"
-        # Extract project name (last path component)
-        project = ""
+        proj = ""
         if cwd:
-            project = cwd.rstrip("/").rsplit("/", 1)[-1]
-        sessions.append(
+            proj = cwd.rstrip("/").rsplit("/", 1)[-1]
+        session_list.append(
             {
                 "id": session_id,
                 "date": str(started_at)[5:10] if started_at else "",
@@ -190,22 +240,48 @@ async def sessions(request: Request, page: int = Query(1, ge=1)):
                 "duration": dur_str,
                 "user_msgs": user_msgs or 0,
                 "asst_msgs": asst_msgs or 0,
-                "model": model or "",
-                "project": project,
+                "model": _model or "",
+                "project": proj,
                 "branch": git_branch or "",
                 "title": (first_prompt or "")[:120],
             }
         )
+
+    # Get distinct values for filter dropdowns
+    models = conn.execute("""
+        SELECT DISTINCT model FROM logical_sessions
+        WHERE model IS NOT NULL ORDER BY model
+    """).fetchall()
+    projects = conn.execute("""
+        SELECT DISTINCT split_part(rtrim(cwd, '/'), '/', -1) AS proj
+        FROM logical_sessions
+        WHERE cwd IS NOT NULL
+        ORDER BY proj
+    """).fetchall()
+    branches = conn.execute("""
+        SELECT DISTINCT git_branch FROM logical_sessions
+        WHERE git_branch IS NOT NULL ORDER BY git_branch
+    """).fetchall()
 
     return templates.TemplateResponse(
         request,
         "sessions.html",
         {
             "parent": _parent(request),
-            "sessions": sessions,
+            "sessions": session_list,
             "page": page,
             "total_pages": total_pages,
             "total": total,
+            "page_size": page_size,
+            "page_sizes": SESSIONS_PAGE_SIZES,
+            "sort": sort,
+            "order": order.lower(),
+            "filter_model": model,
+            "filter_project": project,
+            "filter_branch": branch,
+            "models": [r[0] for r in models],
+            "projects": [r[0] for r in projects],
+            "branches": [r[0] for r in branches],
         },
     )
 
