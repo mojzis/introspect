@@ -1,6 +1,5 @@
 """Tests for introspect web UI routes."""
 
-import json
 import os
 import tempfile
 from contextlib import contextmanager
@@ -11,162 +10,102 @@ from fastapi.testclient import TestClient
 
 from introspect.api.main import app
 
+from .conftest import (
+    glob_pattern,
+    make_assistant_message,
+    make_user_message,
+    write_jsonl,
+)
+
+SID = "01234567-abcd-abcd-abcd-0123456789ab"
+
 
 def _write_sample_jsonl(tmp_dir: Path) -> Path:
     """Write a minimal JSONL file for testing."""
-    session_id = "01234567-abcd-abcd-abcd-0123456789ab"
-    jsonl_path = tmp_dir / "projects" / "test-project" / f"{session_id}.jsonl"
-    jsonl_path.parent.mkdir(parents=True, exist_ok=True)
-
     lines = [
-        {
-            "type": "user",
-            "timestamp": "2026-03-27T10:00:00.000Z",
-            "sessionId": session_id,
-            "uuid": "u1",
-            "parentUuid": None,
-            "isSidechain": False,
-            "cwd": "/tmp/test",
-            "version": "2.1.0",
-            "entrypoint": "cli",
-            "gitBranch": "main",
-            "message": {"role": "user", "content": "Hello, help me with tests"},
-        },
-        {
-            "type": "assistant",
-            "timestamp": "2026-03-27T10:00:01.000Z",
-            "sessionId": session_id,
-            "uuid": "a1",
-            "parentUuid": "u1",
-            "isSidechain": False,
-            "cwd": "/tmp/test",
-            "version": "2.1.0",
-            "entrypoint": "cli",
-            "gitBranch": "main",
-            "requestId": "req1",
-            "message": {
-                "role": "assistant",
-                "model": "claude-opus-4-6",
-                "id": "msg1",
-                "content": [{"type": "text", "text": "Sure, I can help!"}],
-                "usage": {"input_tokens": 100, "output_tokens": 20},
-            },
-        },
-        {
-            "type": "assistant",
-            "timestamp": "2026-03-27T10:00:02.000Z",
-            "sessionId": session_id,
-            "uuid": "a2",
-            "parentUuid": "a1",
-            "isSidechain": False,
-            "cwd": "/tmp/test",
-            "version": "2.1.0",
-            "entrypoint": "cli",
-            "gitBranch": "main",
-            "requestId": "req2",
-            "message": {
-                "role": "assistant",
-                "model": "claude-opus-4-6",
-                "id": "msg2",
-                "content": [
-                    {
-                        "type": "tool_use",
-                        "id": "toolu_test1",
-                        "name": "Bash",
-                        "input": {"command": "echo hello", "description": "test"},
-                    }
-                ],
-            },
-        },
-        {
-            "type": "user",
-            "timestamp": "2026-03-27T10:00:03.000Z",
-            "sessionId": session_id,
-            "uuid": "u2",
-            "parentUuid": "a2",
-            "isSidechain": False,
-            "cwd": "/tmp/test",
-            "version": "2.1.0",
-            "entrypoint": "cli",
-            "gitBranch": "main",
-            "sourceToolAssistantUUID": "a2",
-            "toolUseResult": {
+        make_user_message(
+            SID,
+            "u1",
+            None,
+            "2026-03-27T10:00:00.000Z",
+            "Hello, help me with tests",
+        ),
+        make_assistant_message(
+            SID,
+            "a1",
+            "u1",
+            "2026-03-27T10:00:01.000Z",
+            [{"type": "text", "text": "Sure, I can help!"}],
+            usage={"input_tokens": 100, "output_tokens": 20},
+        ),
+        make_assistant_message(
+            SID,
+            "a2",
+            "a1",
+            "2026-03-27T10:00:02.000Z",
+            [
+                {
+                    "type": "tool_use",
+                    "id": "toolu_test1",
+                    "name": "Bash",
+                    "input": {"command": "echo hello", "description": "test"},
+                }
+            ],
+        ),
+        make_user_message(
+            SID,
+            "u2",
+            "a2",
+            "2026-03-27T10:00:03.000Z",
+            [
+                {
+                    "type": "tool_result",
+                    "tool_use_id": "toolu_test1",
+                    "content": "hello\n",
+                    "is_error": False,
+                }
+            ],
+            tool_use_result={
                 "stdout": "hello\n",
                 "stderr": "",
                 "interrupted": False,
                 "isImage": False,
                 "noOutputExpected": False,
             },
-            "message": {
-                "role": "user",
-                "content": [
-                    {
-                        "type": "tool_result",
-                        "tool_use_id": "toolu_test1",
-                        "content": "hello\n",
-                        "is_error": False,
-                    }
-                ],
-            },
-        },
-        {
-            "type": "assistant",
-            "timestamp": "2026-03-27T10:00:04.000Z",
-            "sessionId": session_id,
-            "uuid": "a3",
-            "parentUuid": "u2",
-            "isSidechain": False,
-            "cwd": "/tmp/test",
-            "version": "2.1.0",
-            "entrypoint": "cli",
-            "gitBranch": "main",
-            "requestId": "req3",
-            "message": {
-                "role": "assistant",
-                "model": "claude-opus-4-6",
-                "id": "msg3",
-                "content": [
-                    {
-                        "type": "tool_use",
-                        "id": "toolu_mcp1",
-                        "name": "mcp__github__get_me",
-                        "input": {},
-                    }
-                ],
-            },
-        },
-        {
-            "type": "user",
-            "timestamp": "2026-03-27T10:00:05.000Z",
-            "sessionId": session_id,
-            "uuid": "u3",
-            "parentUuid": "a3",
-            "isSidechain": False,
-            "cwd": "/tmp/test",
-            "version": "2.1.0",
-            "entrypoint": "cli",
-            "gitBranch": "main",
-            "sourceToolAssistantUUID": "a3",
-            "toolUseResult": {},
-            "message": {
-                "role": "user",
-                "content": [
-                    {
-                        "type": "tool_result",
-                        "tool_use_id": "toolu_mcp1",
-                        "content": '{"login": "test"}',
-                        "is_error": False,
-                    }
-                ],
-            },
-        },
+            source_tool_uuid="a2",
+        ),
+        make_assistant_message(
+            SID,
+            "a3",
+            "u2",
+            "2026-03-27T10:00:04.000Z",
+            [
+                {
+                    "type": "tool_use",
+                    "id": "toolu_mcp1",
+                    "name": "mcp__github__get_me",
+                    "input": {},
+                }
+            ],
+        ),
+        make_user_message(
+            SID,
+            "u3",
+            "a3",
+            "2026-03-27T10:00:05.000Z",
+            [
+                {
+                    "type": "tool_result",
+                    "tool_use_id": "toolu_mcp1",
+                    "content": '{"login": "test"}',
+                    "is_error": False,
+                }
+            ],
+            tool_use_result={},
+            source_tool_uuid="a3",
+        ),
     ]
-
-    with jsonl_path.open("w") as f:
-        for line in lines:
-            f.write(json.dumps(line) + "\n")
-
-    return jsonl_path
+    return write_jsonl(tmp_dir, SID, lines)
 
 
 @contextmanager
@@ -174,14 +113,13 @@ def _patched_client(tmp_path: Path):
     """Context manager that yields a TestClient with materialized test data."""
     _write_sample_jsonl(tmp_path)
     db_path = tmp_path / "test.duckdb"
-    glob_pattern = str(tmp_path / "projects" / "**" / "*.jsonl")
 
     with (
         patch.dict(
             os.environ,
             {
                 "INTROSPECT_DB_PATH": str(db_path),
-                "INTROSPECT_JSONL_GLOB": glob_pattern,
+                "INTROSPECT_JSONL_GLOB": glob_pattern(tmp_path),
                 "INTROSPECT_DAYS": "0",
             },
         ),

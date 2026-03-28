@@ -8,15 +8,11 @@ from pathlib import Path
 import duckdb
 from fastapi import FastAPI, Request
 from fastapi.responses import HTMLResponse, JSONResponse
-from fastapi.templating import Jinja2Templates
 
 from introspect.api.routes import router
 from introspect.db import DEFAULT_DB_PATH, DEFAULT_JSONL_GLOB, materialize_views
 from introspect.mcp.server import create_mcp_server
 from introspect.search import build_search_corpus
-
-TEMPLATE_DIR = Path(__file__).resolve().parent.parent / "templates"
-templates = Jinja2Templates(directory=str(TEMPLATE_DIR))
 
 
 @asynccontextmanager
@@ -32,7 +28,9 @@ async def lifespan(app: FastAPI):
         build_search_corpus(conn)
     finally:
         conn.close()
-    app.state.db_path = db_path
+
+    # Open a shared read-only connection for request handling
+    app.state.read_conn = duckdb.connect(str(db_path), read_only=True)
 
     # Create a fresh MCP server and replace the placeholder mount
     mcp_server = create_mcp_server()
@@ -44,7 +42,10 @@ async def lifespan(app: FastAPI):
     # Rebuild middleware stack to pick up the new mount
     app.middleware_stack = app.build_middleware_stack()
     async with mcp_server.session_manager.run():
-        yield
+        try:
+            yield
+        finally:
+            app.state.read_conn.close()
 
 
 app = FastAPI(title="Introspect", lifespan=lifespan)
@@ -52,14 +53,18 @@ app = FastAPI(title="Introspect", lifespan=lifespan)
 
 @app.middleware("http")
 async def db_middleware(request: Request, call_next):
-    """Attach a DuckDB connection to each request, close after."""
-    db_path = getattr(request.app.state, "db_path", DEFAULT_DB_PATH)
-    conn = duckdb.connect(str(db_path))
-    request.state.conn = conn
+    """Attach a DuckDB cursor to each request from the shared connection."""
+    read_conn = getattr(request.app.state, "read_conn", None)
+    if read_conn is not None:
+        request.state.conn = read_conn.cursor()
+    else:
+        # Fallback for tests or when lifespan hasn't run
+        db_path = getattr(request.app.state, "db_path", DEFAULT_DB_PATH)
+        request.state.conn = duckdb.connect(str(db_path))
     try:
         response = await call_next(request)
     finally:
-        conn.close()
+        request.state.conn.close()
     return response
 
 

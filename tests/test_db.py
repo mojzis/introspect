@@ -1,6 +1,5 @@
 """Tests for introspect database views."""
 
-import json
 import tempfile
 from pathlib import Path
 
@@ -8,114 +7,72 @@ import duckdb
 
 from introspect.db import get_connection, get_read_connection, materialize_views
 
+from .conftest import (
+    glob_pattern,
+    make_assistant_message,
+    make_user_message,
+    write_jsonl,
+)
+
+SID = "test-session-001"
+
 
 def _write_sample_jsonl(tmp_dir: Path) -> Path:
     """Write a minimal JSONL file for testing."""
-    session_id = "test-session-001"
-    jsonl_path = tmp_dir / "projects" / "test-project" / f"{session_id}.jsonl"
-    jsonl_path.parent.mkdir(parents=True, exist_ok=True)
-
     lines = [
-        {
-            "type": "user",
-            "timestamp": "2026-03-27T10:00:00.000Z",
-            "sessionId": session_id,
-            "uuid": "u1",
-            "parentUuid": None,
-            "isSidechain": False,
-            "cwd": "/tmp/test",
-            "version": "2.1.0",
-            "entrypoint": "cli",
-            "gitBranch": "main",
-            "message": {"role": "user", "content": "Hello, help me with tests"},
-        },
-        {
-            "type": "assistant",
-            "timestamp": "2026-03-27T10:00:01.000Z",
-            "sessionId": session_id,
-            "uuid": "a1",
-            "parentUuid": "u1",
-            "isSidechain": False,
-            "cwd": "/tmp/test",
-            "version": "2.1.0",
-            "entrypoint": "cli",
-            "gitBranch": "main",
-            "requestId": "req1",
-            "message": {
-                "role": "assistant",
-                "model": "claude-opus-4-6",
-                "id": "msg1",
-                "content": [{"type": "text", "text": "Sure, I can help!"}],
-                "usage": {
-                    "input_tokens": 100,
-                    "output_tokens": 20,
-                },
-            },
-        },
-        {
-            "type": "assistant",
-            "timestamp": "2026-03-27T10:00:02.000Z",
-            "sessionId": session_id,
-            "uuid": "a2",
-            "parentUuid": "a1",
-            "isSidechain": False,
-            "cwd": "/tmp/test",
-            "version": "2.1.0",
-            "entrypoint": "cli",
-            "gitBranch": "main",
-            "requestId": "req2",
-            "message": {
-                "role": "assistant",
-                "model": "claude-opus-4-6",
-                "id": "msg2",
-                "content": [
-                    {
-                        "type": "tool_use",
-                        "id": "toolu_test1",
-                        "name": "Bash",
-                        "input": {"command": "echo hello", "description": "test"},
-                    }
-                ],
-            },
-        },
-        {
-            "type": "user",
-            "timestamp": "2026-03-27T10:00:03.000Z",
-            "sessionId": session_id,
-            "uuid": "u2",
-            "parentUuid": "a2",
-            "isSidechain": False,
-            "cwd": "/tmp/test",
-            "version": "2.1.0",
-            "entrypoint": "cli",
-            "gitBranch": "main",
-            "sourceToolAssistantUUID": "a2",
-            "toolUseResult": {
+        make_user_message(
+            SID,
+            "u1",
+            None,
+            "2026-03-27T10:00:00.000Z",
+            "Hello, help me with tests",
+        ),
+        make_assistant_message(
+            SID,
+            "a1",
+            "u1",
+            "2026-03-27T10:00:01.000Z",
+            [{"type": "text", "text": "Sure, I can help!"}],
+            usage={"input_tokens": 100, "output_tokens": 20},
+        ),
+        make_assistant_message(
+            SID,
+            "a2",
+            "a1",
+            "2026-03-27T10:00:02.000Z",
+            [
+                {
+                    "type": "tool_use",
+                    "id": "toolu_test1",
+                    "name": "Bash",
+                    "input": {"command": "echo hello", "description": "test"},
+                }
+            ],
+        ),
+        make_user_message(
+            SID,
+            "u2",
+            "a2",
+            "2026-03-27T10:00:03.000Z",
+            [
+                {
+                    "type": "tool_result",
+                    "tool_use_id": "toolu_test1",
+                    "content": "hello\n",
+                    "is_error": False,
+                }
+            ],
+            tool_use_result={
                 "stdout": "hello\n",
                 "stderr": "",
                 "interrupted": False,
                 "isImage": False,
                 "noOutputExpected": False,
             },
-            "message": {
-                "role": "user",
-                "content": [
-                    {
-                        "type": "tool_result",
-                        "tool_use_id": "toolu_test1",
-                        "content": "hello\n",
-                        "is_error": False,
-                    }
-                ],
-            },
-        },
+            source_tool_uuid="a2",
+        ),
     ]
-
-    with jsonl_path.open("w") as f:
-        for line in lines:
-            f.write(json.dumps(line) + "\n")
-
-    return jsonl_path
+    return write_jsonl(tmp_dir, SID, lines)
 
 
 def test_views_created():
@@ -125,8 +82,8 @@ def test_views_created():
         _write_sample_jsonl(tmp_path)
 
         db_path = tmp_path / "test.duckdb"
-        glob_pattern = str(tmp_path / "projects" / "**" / "*.jsonl")
-        conn = get_connection(db_path, glob_pattern)
+        glob_pat = glob_pattern(tmp_path)
+        conn = get_connection(db_path, glob_pat)
 
         # Check views exist
         views = conn.execute("""
@@ -138,7 +95,7 @@ def test_views_created():
         assert "logical_sessions" in view_names
         assert "tool_calls" in view_names
         assert "conversation_turns" in view_names
-        assert "sessions" in view_names
+        assert "session_titles" in view_names
         conn.close()
 
 
@@ -149,8 +106,8 @@ def test_raw_messages():
         _write_sample_jsonl(tmp_path)
 
         db_path = tmp_path / "test.duckdb"
-        glob_pattern = str(tmp_path / "projects" / "**" / "*.jsonl")
-        conn = get_connection(db_path, glob_pattern)
+        glob_pat = glob_pattern(tmp_path)
+        conn = get_connection(db_path, glob_pat)
 
         rows = conn.execute("SELECT * FROM raw_messages").fetchall()
         assert len(rows) == 4
@@ -168,8 +125,8 @@ def test_logical_sessions():
         _write_sample_jsonl(tmp_path)
 
         db_path = tmp_path / "test.duckdb"
-        glob_pattern = str(tmp_path / "projects" / "**" / "*.jsonl")
-        conn = get_connection(db_path, glob_pattern)
+        glob_pat = glob_pattern(tmp_path)
+        conn = get_connection(db_path, glob_pat)
 
         rows = conn.execute("SELECT * FROM logical_sessions").fetchall()
         assert len(rows) == 1
@@ -190,8 +147,8 @@ def test_tool_calls():
         _write_sample_jsonl(tmp_path)
 
         db_path = tmp_path / "test.duckdb"
-        glob_pattern = str(tmp_path / "projects" / "**" / "*.jsonl")
-        conn = get_connection(db_path, glob_pattern)
+        glob_pat = glob_pattern(tmp_path)
+        conn = get_connection(db_path, glob_pat)
 
         rows = conn.execute("SELECT * FROM tool_calls").fetchall()
         assert len(rows) == 1
@@ -211,15 +168,15 @@ def test_get_read_connection_uses_materialized():
         _write_sample_jsonl(tmp_path)
 
         db_path = tmp_path / "test.duckdb"
-        glob_pattern = str(tmp_path / "projects" / "**" / "*.jsonl")
+        glob_pat = glob_pattern(tmp_path)
 
         # First materialize the data
         conn = duckdb.connect(str(db_path))
-        materialize_views(conn, glob_pattern)
+        materialize_views(conn, glob_pat)
         conn.close()
 
         # Now get_read_connection should return a read-only connection
-        conn = get_read_connection(db_path, glob_pattern)
+        conn = get_read_connection(db_path, glob_pat)
         try:
             # Should be able to query materialized tables
             rows = conn.execute("SELECT COUNT(*) FROM raw_messages").fetchone()
@@ -244,10 +201,10 @@ def test_get_read_connection_falls_back_to_lazy():
         _write_sample_jsonl(tmp_path)
 
         db_path = tmp_path / "fresh.duckdb"
-        glob_pattern = str(tmp_path / "projects" / "**" / "*.jsonl")
+        glob_pat = glob_pattern(tmp_path)
 
         # No materialization — should fall back to lazy views
-        conn = get_read_connection(db_path, glob_pattern)
+        conn = get_read_connection(db_path, glob_pat)
         try:
             rows = conn.execute("SELECT COUNT(*) FROM raw_messages").fetchone()
             assert rows is not None
@@ -271,10 +228,10 @@ def test_get_read_connection_nonexistent_db():
         _write_sample_jsonl(tmp_path)
 
         db_path = tmp_path / "nonexistent" / "test.duckdb"
-        glob_pattern = str(tmp_path / "projects" / "**" / "*.jsonl")
+        glob_pat = glob_pattern(tmp_path)
 
         # DB path doesn't exist — should fall back to lazy views
-        conn = get_read_connection(db_path, glob_pattern)
+        conn = get_read_connection(db_path, glob_pat)
         try:
             rows = conn.execute("SELECT COUNT(*) FROM raw_messages").fetchone()
             assert rows is not None
@@ -293,17 +250,17 @@ def test_materialize_views_drops_existing_views():
     with tempfile.TemporaryDirectory() as tmp:
         tmp_path = Path(tmp)
         _write_sample_jsonl(tmp_path)
-        glob_pattern = str(tmp_path / "projects" / "**" / "*.jsonl")
+        glob_pat = glob_pattern(tmp_path)
         db_path = tmp_path / "test.duckdb"
 
         conn = duckdb.connect(str(db_path))
 
         # Simulate a previous lazy-view session leaving views behind
-        for name in ("sessions", "raw_messages", "raw_data"):
+        for name in ("session_titles", "raw_messages", "raw_data"):
             conn.execute(f"CREATE VIEW {name} AS SELECT 1 AS x")
 
         # This must not raise CatalogException
-        materialize_views(conn, glob_pattern, days=0)
+        materialize_views(conn, glob_pat, days=0)
 
         # Verify materialized tables exist
         tables = conn.execute("""
@@ -327,7 +284,7 @@ def test_materialize_views_drops_existing_tables():
     with tempfile.TemporaryDirectory() as tmp:
         tmp_path = Path(tmp)
         _write_sample_jsonl(tmp_path)
-        glob_pattern = str(tmp_path / "projects" / "**" / "*.jsonl")
+        glob_pat = glob_pattern(tmp_path)
         db_path = tmp_path / "test.duckdb"
 
         conn = duckdb.connect(str(db_path))
@@ -336,7 +293,7 @@ def test_materialize_views_drops_existing_tables():
         conn.execute("CREATE TABLE search_corpus (id INTEGER)")
 
         # This must not raise CatalogException
-        materialize_views(conn, glob_pattern, days=0)
+        materialize_views(conn, glob_pat, days=0)
 
         # Verify materialized tables exist
         tables = conn.execute("""

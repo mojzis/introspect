@@ -12,7 +12,7 @@ from introspect.db import (
     get_read_connection,
     materialize_views,
 )
-from introspect.search import build_search_corpus, fts_search
+from introspect.search import build_search_corpus, ensure_search_corpus, fts_search
 
 SID_TRUNCATE = 12
 
@@ -291,14 +291,7 @@ def search(
     """Full-text search across conversation logs."""
     conn = _db()
     try:
-        # Ensure the search corpus exists; build if missing
-        tables = conn.execute("""
-            SELECT table_name FROM information_schema.tables
-            WHERE table_name = 'search_corpus' AND table_type = 'BASE TABLE'
-        """).fetchall()
-        if not tables:
-            console.print("[dim]Building search index...[/dim]")
-            build_search_corpus(conn)
+        ensure_search_corpus(conn)
 
         results = fts_search(conn, query_text, limit)
 
@@ -382,9 +375,9 @@ def serve(
 @app.command()
 def mcp():
     """Run the MCP server (stdio transport) for Claude Code integration."""
-    from introspect.mcp.server import mcp as mcp_server  # noqa: PLC0415
+    from introspect.mcp.server import create_mcp_server  # noqa: PLC0415
 
-    mcp_server.run(transport="stdio")
+    create_mcp_server().run(transport="stdio")
 
 
 @app.command()

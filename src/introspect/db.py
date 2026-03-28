@@ -8,6 +8,28 @@ import duckdb
 DEFAULT_DB_PATH = Path.home() / ".introspect" / "introspect.duckdb"
 DEFAULT_JSONL_GLOB = str(Path.home() / ".claude" / "projects" / "**" / "*.jsonl")
 
+_READ_JSON_OPTS = (
+    "filename=true, format='newline_delimited', union_by_name=true, ignore_errors=true"
+)
+
+_RAW_MESSAGES_COLUMNS = """
+    filename AS file_path,
+    type,
+    timestamp::TIMESTAMP AS timestamp,
+    sessionId AS session_id,
+    uuid,
+    parentUuid AS parent_uuid,
+    isSidechain AS is_sidechain,
+    cwd,
+    version,
+    entrypoint,
+    gitBranch AS git_branch,
+    json_extract_string(message, '$.role') AS role,
+    json_extract_string(message, '$.model') AS model,
+    message,
+    toolUseResult AS tool_use_result,
+"""
+
 
 def get_read_connection(
     db_path: Path = DEFAULT_DB_PATH,
@@ -24,7 +46,7 @@ def get_read_connection(
             if tables:
                 return conn
             conn.close()
-        except Exception:  # nosec B110
+        except duckdb.Error:
             pass
     return get_connection(db_path, jsonl_glob)
 
@@ -64,7 +86,7 @@ def materialize_views(
 
     # Drop everything to avoid table/view name conflicts
     for name in (
-        "sessions",
+        "session_titles",
         "conversation_turns",
         "tool_calls",
         "logical_sessions",
@@ -77,92 +99,43 @@ def materialize_views(
         with contextlib.suppress(duckdb.CatalogException):
             conn.execute(f"DROP TABLE IF EXISTS {name}")  # nosec B608
 
+    _read = f"read_json_auto('{jsonl_glob}', {_READ_JSON_OPTS})"
+
     conn.execute(f"""
         CREATE TABLE raw_data AS
-        SELECT *
-        FROM read_json_auto(
-            '{jsonl_glob}',
-            filename=true,
-            format='newline_delimited',
-            union_by_name=true,
-            ignore_errors=true
-        )
+        SELECT * FROM {_read}
         {day_filter}
     """)  # nosec B608
 
     conn.execute(f"""
         CREATE TABLE raw_messages AS
-        SELECT
-            filename AS file_path,
-            type,
-            timestamp::TIMESTAMP AS timestamp,
-            sessionId AS session_id,
-            uuid,
-            parentUuid AS parent_uuid,
-            isSidechain AS is_sidechain,
-            cwd,
-            version,
-            entrypoint,
-            gitBranch AS git_branch,
-            json_extract_string(message, '$.role') AS role,
-            json_extract_string(message, '$.model') AS model,
-            message,
-            toolUseResult AS tool_use_result,
-        FROM read_json_auto(
-            '{jsonl_glob}',
-            filename=true,
-            format='newline_delimited',
-            union_by_name=true,
-            ignore_errors=true
-        )
+        SELECT {_RAW_MESSAGES_COLUMNS}
+        FROM {_read}
         WHERE type IN ('user', 'assistant')
         {and_day_filter}
     """)  # nosec B608
+
+    # Add indexes for common query patterns
+    conn.execute("CREATE INDEX idx_rm_session ON raw_messages(session_id)")
+    conn.execute("CREATE INDEX idx_rm_type ON raw_messages(type)")
+    conn.execute("CREATE INDEX idx_rm_timestamp ON raw_messages(timestamp)")
 
     _create_derived_views(conn)
 
 
 def _create_views(conn: duckdb.DuckDBPyConnection, jsonl_glob: str) -> None:
     """Create lazy views over JSONL files."""
-    # Raw data: completely unfiltered JSONL — every field, every row
+    _read = f"read_json_auto('{jsonl_glob}', {_READ_JSON_OPTS})"
+
     conn.execute(f"""
         CREATE OR REPLACE VIEW raw_data AS
-        SELECT *
-        FROM read_json_auto(
-            '{jsonl_glob}',
-            filename=true,
-            format='newline_delimited',
-            union_by_name=true,
-            ignore_errors=true
-        )
+        SELECT * FROM {_read}
     """)  # nosec B608
 
-    # Raw messages: all JSONL lines with parsed fields
     conn.execute(f"""
         CREATE OR REPLACE VIEW raw_messages AS
-        SELECT
-            filename AS file_path,
-            type,
-            timestamp::TIMESTAMP AS timestamp,
-            sessionId AS session_id,
-            uuid,
-            parentUuid AS parent_uuid,
-            isSidechain AS is_sidechain,
-            cwd,
-            version,
-            entrypoint,
-            gitBranch AS git_branch,
-            json_extract_string(message, '$.role') AS role,
-            json_extract_string(message, '$.model') AS model,
-            message,
-            toolUseResult AS tool_use_result,
-        FROM read_json_auto(
-            '{jsonl_glob}',
-            filename=true,
-            format='newline_delimited',
-            union_by_name=true,
-            ignore_errors=true
-        )
+        SELECT {_RAW_MESSAGES_COLUMNS}
+        FROM {_read}
         WHERE type IN ('user', 'assistant')
     """)  # nosec B608
 
@@ -195,31 +168,59 @@ def _create_derived_views(conn: duckdb.DuckDBPyConnection) -> None:
         GROUP BY session_id
     """)
 
-    # Tool calls: assistant tool_use content blocks joined with results
+    # Tool calls: assistant tool_use content blocks joined with results.
+    # Unnests all content blocks so multi-tool messages are captured.
     conn.execute("""
         CREATE OR REPLACE VIEW tool_calls AS
         WITH uses AS (
             SELECT
-                session_id,
-                timestamp AS called_at,
-                uuid AS assistant_uuid,
-                json_extract_string(message, '$.content[0].type') AS content_type,
-                json_extract_string(message, '$.content[0].name') AS tool_name,
-                json_extract_string(message, '$.content[0].id') AS tool_use_id,
-                json_extract_string(message, '$.content[0].input') AS tool_input,
-            FROM raw_messages
-            WHERE type = 'assistant'
-              AND json_extract_string(message, '$.content[0].type') = 'tool_use'
+                m.session_id,
+                m.timestamp AS called_at,
+                m.uuid AS assistant_uuid,
+                json_extract_string(
+                    m.message, '$.content[' || i.idx || '].name'
+                ) AS tool_name,
+                json_extract_string(
+                    m.message, '$.content[' || i.idx || '].id'
+                ) AS tool_use_id,
+                json_extract_string(
+                    m.message, '$.content[' || i.idx || '].input'
+                ) AS tool_input,
+            FROM raw_messages m,
+                 generate_series(
+                     0,
+                     CAST(json_array_length(
+                         json_extract(m.message, '$.content')
+                     ) - 1 AS BIGINT)
+                 ) AS i(idx)
+            WHERE m.type = 'assistant'
+              AND json_array_length(json_extract(m.message, '$.content')) > 0
+              AND json_extract_string(
+                  m.message, '$.content[' || i.idx || '].type'
+              ) = 'tool_use'
         ),
         results AS (
             SELECT
-                json_extract_string(message, '$.content[0].tool_use_id') AS tool_use_id,
-                json_extract(message, '$.content[0].is_error') AS is_error,
-                tool_use_result,
-                timestamp AS result_at,
-            FROM raw_messages
-            WHERE type = 'user'
-              AND json_extract_string(message, '$.content[0].type') = 'tool_result'
+                json_extract_string(
+                    m.message, '$.content[' || i.idx || '].tool_use_id'
+                ) AS tool_use_id,
+                json_extract(
+                    m.message, '$.content[' || i.idx || '].is_error'
+                ) AS is_error,
+                m.tool_use_result,
+                m.timestamp AS result_at,
+            FROM raw_messages m,
+                 generate_series(
+                     0,
+                     CAST(json_array_length(
+                         json_extract(m.message, '$.content')
+                     ) - 1 AS BIGINT)
+                 ) AS i(idx)
+            WHERE m.type = 'user'
+              AND json_array_length(json_extract(m.message, '$.content')) > 0
+              AND json_extract_string(
+                  m.message, '$.content[' || i.idx || '].type'
+              ) = 'tool_result'
         )
         SELECT
             u.session_id,
@@ -270,8 +271,38 @@ def _create_derived_views(conn: duckdb.DuckDBPyConnection) -> None:
         FROM ordered
     """)
 
-    # Convenience alias: "sessions" → logical_sessions
+    # Session titles: first meaningful user prompt per session
     conn.execute("""
-        CREATE OR REPLACE VIEW sessions AS
-        SELECT * FROM logical_sessions
+        CREATE OR REPLACE VIEW session_titles AS
+        SELECT session_id, first_prompt FROM (
+            SELECT
+                session_id,
+                COALESCE(
+                    json_extract_string(message, '$.content[0].text'),
+                    json_extract_string(message, '$.content')
+                ) AS first_prompt,
+                ROW_NUMBER() OVER (
+                    PARTITION BY session_id ORDER BY timestamp
+                ) AS rn
+            FROM raw_messages
+            WHERE type = 'user' AND role = 'user'
+              AND json_extract_string(
+                  message, '$.content[0].type'
+              ) IS DISTINCT FROM 'tool_result'
+              AND COALESCE(
+                  json_extract_string(message, '$.content[0].text'),
+                  json_extract_string(message, '$.content'),
+                  ''
+              ) NOT LIKE '/clear%'
+              AND COALESCE(
+                  json_extract_string(message, '$.content[0].text'),
+                  json_extract_string(message, '$.content'),
+                  ''
+              ) NOT LIKE '<command-name>/clear%'
+              AND COALESCE(
+                  json_extract_string(message, '$.content[0].text'),
+                  json_extract_string(message, '$.content'),
+                  ''
+              ) NOT LIKE '<local-command-caveat>%'
+        ) sub WHERE rn = 1
     """)

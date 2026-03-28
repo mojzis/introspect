@@ -4,23 +4,33 @@ from __future__ import annotations
 
 import duckdb
 
-_fts_checked: bool | None = None
+_fts_cache: dict[str, bool] = {}
 
 
 def _fts_available(conn: duckdb.DuckDBPyConnection) -> bool:
     """Check if the FTS extension is already installed and loadable.
 
     Does NOT attempt INSTALL — avoids hanging when there's no network.
+    Result is cached for the process lifetime. Clear ``_fts_cache`` to reset.
     """
-    global _fts_checked  # noqa: PLW0603
-    if _fts_checked is not None:
-        return _fts_checked
+    if "available" in _fts_cache:
+        return _fts_cache["available"]
     try:
         conn.execute("LOAD fts")
-        _fts_checked = True
+        _fts_cache["available"] = True
     except (duckdb.IOException, duckdb.CatalogException):
-        _fts_checked = False
-    return _fts_checked
+        _fts_cache["available"] = False
+    return _fts_cache["available"]
+
+
+def ensure_search_corpus(conn: duckdb.DuckDBPyConnection) -> None:
+    """Build the search corpus table if it doesn't already exist."""
+    tables = conn.execute("""
+        SELECT table_name FROM information_schema.tables
+        WHERE table_name = 'search_corpus' AND table_type = 'BASE TABLE'
+    """).fetchall()
+    if not tables:
+        build_search_corpus(conn)
 
 
 def build_search_corpus(conn: duckdb.DuckDBPyConnection) -> None:
