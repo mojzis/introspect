@@ -4,7 +4,9 @@ import json
 import tempfile
 from pathlib import Path
 
-from introspect.db import get_connection
+import duckdb
+
+from introspect.db import get_connection, get_read_connection, materialize_views
 
 
 def _write_sample_jsonl(tmp_dir: Path) -> Path:
@@ -200,3 +202,82 @@ def test_tool_calls():
         assert tool_call[2] == "Bash"
         assert tool_call[3] == "toolu_test1"
         conn.close()
+
+
+def test_get_read_connection_uses_materialized():
+    """get_read_connection returns read-only conn when materialized tables exist."""
+    with tempfile.TemporaryDirectory() as tmp:
+        tmp_path = Path(tmp)
+        _write_sample_jsonl(tmp_path)
+
+        db_path = tmp_path / "test.duckdb"
+        glob_pattern = str(tmp_path / "projects" / "**" / "*.jsonl")
+
+        # First materialize the data
+        conn = duckdb.connect(str(db_path))
+        materialize_views(conn, glob_pattern)
+        conn.close()
+
+        # Now get_read_connection should return a read-only connection
+        conn = get_read_connection(db_path, glob_pattern)
+        try:
+            # Should be able to query materialized tables
+            rows = conn.execute("SELECT COUNT(*) FROM raw_messages").fetchone()
+            assert rows is not None
+            assert rows[0] == 4
+
+            # Should have materialized tables (BASE TABLE, not VIEW)
+            tables = conn.execute(
+                "SELECT table_type FROM information_schema.tables "
+                "WHERE table_name = 'raw_messages'"
+            ).fetchone()
+            assert tables is not None
+            assert tables[0] == "BASE TABLE"
+        finally:
+            conn.close()
+
+
+def test_get_read_connection_falls_back_to_lazy():
+    """get_read_connection falls back to lazy views when no materialized tables."""
+    with tempfile.TemporaryDirectory() as tmp:
+        tmp_path = Path(tmp)
+        _write_sample_jsonl(tmp_path)
+
+        db_path = tmp_path / "fresh.duckdb"
+        glob_pattern = str(tmp_path / "projects" / "**" / "*.jsonl")
+
+        # No materialization — should fall back to lazy views
+        conn = get_read_connection(db_path, glob_pattern)
+        try:
+            rows = conn.execute("SELECT COUNT(*) FROM raw_messages").fetchone()
+            assert rows is not None
+            assert rows[0] == 4
+
+            # Should be a VIEW, not a BASE TABLE
+            tables = conn.execute(
+                "SELECT table_type FROM information_schema.tables "
+                "WHERE table_name = 'raw_messages'"
+            ).fetchone()
+            assert tables is not None
+            assert tables[0] == "VIEW"
+        finally:
+            conn.close()
+
+
+def test_get_read_connection_nonexistent_db():
+    """get_read_connection falls back when DB file doesn't exist."""
+    with tempfile.TemporaryDirectory() as tmp:
+        tmp_path = Path(tmp)
+        _write_sample_jsonl(tmp_path)
+
+        db_path = tmp_path / "nonexistent" / "test.duckdb"
+        glob_pattern = str(tmp_path / "projects" / "**" / "*.jsonl")
+
+        # DB path doesn't exist — should fall back to lazy views
+        conn = get_read_connection(db_path, glob_pattern)
+        try:
+            rows = conn.execute("SELECT COUNT(*) FROM raw_messages").fetchone()
+            assert rows is not None
+            assert rows[0] == 4
+        finally:
+            conn.close()

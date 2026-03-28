@@ -6,7 +6,12 @@ import typer
 from rich.console import Console
 from rich.table import Table
 
-from introspect.db import DEFAULT_DB_PATH, DEFAULT_JSONL_GLOB, get_connection
+from introspect.db import (
+    DEFAULT_DB_PATH,
+    DEFAULT_JSONL_GLOB,
+    get_read_connection,
+    materialize_views,
+)
 from introspect.search import build_search_corpus, fts_search
 
 SID_TRUNCATE = 12
@@ -21,7 +26,7 @@ def _truncate_sid(val) -> str:
 
 
 def _db(db_path: Path = DEFAULT_DB_PATH, jsonl_glob: str = DEFAULT_JSONL_GLOB):
-    return get_connection(db_path, jsonl_glob)
+    return get_read_connection(db_path, jsonl_glob)
 
 
 @app.command()
@@ -325,6 +330,33 @@ def search(
 
 
 @app.command()
+def materialize(
+    days: int = typer.Option(
+        10, "-d", "--days", help="Days of history to load (0 = no limit)"
+    ),
+):
+    """Materialize data into DuckDB for fast CLI and MCP queries."""
+    import duckdb  # noqa: PLC0415
+
+    db_path = DEFAULT_DB_PATH
+    jsonl_glob = DEFAULT_JSONL_GLOB
+    db_path.parent.mkdir(parents=True, exist_ok=True)
+    conn = duckdb.connect(str(db_path))
+    try:
+        if days > 0:
+            console.print(f"[dim]Materializing last {days} days of data...[/dim]")
+        else:
+            console.print("[dim]Materializing all data (no day limit)...[/dim]")
+        materialize_views(conn, jsonl_glob, days)
+        build_search_corpus(conn)
+        row = conn.execute("SELECT COUNT(*) FROM raw_messages").fetchone()
+        count = row[0] if row else 0
+        console.print(f"[green]Materialized {count} messages into {db_path}[/green]")
+    finally:
+        conn.close()
+
+
+@app.command()
 def serve(
     port: int = typer.Option(8000, help="Port to listen on"),
     host: str = typer.Option("127.0.0.1", help="Host to bind to"),
@@ -339,6 +371,7 @@ def serve(
 
     os.environ["INTROSPECT_DAYS"] = str(days)
     console.print(f"[bold]Starting Introspect web UI on http://{host}:{port}[/bold]")
+    console.print(f"[dim]MCP endpoint: http://{host}:{port}/mcp[/dim]")
     if days > 0:
         console.print(f"[dim]Loading last {days} days of data...[/dim]")
     else:

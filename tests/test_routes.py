@@ -247,3 +247,13 @@ def test_stats_returns_200():
     with tempfile.TemporaryDirectory() as tmp, _patched_client(Path(tmp)) as client:
         response = client.get("/stats")
         assert response.status_code == 200
+
+
+def test_mcp_endpoint_mounted():
+    """MCP streamable-HTTP endpoint is reachable."""
+    with tempfile.TemporaryDirectory() as tmp, _patched_client(Path(tmp)) as client:
+        # The streamable-http app mounts its route at /mcp internally,
+        # so full path is /mcp/mcp. We expect a non-404 response
+        # (405 Method Not Allowed or 421 from MCP transport security).
+        response = client.get("/mcp/mcp")
+        assert response.status_code != 404

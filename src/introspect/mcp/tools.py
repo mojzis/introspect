@@ -2,18 +2,16 @@
 
 from __future__ import annotations
 
-from introspect.db import get_connection
-from introspect.mcp.server import mcp
+from introspect.db import get_read_connection
 from introspect.search import build_search_corpus, fts_search
 
 
-@mcp.tool()
 def search_conversations(query: str, limit: int = 10) -> str:
     """Full-text search across conversation logs.
 
     Returns session summaries with matching snippets.
     """
-    conn = get_connection()
+    conn = get_read_connection()
     try:
         # Ensure search corpus exists
         tables = conn.execute("""
@@ -40,13 +38,12 @@ def search_conversations(query: str, limit: int = 10) -> str:
         conn.close()
 
 
-@mcp.tool()
 def get_session(session_id: str) -> str:
     """Get full session content by session ID.
 
     Returns all messages as structured data.
     """
-    conn = get_connection()
+    conn = get_read_connection()
     try:
         # Session metadata
         meta = conn.execute(
@@ -96,10 +93,9 @@ def get_session(session_id: str) -> str:
         conn.close()
 
 
-@mcp.tool()
 def recent_sessions(n: int = 10) -> str:
     """List the most recent N sessions with metadata."""
-    conn = get_connection()
+    conn = get_read_connection()
     try:
         rows = conn.execute(
             """
@@ -131,10 +127,9 @@ def recent_sessions(n: int = 10) -> str:
         conn.close()
 
 
-@mcp.tool()
 def tool_failures(command_prefix: str = "", limit: int = 20) -> str:
     """List failed tool calls, optionally filtered by tool name prefix."""
-    conn = get_connection()
+    conn = get_read_connection()
     try:
         if command_prefix:
             rows = conn.execute(
