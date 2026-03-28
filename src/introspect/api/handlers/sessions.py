@@ -9,6 +9,7 @@ from fastapi.responses import HTMLResponse
 from introspect.search import ensure_search_corpus, fts_available
 
 from ._helpers import (
+    OBVIOUS_COMMANDS_SQL,
     SESSION_INFO_JOINS,
     SESSION_INFO_SELECT,
     SESSIONS_PAGE_SIZES,
@@ -125,10 +126,11 @@ async def sessions(  # noqa: PLR0913
         SELECT DISTINCT git_branch FROM logical_sessions
         WHERE git_branch IS NOT NULL ORDER BY git_branch
     """).fetchall()
-    commands_list = db.execute("""
+    commands_list = db.execute(f"""
         SELECT DISTINCT command FROM message_commands
+        WHERE command NOT IN {OBVIOUS_COMMANDS_SQL}
         ORDER BY command
-    """).fetchall()
+    """).fetchall()  # nosec B608
 
     return templates.TemplateResponse(
         request,

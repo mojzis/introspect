@@ -42,6 +42,16 @@ def test_canonical_project_worktree():
         assert result == "/home/user/myrepo"
 
 
+def test_canonical_project_relative_git_dir():
+    """A relative .git path is resolved against the target cwd, not process cwd."""
+    with patch("introspect.projects.subprocess.run") as mock_run:
+        # git rev-parse --git-common-dir typically returns ".git" (relative)
+        mock_run.return_value = _make_completed_process(".git\n")
+        result = get_canonical_project("/home/user/some-other-project")
+        # Must resolve to the target cwd, not the introspect process cwd
+        assert result == "/home/user/some-other-project"
+
+
 def test_canonical_project_fallback_on_error():
     """Non-git directories fall back to the cwd itself."""
     with patch("introspect.projects.subprocess.run") as mock_run:

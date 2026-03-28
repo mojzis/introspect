@@ -18,7 +18,10 @@ def get_canonical_project(cwd: str) -> str:
             text=True,
             check=True,
         )
-        git_common = Path(result.stdout.strip()).resolve()
+        raw = Path(result.stdout.strip())
+        # git may return a relative path (e.g. ".git"); resolve it
+        # relative to the target cwd, NOT the process's cwd.
+        git_common = (Path(cwd) / raw).resolve() if not raw.is_absolute() else raw
 
         if git_common.name == ".git":
             return str(git_common.parent)
