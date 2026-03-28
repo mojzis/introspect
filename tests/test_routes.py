@@ -226,11 +226,13 @@ def test_raw_returns_200():
 
 
 def test_raw_filter_by_type():
-    """Raw page filters records by type."""
+    """Raw page filters records by type and excludes other types."""
     with tempfile.TemporaryDirectory() as tmp, _patched_client(Path(tmp)) as client:
         response = client.get("/raw?type=user")
         assert response.status_code == 200
         assert "Raw Data" in response.text
+        # Should show only user records (3 user messages in sample data)
+        assert "3 records" in response.text
 
 
 def test_raw_filter_by_session():
@@ -306,6 +308,7 @@ def test_sessions_sort_by_user_msgs():
     with tempfile.TemporaryDirectory() as tmp, _patched_client(Path(tmp)) as client:
         response = client.get("/sessions?sort=user_msgs&order=desc")
         assert response.status_code == 200
+        assert SID[:8] in response.text
 
 
 def test_sessions_sort_by_asst_msgs():
@@ -328,7 +331,7 @@ def test_session_detail_shows_tool_results():
     with tempfile.TemporaryDirectory() as tmp, _patched_client(Path(tmp)) as client:
         response = client.get(f"/sessions/{SID}")
         assert response.status_code == 200
-        assert "tool_result" in response.text or "hello" in response.text
+        assert "tool_result" in response.text
 
 
 def test_search_finds_user_content():
@@ -336,6 +339,7 @@ def test_search_finds_user_content():
     with tempfile.TemporaryDirectory() as tmp, _patched_client(Path(tmp)) as client:
         response = client.get("/search?q=help+me+with+tests")
         assert response.status_code == 200
+        assert "help me with tests" in response.text.lower()
 
 
 def test_search_finds_assistant_content():
@@ -343,6 +347,7 @@ def test_search_finds_assistant_content():
     with tempfile.TemporaryDirectory() as tmp, _patched_client(Path(tmp)) as client:
         response = client.get("/search?q=Sure+I+can+help")
         assert response.status_code == 200
+        assert "sure" in response.text.lower() or "can help" in response.text.lower()
 
 
 def test_stats_includes_user_message_totals():
@@ -350,6 +355,9 @@ def test_stats_includes_user_message_totals():
     with tempfile.TemporaryDirectory() as tmp, _patched_client(Path(tmp)) as client:
         response = client.get("/stats")
         assert response.status_code == 200
+        assert (
+            "User Messages" in response.text or "user_messages" in response.text.lower()
+        )
 
 
 def test_sessions_filter_by_model():

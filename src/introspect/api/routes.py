@@ -467,9 +467,8 @@ async def raw_data(
     total_pages = max(1, math.ceil(total / RAW_PER_PAGE))
     offset = (page - 1) * RAW_PER_PAGE
 
-    limit = int(RAW_PER_PAGE)
     result = conn.execute(
-        f"SELECT * FROM raw_data {where} LIMIT {limit} OFFSET {int(offset)}",  # nosec B608
+        f"SELECT * FROM raw_data {where} LIMIT {RAW_PER_PAGE} OFFSET {offset}",  # nosec B608
         params,
     )
     columns = [desc[0] for desc in result.description]
