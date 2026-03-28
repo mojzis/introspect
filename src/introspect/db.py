@@ -112,6 +112,11 @@ def materialize_views(
         {and_day_filter}
     """)  # nosec B608
 
+    # Add indexes for common query patterns
+    conn.execute("CREATE INDEX idx_rm_session ON raw_messages(session_id)")
+    conn.execute("CREATE INDEX idx_rm_type ON raw_messages(type)")
+    conn.execute("CREATE INDEX idx_rm_timestamp ON raw_messages(timestamp)")
+
     _create_derived_views(conn)
 
 
@@ -160,31 +165,59 @@ def _create_derived_views(conn: duckdb.DuckDBPyConnection) -> None:
         GROUP BY session_id
     """)
 
-    # Tool calls: assistant tool_use content blocks joined with results
+    # Tool calls: assistant tool_use content blocks joined with results.
+    # Unnests all content blocks so multi-tool messages are captured.
     conn.execute("""
         CREATE OR REPLACE VIEW tool_calls AS
         WITH uses AS (
             SELECT
-                session_id,
-                timestamp AS called_at,
-                uuid AS assistant_uuid,
-                json_extract_string(message, '$.content[0].type') AS content_type,
-                json_extract_string(message, '$.content[0].name') AS tool_name,
-                json_extract_string(message, '$.content[0].id') AS tool_use_id,
-                json_extract_string(message, '$.content[0].input') AS tool_input,
-            FROM raw_messages
-            WHERE type = 'assistant'
-              AND json_extract_string(message, '$.content[0].type') = 'tool_use'
+                m.session_id,
+                m.timestamp AS called_at,
+                m.uuid AS assistant_uuid,
+                json_extract_string(
+                    m.message, '$.content[' || i.idx || '].name'
+                ) AS tool_name,
+                json_extract_string(
+                    m.message, '$.content[' || i.idx || '].id'
+                ) AS tool_use_id,
+                json_extract_string(
+                    m.message, '$.content[' || i.idx || '].input'
+                ) AS tool_input,
+            FROM raw_messages m,
+                 generate_series(
+                     0,
+                     CAST(json_array_length(
+                         json_extract(m.message, '$.content')
+                     ) - 1 AS BIGINT)
+                 ) AS i(idx)
+            WHERE m.type = 'assistant'
+              AND json_array_length(json_extract(m.message, '$.content')) > 0
+              AND json_extract_string(
+                  m.message, '$.content[' || i.idx || '].type'
+              ) = 'tool_use'
         ),
         results AS (
             SELECT
-                json_extract_string(message, '$.content[0].tool_use_id') AS tool_use_id,
-                json_extract(message, '$.content[0].is_error') AS is_error,
-                tool_use_result,
-                timestamp AS result_at,
-            FROM raw_messages
-            WHERE type = 'user'
-              AND json_extract_string(message, '$.content[0].type') = 'tool_result'
+                json_extract_string(
+                    m.message, '$.content[' || i.idx || '].tool_use_id'
+                ) AS tool_use_id,
+                json_extract(
+                    m.message, '$.content[' || i.idx || '].is_error'
+                ) AS is_error,
+                m.tool_use_result,
+                m.timestamp AS result_at,
+            FROM raw_messages m,
+                 generate_series(
+                     0,
+                     CAST(json_array_length(
+                         json_extract(m.message, '$.content')
+                     ) - 1 AS BIGINT)
+                 ) AS i(idx)
+            WHERE m.type = 'user'
+              AND json_array_length(json_extract(m.message, '$.content')) > 0
+              AND json_extract_string(
+                  m.message, '$.content[' || i.idx || '].type'
+              ) = 'tool_result'
         )
         SELECT
             u.session_id,
