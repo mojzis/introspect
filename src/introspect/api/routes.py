@@ -2,6 +2,7 @@
 
 import json
 import math
+import re
 from pathlib import Path
 
 from fastapi import APIRouter, Query, Request
@@ -16,6 +17,13 @@ TEMPLATE_DIR = Path(__file__).resolve().parent.parent / "templates"
 templates = Jinja2Templates(directory=str(TEMPLATE_DIR))
 
 SESSIONS_PER_PAGE = 20
+
+_XML_TAG_PREFIX_RE = re.compile(r"^<[^>]+>")
+
+
+def _clean_title(raw: str) -> str:
+    """Strip leading XML-style tags from session titles."""
+    return _XML_TAG_PREFIX_RE.sub("", raw).strip()
 
 
 def _parent(request: Request) -> str:
@@ -150,6 +158,16 @@ async def sessions(request: Request, page: int = Query(1, ge=1)):
                       json_extract_string(message, '$.content'),
                       ''
                   ) NOT LIKE '/clear%'
+                  AND COALESCE(
+                      json_extract_string(message, '$.content[0].text'),
+                      json_extract_string(message, '$.content'),
+                      ''
+                  ) NOT LIKE '<command-name>/clear%'
+                  AND COALESCE(
+                      json_extract_string(message, '$.content[0].text'),
+                      json_extract_string(message, '$.content'),
+                      ''
+                  ) NOT LIKE '<local-command-caveat>%'
             ) sub WHERE rn = 1
         ) fp ON ls.session_id = fp.session_id
         ORDER BY ls.started_at DESC
@@ -193,7 +211,7 @@ async def sessions(request: Request, page: int = Query(1, ge=1)):
                 "model": model or "",
                 "project": project,
                 "branch": git_branch or "",
-                "title": (first_prompt or "")[:120],
+                "title": _clean_title(first_prompt or "")[:120],
             }
         )
 
@@ -338,7 +356,9 @@ async def tools(
             fp.first_prompt
         FROM tool_calls tc
         LEFT JOIN (
-            SELECT session_id, first_prompt FROM (
+            SELECT session_id,
+                   regexp_replace(first_prompt, '^<[^>]+>', '') AS first_prompt
+            FROM (
                 SELECT
                     session_id,
                     COALESCE(
@@ -358,6 +378,16 @@ async def tools(
                       json_extract_string(message, '$.content'),
                       ''
                   ) NOT LIKE '/clear%'
+                  AND COALESCE(
+                      json_extract_string(message, '$.content[0].text'),
+                      json_extract_string(message, '$.content'),
+                      ''
+                  ) NOT LIKE '<command-name>/clear%'
+                  AND COALESCE(
+                      json_extract_string(message, '$.content[0].text'),
+                      json_extract_string(message, '$.content'),
+                      ''
+                  ) NOT LIKE '<local-command-caveat>%'
             ) sub WHERE rn = 1
         ) fp ON tc.session_id = fp.session_id
         {where}
@@ -570,7 +600,9 @@ async def mcps(
             fp.first_prompt
         FROM tool_calls tc
         LEFT JOIN (
-            SELECT session_id, first_prompt FROM (
+            SELECT session_id,
+                   regexp_replace(first_prompt, '^<[^>]+>', '') AS first_prompt
+            FROM (
                 SELECT
                     session_id,
                     COALESCE(
@@ -590,6 +622,16 @@ async def mcps(
                       json_extract_string(message, '$.content'),
                       ''
                   ) NOT LIKE '/clear%'
+                  AND COALESCE(
+                      json_extract_string(message, '$.content[0].text'),
+                      json_extract_string(message, '$.content'),
+                      ''
+                  ) NOT LIKE '<command-name>/clear%'
+                  AND COALESCE(
+                      json_extract_string(message, '$.content[0].text'),
+                      json_extract_string(message, '$.content'),
+                      ''
+                  ) NOT LIKE '<local-command-caveat>%'
             ) sub WHERE rn = 1
         ) fp ON tc.session_id = fp.session_id
         WHERE {" AND ".join(list_where)}
