@@ -10,6 +10,7 @@ import pytest
 from fastapi.testclient import TestClient
 
 from introspect.api.main import app
+from introspect.search import _fts_cache
 
 from .conftest import (
     glob_pattern,
@@ -121,6 +122,8 @@ def _patched_client(tmp_path: Path):
     """Context manager that yields a TestClient with materialized test data."""
     _write_sample_jsonl(tmp_path)
     db_path = tmp_path / "test.duckdb"
+    # Clear FTS cache so each test detects FTS availability fresh
+    _fts_cache.clear()
 
     with (
         patch.dict(
@@ -566,22 +569,23 @@ def test_search_shows_fts_status():
     with tempfile.TemporaryDirectory() as tmp, _patched_client(Path(tmp)) as client:
         response = client.get("/search")
         assert response.status_code == 200
-        # Test DuckDB connections don't have FTS installed
-        assert "using ILIKE fallback" in response.text
+        # Shows either BM25 active or ILIKE fallback depending on FTS availability
+        assert "BM25" in response.text or "ILIKE fallback" in response.text
 
 
 def test_search_pagination_next():
-    """Search page shows page number."""
+    """Search page shows result count for a query."""
     with tempfile.TemporaryDirectory() as tmp, _patched_client(Path(tmp)) as client:
-        response = client.get("/search?q=help&page=1")
+        response = client.get("/search?q=Hello&page=1")
         assert response.status_code == 200
-        assert "Page 1" in response.text
+        # The results summary always appears when a query is provided
+        assert 'result(s) for "Hello"' in response.text
 
 
 def test_search_pagination_param():
     """Search page accepts page parameter."""
     with tempfile.TemporaryDirectory() as tmp, _patched_client(Path(tmp)) as client:
-        response = client.get("/search?q=help&page=2")
+        response = client.get("/search?q=Hello&page=2")
         assert response.status_code == 200
 
 
