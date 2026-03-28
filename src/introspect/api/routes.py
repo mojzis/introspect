@@ -71,9 +71,10 @@ async def tools(
     request: Request,
     failed: bool = Query(False),
     name: str = Query("", alias="name"),
+    session: str = Query("", alias="session"),
     page: int = Query(1, ge=1),
 ):
-    return await _tools(request, failed, name, page)
+    return await _tools(request, failed, name, session, page)
 
 
 @router.get("/raw", response_class=HTMLResponse)
