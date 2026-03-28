@@ -8,17 +8,18 @@ _fts_cache: dict[str, bool] = {}
 
 
 def fts_available(conn: duckdb.DuckDBPyConnection) -> bool:
-    """Check if the FTS extension is already installed and loadable.
+    """Check if the FTS extension can be installed and loaded.
 
-    Does NOT attempt INSTALL — avoids hanging when there's no network.
+    Attempts INSTALL (downloads if needed) then LOAD.
     Result is cached for the process lifetime. Clear ``_fts_cache`` to reset.
     """
     if "available" in _fts_cache:
         return _fts_cache["available"]
     try:
+        conn.execute("INSTALL fts")
         conn.execute("LOAD fts")
         _fts_cache["available"] = True
-    except (duckdb.IOException, duckdb.CatalogException):
+    except (duckdb.IOException, duckdb.CatalogException, duckdb.HTTPException):
         _fts_cache["available"] = False
     return _fts_cache["available"]
 
