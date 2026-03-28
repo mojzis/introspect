@@ -13,7 +13,7 @@ page={{ page }}&page_size={{ page_size }}&sort={{ sort }}&order={{ order }}&mode
 {% if sort == col %}
   {% set arrow = ' ▲' if order == 'asc' else ' ▼' %}
 {% endif %}
-<th><a href="/sessions?{{ qs(page=1, sort=col, order=new_order) }}" hx-get="/sessions?{{ qs(page=1, sort=col, order=new_order) }}" hx-target="#content" hx-push-url="true" style="color:#555;text-decoration:none;">{{ label }}{{ arrow }}</a></th>
+<th><a href="/sessions?{{ qs(page=1, sort=col, order=new_order) }}" hx-get="/sessions?{{ qs(page=1, sort=col, order=new_order) }}" hx-target="#content" hx-push-url="true" style="color:#555;text-decoration:none;white-space:nowrap;">{{ label }}{{ arrow }}</a></th>
 {% endmacro %}
 
 {% block content %}
