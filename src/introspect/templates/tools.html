@@ -1,8 +1,8 @@
 {% extends parent %}
 {% block title %}Tools - Introspect{% endblock %}
 
-{% macro tool_qs(name='', failed=filter_failed, page=1) -%}
-{% if name %}name={{ name }}&{% endif %}{% if failed %}failed=true&{% endif %}page={{ page }}
+{% macro tool_qs(name='', failed=filter_failed, session=filter_session, page=1) -%}
+{% if name %}name={{ name }}&{% endif %}{% if failed %}failed=true&{% endif %}{% if session %}session={{ session }}&{% endif %}page={{ page }}
 {%- endmacro %}
 
 {% block content %}
@@ -33,6 +33,15 @@
            class="tool-btn tool-btn-sm{% if filter_failed %} tool-btn-active{% endif %}">
             {% if filter_failed %}Show all{% else %}Failed only{% endif %}
         </a>
+        {% if filter_session %}
+        <a href="/tools?{{ tool_qs(session='') }}"
+           hx-get="/tools?{{ tool_qs(session='') }}"
+           hx-target="#content" hx-push-url="true"
+           class="tool-btn tool-btn-sm tool-btn-active"
+           title="{{ filter_session }}">
+            Session: {{ filter_session[:12] }}... &times;
+        </a>
+        {% endif %}
     </div>
 </div>
 
