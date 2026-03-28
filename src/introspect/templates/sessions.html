@@ -39,7 +39,7 @@ page={{ page }}&page_size={{ page_size }}&sort={{ sort }}&order={{ order }}&mode
         <option value="{{ b }}" {{ 'selected' if b == filter_branch else '' }}>{{ b }}</option>
         {% endfor %}
     </select>
-    <select onchange="window.location='/sessions?{{ qs(page=1) }}'.replace('command={{ filter_command }}', 'command='+this.value)" style="padding:0.4rem 0.6rem;border:1px solid #ccc;border-radius:4px;font-size:0.85rem;">
+    <select onchange="window.location='/sessions?{{ qs(page=1) }}'.replace('command={{ filter_command }}', 'command='+encodeURIComponent(this.value))" style="padding:0.4rem 0.6rem;border:1px solid #ccc;border-radius:4px;font-size:0.85rem;">
         <option value="">All commands</option>
         {% for c in commands_list %}
         <option value="{{ c }}" {{ 'selected' if c == filter_command else '' }}>{{ c }}</option>
@@ -55,7 +55,9 @@ page={{ page }}&page_size={{ page_size }}&sort={{ sort }}&order={{ order }}&mode
     <table>
         <thead>
             <tr>
-                <th>Title</th>
+                {{ sort_header('Project', 'project') }}
+                {{ sort_header('Branch', 'branch') }}
+                {{ sort_header('Title', 'title') }}
                 <th>Date</th>
                 <th>Start</th>
                 <th>End</th>
@@ -65,13 +67,13 @@ page={{ page }}&page_size={{ page_size }}&sort={{ sort }}&order={{ order }}&mode
                 {{ sort_header('Tools', 'tool_calls') }}
                 <th>Commands</th>
                 {{ sort_header('Model', 'model') }}
-                {{ sort_header('Project', 'project') }}
-                {{ sort_header('Branch', 'branch') }}
             </tr>
         </thead>
         <tbody>
             {% for s in sessions %}
             <tr>
+                <td><span class="truncate">{{ s.project }}</span></td>
+                <td><span class="truncate">{{ s.branch }}</span></td>
                 <td><a href="/sessions/{{ s.id }}" hx-get="/sessions/{{ s.id }}" hx-target="#content" hx-push-url="true"><span class="truncate" style="max-width:350px;" title="{{ s.title }}">{{ s.title or '(no title)' }}</span></a></td>
                 <td style="white-space:nowrap;">{{ s.date }}</td>
                 <td style="white-space:nowrap;">{{ s.start_time }}</td>
@@ -82,8 +84,6 @@ page={{ page }}&page_size={{ page_size }}&sort={{ sort }}&order={{ order }}&mode
                 <td>{{ s.tool_count }}</td>
                 <td>{% if s.commands %}{% for c in s.commands.split(', ') %}<span class="tool-btn tool-btn-sm" style="font-size:0.75rem;padding:0.1rem 0.4rem;margin:0.1rem;">{{ c }}</span>{% endfor %}{% endif %}</td>
                 <td>{{ s.model }}</td>
-                <td><span class="truncate">{{ s.project }}</span></td>
-                <td><span class="truncate">{{ s.branch }}</span></td>
             </tr>
             {% endfor %}
         </tbody>

@@ -365,19 +365,18 @@ def _create_derived_views(conn: duckdb.DuckDBPyConnection) -> None:
         CREATE OR REPLACE VIEW message_commands AS
         WITH msg_text AS (
             SELECT session_id, uuid, timestamp,
-                   COALESCE(
-                       json_extract_string(message, '$.content[0].text'),
-                       json_extract_string(message, '$.content')
-                   ) AS body
+                   regexp_extract_all(
+                       COALESCE(
+                           json_extract_string(message, '$.content[0].text'),
+                           json_extract_string(message, '$.content')
+                       ),
+                       '<command-name>([^<]+)</command-name>', 1
+                   ) AS cmds
             FROM raw_messages
             WHERE type = 'user' AND role = 'user'
         )
         SELECT session_id, uuid, timestamp,
-               unnest(regexp_extract_all(
-                   body, '<command-name>([^<]+)</command-name>', 1
-               )) AS command
+               unnest(cmds) AS command
         FROM msg_text
-        WHERE len(regexp_extract_all(
-            body, '<command-name>([^<]+)</command-name>', 1
-        )) > 0
+        WHERE len(cmds) > 0
     """)
