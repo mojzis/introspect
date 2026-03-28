@@ -454,7 +454,7 @@ async def raw_data(
         for col, val in zip(columns, row, strict=True):
             if val is None:
                 continue
-            val_str = str(val)
+            val_str = str(val).strip()
             # Try to pretty-print JSON objects/arrays
             is_json = False
             if isinstance(val, (dict, list)):
