@@ -4,7 +4,9 @@ import json
 import tempfile
 from pathlib import Path
 
-from introspect.db import get_connection
+import duckdb
+
+from introspect.db import get_connection, materialize_views
 
 
 def _write_sample_jsonl(tmp_dir: Path) -> Path:
@@ -199,4 +201,37 @@ def test_tool_calls():
         #   tool_input, is_error, tool_use_result, result_at, exec_time
         assert tool_call[2] == "Bash"
         assert tool_call[3] == "toolu_test1"
+        conn.close()
+
+
+def test_materialize_views_drops_existing_tables():
+    """Regression: materialize_views must drop tables before views.
+
+    If a name (e.g. search_corpus) exists as a TABLE, DROP VIEW IF EXISTS
+    raises CatalogException. Ensure materialize_views handles pre-existing
+    tables gracefully.
+    """
+    with tempfile.TemporaryDirectory() as tmp:
+        tmp_path = Path(tmp)
+        _write_sample_jsonl(tmp_path)
+        glob_pattern = str(tmp_path / "projects" / "**" / "*.jsonl")
+        db_path = tmp_path / "test.duckdb"
+
+        conn = duckdb.connect(str(db_path))
+
+        # Pre-create search_corpus as a TABLE (simulates build_search_corpus)
+        conn.execute("CREATE TABLE search_corpus (id INTEGER)")
+
+        # This must not raise CatalogException
+        materialize_views(conn, glob_pattern, days=0)
+
+        # Verify materialized tables exist
+        tables = conn.execute("""
+            SELECT table_name FROM information_schema.tables
+            WHERE table_type = 'BASE TABLE'
+              AND table_name IN ('raw_data', 'raw_messages')
+        """).fetchall()
+        table_names = {t[0] for t in tables}
+        assert "raw_data" in table_names
+        assert "raw_messages" in table_names
         conn.close()
