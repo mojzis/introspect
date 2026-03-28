@@ -55,5 +55,10 @@ app.include_router(router)
 
 @app.get("/favicon.ico", include_in_schema=False)
 async def favicon():
-    """Return empty response for favicon requests."""
-    return HTMLResponse(content="", status_code=204)
+    """Return an SVG favicon."""
+    svg = (
+        '<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 100 100">'
+        '<text y=".9em" font-size="90">&#128269;</text>'
+        "</svg>"
+    )
+    return HTMLResponse(content=svg, media_type="image/svg+xml")
