@@ -8,6 +8,7 @@ from fastapi.responses import HTMLResponse
 
 from ._helpers import (
     COMMAND_LIST_SUBQUERY,
+    OBVIOUS_COMMANDS_SQL,
     SESSIONS_PAGE_SIZES,
     SESSIONS_PER_PAGE_DEFAULT,
     SESSIONS_SORT_COLS,
@@ -156,10 +157,11 @@ async def sessions(  # noqa: PLR0913
         SELECT DISTINCT git_branch FROM logical_sessions
         WHERE git_branch IS NOT NULL ORDER BY git_branch
     """).fetchall()
-    commands_list = db.execute("""
+    commands_list = db.execute(f"""
         SELECT DISTINCT command FROM message_commands
+        WHERE command NOT IN {OBVIOUS_COMMANDS_SQL}
         ORDER BY command
-    """).fetchall()
+    """).fetchall()  # nosec B608
 
     return templates.TemplateResponse(
         request,
