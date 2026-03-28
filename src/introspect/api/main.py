@@ -1,12 +1,13 @@
 """FastAPI application for introspect web UI."""
 
 import os
+import uuid
 from contextlib import asynccontextmanager
 from pathlib import Path
 
 import duckdb
 from fastapi import FastAPI, Request
-from fastapi.responses import HTMLResponse
+from fastapi.responses import HTMLResponse, JSONResponse
 
 from introspect.api.routes import router
 from introspect.db import DEFAULT_DB_PATH, DEFAULT_JSONL_GLOB, materialize_views
@@ -70,6 +71,14 @@ async def db_middleware(request: Request, call_next):
 app.include_router(router)
 # Placeholder mount — replaced with a fresh MCP app in lifespan
 app.mount("/mcp", FastAPI())
+
+
+@app.get("/.well-known/appspecific/com.chrome.devtools.json", include_in_schema=False)
+async def chrome_devtools():
+    """Chrome DevTools automatic workspace discovery."""
+    workspace_root = str(Path(__file__).resolve().parent.parent.parent.parent)
+    workspace_uuid = str(uuid.uuid5(uuid.NAMESPACE_URL, workspace_root))
+    return JSONResponse({"workspace": {"root": workspace_root, "uuid": workspace_uuid}})
 
 
 @app.get("/favicon.ico", include_in_schema=False)

@@ -240,6 +240,40 @@ def test_get_read_connection_nonexistent_db():
             conn.close()
 
 
+def test_materialize_views_drops_existing_views():
+    """Regression: materialize_views must drop views before tables.
+
+    If a name (e.g. sessions) exists as a VIEW from a previous lazy-view
+    connection, DROP TABLE IF EXISTS raises CatalogException. This is the
+    exact error seen in production startup.
+    """
+    with tempfile.TemporaryDirectory() as tmp:
+        tmp_path = Path(tmp)
+        _write_sample_jsonl(tmp_path)
+        glob_pat = glob_pattern(tmp_path)
+        db_path = tmp_path / "test.duckdb"
+
+        conn = duckdb.connect(str(db_path))
+
+        # Simulate a previous lazy-view session leaving views behind
+        for name in ("session_titles", "raw_messages", "raw_data"):
+            conn.execute(f"CREATE VIEW {name} AS SELECT 1 AS x")
+
+        # This must not raise CatalogException
+        materialize_views(conn, glob_pat, days=0)
+
+        # Verify materialized tables exist
+        tables = conn.execute("""
+            SELECT table_name FROM information_schema.tables
+            WHERE table_type = 'BASE TABLE'
+              AND table_name IN ('raw_data', 'raw_messages')
+        """).fetchall()
+        table_names = {t[0] for t in tables}
+        assert "raw_data" in table_names
+        assert "raw_messages" in table_names
+        conn.close()
+
+
 def test_materialize_views_drops_existing_tables():
     """Regression: materialize_views must drop tables before views.
 
