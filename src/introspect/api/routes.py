@@ -30,8 +30,8 @@ async def dashboard(request: Request):
 @router.get("/sessions", response_class=HTMLResponse)
 async def sessions(  # noqa: PLR0913
     request: Request,
-    page: int = Query(1, ge=1),
-    page_size: int = Query(SESSIONS_PER_PAGE_DEFAULT, ge=1, le=500),
+    page: str = Query(""),
+    page_size: str = Query(""),
     sort: str = Query(SESSIONS_SORT_DEFAULT),
     order: str = Query("desc"),
     model: str = Query("", alias="model"),
@@ -40,7 +40,15 @@ async def sessions(  # noqa: PLR0913
     command: str = Query("", alias="command"),
 ):
     return await _sessions(
-        request, page, page_size, sort, order, model, project, branch, command
+        request,
+        max(1, int(page)) if page.strip().isdigit() else 1,
+        int(page_size) if page_size.strip().isdigit() else SESSIONS_PER_PAGE_DEFAULT,
+        sort,
+        order,
+        model,
+        project,
+        branch,
+        command,
     )
 
 
