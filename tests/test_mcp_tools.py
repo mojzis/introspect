@@ -1,6 +1,5 @@
 """Tests for MCP tool functions."""
 
-import json
 import tempfile
 from pathlib import Path
 from unittest.mock import patch
@@ -16,122 +15,74 @@ from introspect.mcp.tools import (
 )
 from introspect.search import build_search_corpus
 
+from .conftest import (
+    glob_pattern,
+    make_assistant_message,
+    make_user_message,
+    write_jsonl,
+)
+
+SID = "test-session-mcp"
+
 
 def _write_sample_jsonl(tmp_dir: Path) -> Path:
     """Write a minimal JSONL file for testing MCP tools."""
-    session_id = "test-session-mcp"
-    jsonl_path = tmp_dir / "projects" / "test-project" / f"{session_id}.jsonl"
-    jsonl_path.parent.mkdir(parents=True, exist_ok=True)
-
     lines = [
-        {
-            "type": "user",
-            "timestamp": "2026-03-27T10:00:00.000Z",
-            "sessionId": session_id,
-            "uuid": "u1",
-            "parentUuid": None,
-            "isSidechain": False,
-            "cwd": "/tmp/test",
-            "version": "2.1.0",
-            "entrypoint": "cli",
-            "gitBranch": "main",
-            "message": {
-                "role": "user",
-                "content": "Help me refactor the database module",
-            },
-        },
-        {
-            "type": "assistant",
-            "timestamp": "2026-03-27T10:00:01.000Z",
-            "sessionId": session_id,
-            "uuid": "a1",
-            "parentUuid": "u1",
-            "isSidechain": False,
-            "cwd": "/tmp/test",
-            "version": "2.1.0",
-            "entrypoint": "cli",
-            "gitBranch": "main",
-            "requestId": "req1",
-            "message": {
-                "role": "assistant",
-                "model": "claude-opus-4-6",
-                "id": "msg1",
-                "content": [
-                    {"type": "text", "text": "Sure, I can help with refactoring!"}
-                ],
-            },
-        },
-        {
-            "type": "assistant",
-            "timestamp": "2026-03-27T10:00:02.000Z",
-            "sessionId": session_id,
-            "uuid": "a2",
-            "parentUuid": "a1",
-            "isSidechain": False,
-            "cwd": "/tmp/test",
-            "version": "2.1.0",
-            "entrypoint": "cli",
-            "gitBranch": "main",
-            "requestId": "req2",
-            "message": {
-                "role": "assistant",
-                "model": "claude-opus-4-6",
-                "id": "msg2",
-                "content": [
-                    {
-                        "type": "tool_use",
-                        "id": "toolu_fail1",
-                        "name": "Bash",
-                        "input": {"command": "rm -rf /oops"},
-                    }
-                ],
-            },
-        },
-        {
-            "type": "user",
-            "timestamp": "2026-03-27T10:00:03.000Z",
-            "sessionId": session_id,
-            "uuid": "u2",
-            "parentUuid": "a2",
-            "isSidechain": False,
-            "cwd": "/tmp/test",
-            "version": "2.1.0",
-            "entrypoint": "cli",
-            "gitBranch": "main",
-            "sourceToolAssistantUUID": "a2",
-            "toolUseResult": {
-                "stdout": "",
-                "stderr": "Permission denied",
-            },
-            "message": {
-                "role": "user",
-                "content": [
-                    {
-                        "type": "tool_result",
-                        "tool_use_id": "toolu_fail1",
-                        "content": "Permission denied",
-                        "is_error": True,
-                    }
-                ],
-            },
-        },
+        make_user_message(
+            SID,
+            "u1",
+            None,
+            "2026-03-27T10:00:00.000Z",
+            "Help me refactor the database module",
+        ),
+        make_assistant_message(
+            SID,
+            "a1",
+            "u1",
+            "2026-03-27T10:00:01.000Z",
+            [{"type": "text", "text": "Sure, I can help with refactoring!"}],
+        ),
+        make_assistant_message(
+            SID,
+            "a2",
+            "a1",
+            "2026-03-27T10:00:02.000Z",
+            [
+                {
+                    "type": "tool_use",
+                    "id": "toolu_fail1",
+                    "name": "Bash",
+                    "input": {"command": "rm -rf /oops"},
+                }
+            ],
+        ),
+        make_user_message(
+            SID,
+            "u2",
+            "a2",
+            "2026-03-27T10:00:03.000Z",
+            [
+                {
+                    "type": "tool_result",
+                    "tool_use_id": "toolu_fail1",
+                    "content": "Permission denied",
+                    "is_error": True,
+                }
+            ],
+            tool_use_result={"stdout": "", "stderr": "Permission denied"},
+            source_tool_uuid="a2",
+        ),
     ]
-
-    with jsonl_path.open("w") as f:
-        for line in lines:
-            f.write(json.dumps(line) + "\n")
-
-    return jsonl_path
+    return write_jsonl(tmp_dir, SID, lines)
 
 
 def _materialize_test_data(tmp_path: Path) -> Path:
     """Write sample data and materialize into DuckDB."""
     _write_sample_jsonl(tmp_path)
     db_path = tmp_path / "test.duckdb"
-    glob_pattern = str(tmp_path / "projects" / "**" / "*.jsonl")
 
     conn = duckdb.connect(str(db_path))
-    materialize_views(conn, glob_pattern)
+    materialize_views(conn, glob_pattern(tmp_path))
     build_search_corpus(conn)
     conn.close()
     return db_path

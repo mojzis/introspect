@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 from introspect.db import get_read_connection
-from introspect.search import build_search_corpus, fts_search
+from introspect.search import ensure_search_corpus, fts_search
 
 
 def search_conversations(query: str, limit: int = 10) -> str:
@@ -13,13 +13,7 @@ def search_conversations(query: str, limit: int = 10) -> str:
     """
     conn = get_read_connection()
     try:
-        # Ensure search corpus exists
-        tables = conn.execute("""
-            SELECT table_name FROM information_schema.tables
-            WHERE table_name = 'search_corpus' AND table_type = 'BASE TABLE'
-        """).fetchall()
-        if not tables:
-            build_search_corpus(conn)
+        ensure_search_corpus(conn)
 
         results = fts_search(conn, query, limit)
         if not results:

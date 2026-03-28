@@ -12,7 +12,7 @@ from introspect.db import (
     get_read_connection,
     materialize_views,
 )
-from introspect.search import build_search_corpus, fts_search
+from introspect.search import build_search_corpus, ensure_search_corpus, fts_search
 
 SID_TRUNCATE = 12
 
@@ -291,14 +291,7 @@ def search(
     """Full-text search across conversation logs."""
     conn = _db()
     try:
-        # Ensure the search corpus exists; build if missing
-        tables = conn.execute("""
-            SELECT table_name FROM information_schema.tables
-            WHERE table_name = 'search_corpus' AND table_type = 'BASE TABLE'
-        """).fetchall()
-        if not tables:
-            console.print("[dim]Building search index...[/dim]")
-            build_search_corpus(conn)
+        ensure_search_corpus(conn)
 
         results = fts_search(conn, query_text, limit)
 

@@ -1,144 +1,83 @@
 """Tests for full-text search functionality."""
 
-import json
 import tempfile
 from pathlib import Path
 
 from introspect.db import get_connection
 from introspect.search import build_search_corpus, fts_search
 
+from .conftest import (
+    glob_pattern,
+    make_assistant_message,
+    make_user_message,
+    write_jsonl,
+)
+
+SID = "test-session-search"
+
 
 def _write_sample_jsonl(tmp_dir: Path) -> Path:
     """Write a minimal JSONL file for testing search."""
-    session_id = "test-session-search"
-    jsonl_path = tmp_dir / "projects" / "test-project" / f"{session_id}.jsonl"
-    jsonl_path.parent.mkdir(parents=True, exist_ok=True)
-
     lines = [
-        {
-            "type": "user",
-            "timestamp": "2026-03-27T10:00:00.000Z",
-            "sessionId": session_id,
-            "uuid": "u1",
-            "parentUuid": None,
-            "isSidechain": False,
-            "cwd": "/tmp/test",
-            "version": "2.1.0",
-            "entrypoint": "cli",
-            "gitBranch": "main",
-            "message": {
-                "role": "user",
-                "content": "Help me refactor the database module",
-            },
-        },
-        {
-            "type": "assistant",
-            "timestamp": "2026-03-27T10:00:01.000Z",
-            "sessionId": session_id,
-            "uuid": "a1",
-            "parentUuid": "u1",
-            "isSidechain": False,
-            "cwd": "/tmp/test",
-            "version": "2.1.0",
-            "entrypoint": "cli",
-            "gitBranch": "main",
-            "requestId": "req1",
-            "message": {
-                "role": "assistant",
-                "model": "claude-opus-4-6",
-                "id": "msg1",
-                "content": [
-                    {
-                        "type": "text",
-                        "text": "I will help you refactor the database module.",
-                    }
-                ],
-            },
-        },
-        {
-            "type": "assistant",
-            "timestamp": "2026-03-27T10:00:02.000Z",
-            "sessionId": session_id,
-            "uuid": "a2",
-            "parentUuid": "a1",
-            "isSidechain": False,
-            "cwd": "/tmp/test",
-            "version": "2.1.0",
-            "entrypoint": "cli",
-            "gitBranch": "main",
-            "requestId": "req2",
-            "message": {
-                "role": "assistant",
-                "model": "claude-opus-4-6",
-                "id": "msg2",
-                "content": [
-                    {
-                        "type": "tool_use",
-                        "id": "toolu_test1",
-                        "name": "Read",
-                        "input": {"file_path": "/tmp/test/db.py"},
-                    }
-                ],
-            },
-        },
-        {
-            "type": "user",
-            "timestamp": "2026-03-27T10:00:03.000Z",
-            "sessionId": session_id,
-            "uuid": "u2",
-            "parentUuid": "a2",
-            "isSidechain": False,
-            "cwd": "/tmp/test",
-            "version": "2.1.0",
-            "entrypoint": "cli",
-            "gitBranch": "main",
-            "toolUseResult": {
-                "stdout": "def connect(): pass\n",
-                "stderr": "",
-            },
-            "message": {
-                "role": "user",
-                "content": [
-                    {
-                        "type": "tool_result",
-                        "tool_use_id": "toolu_test1",
-                        "content": "def connect(): pass\n",
-                        "is_error": False,
-                    }
-                ],
-            },
-        },
-        {
-            "type": "user",
-            "timestamp": "2026-03-27T10:00:10.000Z",
-            "sessionId": session_id,
-            "uuid": "u3",
-            "parentUuid": "a2",
-            "isSidechain": False,
-            "cwd": "/tmp/test",
-            "version": "2.1.0",
-            "entrypoint": "cli",
-            "gitBranch": "main",
-            "message": {
-                "role": "user",
-                "content": "Now add comprehensive pytest fixtures for testing",
-            },
-        },
+        make_user_message(
+            SID,
+            "u1",
+            None,
+            "2026-03-27T10:00:00.000Z",
+            "Help me refactor the database module",
+        ),
+        make_assistant_message(
+            SID,
+            "a1",
+            "u1",
+            "2026-03-27T10:00:01.000Z",
+            [{"type": "text", "text": "I will help you refactor the database module."}],
+        ),
+        make_assistant_message(
+            SID,
+            "a2",
+            "a1",
+            "2026-03-27T10:00:02.000Z",
+            [
+                {
+                    "type": "tool_use",
+                    "id": "toolu_test1",
+                    "name": "Read",
+                    "input": {"file_path": "/tmp/test/db.py"},
+                }
+            ],
+        ),
+        make_user_message(
+            SID,
+            "u2",
+            "a2",
+            "2026-03-27T10:00:03.000Z",
+            [
+                {
+                    "type": "tool_result",
+                    "tool_use_id": "toolu_test1",
+                    "content": "def connect(): pass\n",
+                    "is_error": False,
+                }
+            ],
+            tool_use_result={"stdout": "def connect(): pass\n", "stderr": ""},
+        ),
+        make_user_message(
+            SID,
+            "u3",
+            "a2",
+            "2026-03-27T10:00:10.000Z",
+            "Now add comprehensive pytest fixtures for testing",
+        ),
     ]
-
-    with jsonl_path.open("w") as f:
-        for line in lines:
-            f.write(json.dumps(line) + "\n")
-
-    return jsonl_path
+    return write_jsonl(tmp_dir, SID, lines)
 
 
 def _get_test_conn(tmp_path: Path):
     """Get a test connection with sample data loaded."""
     _write_sample_jsonl(tmp_path)
     db_path = tmp_path / "test.duckdb"
-    glob_pattern = str(tmp_path / "projects" / "**" / "*.jsonl")
-    return get_connection(db_path, glob_pattern)
+    return get_connection(db_path, glob_pattern(tmp_path))
 
 
 def test_build_search_corpus_creates_table():

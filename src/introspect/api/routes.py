@@ -9,7 +9,7 @@ from fastapi import APIRouter, Query, Request
 from fastapi.responses import HTMLResponse
 from fastapi.templating import Jinja2Templates
 
-from introspect.search import build_search_corpus, fts_search
+from introspect.search import ensure_search_corpus, fts_search
 
 router = APIRouter()
 
@@ -188,39 +188,7 @@ async def sessions(  # noqa: PLR0913
             ls.git_branch,
             fp.first_prompt
         FROM logical_sessions ls
-        LEFT JOIN (
-            SELECT session_id, first_prompt FROM (
-                SELECT
-                    session_id,
-                    COALESCE(
-                        json_extract_string(message, '$.content[0].text'),
-                        json_extract_string(message, '$.content')
-                    ) AS first_prompt,
-                    ROW_NUMBER() OVER (
-                        PARTITION BY session_id ORDER BY timestamp
-                    ) AS rn
-                FROM raw_messages
-                WHERE type = 'user' AND role = 'user'
-                  AND json_extract_string(
-                      message, '$.content[0].type'
-                  ) IS DISTINCT FROM 'tool_result'
-                  AND COALESCE(
-                      json_extract_string(message, '$.content[0].text'),
-                      json_extract_string(message, '$.content'),
-                      ''
-                  ) NOT LIKE '/clear%'
-                  AND COALESCE(
-                      json_extract_string(message, '$.content[0].text'),
-                      json_extract_string(message, '$.content'),
-                      ''
-                  ) NOT LIKE '<command-name>/clear%'
-                  AND COALESCE(
-                      json_extract_string(message, '$.content[0].text'),
-                      json_extract_string(message, '$.content'),
-                      ''
-                  ) NOT LIKE '<local-command-caveat>%'
-            ) sub WHERE rn = 1
-        ) fp ON ls.session_id = fp.session_id
+        LEFT JOIN session_titles fp ON ls.session_id = fp.session_id
         {where}
         ORDER BY {sort_col} {sort_dir} {nulls}
         LIMIT ? OFFSET ?
@@ -379,14 +347,7 @@ async def search(request: Request, q: str = Query("", alias="q")):
     results = []
 
     if q.strip():
-        # Auto-build corpus if needed
-        tables = conn.execute("""
-            SELECT table_name FROM information_schema.tables
-            WHERE table_name = 'search_corpus' AND table_type = 'BASE TABLE'
-        """).fetchall()
-        if not tables:
-            build_search_corpus(conn)
-
+        ensure_search_corpus(conn)
         results = fts_search(conn, q, 50)
 
     return templates.TemplateResponse(
@@ -431,41 +392,7 @@ async def tools(
             tc.execution_time,
             fp.first_prompt
         FROM tool_calls tc
-        LEFT JOIN (
-            SELECT session_id,
-                   regexp_replace(first_prompt, '^<[^>]+>', '') AS first_prompt
-            FROM (
-                SELECT
-                    session_id,
-                    COALESCE(
-                        json_extract_string(message, '$.content[0].text'),
-                        json_extract_string(message, '$.content')
-                    ) AS first_prompt,
-                    ROW_NUMBER() OVER (
-                        PARTITION BY session_id ORDER BY timestamp
-                    ) AS rn
-                FROM raw_messages
-                WHERE type = 'user' AND role = 'user'
-                  AND json_extract_string(
-                      message, '$.content[0].type'
-                  ) IS DISTINCT FROM 'tool_result'
-                  AND COALESCE(
-                      json_extract_string(message, '$.content[0].text'),
-                      json_extract_string(message, '$.content'),
-                      ''
-                  ) NOT LIKE '/clear%'
-                  AND COALESCE(
-                      json_extract_string(message, '$.content[0].text'),
-                      json_extract_string(message, '$.content'),
-                      ''
-                  ) NOT LIKE '<command-name>/clear%'
-                  AND COALESCE(
-                      json_extract_string(message, '$.content[0].text'),
-                      json_extract_string(message, '$.content'),
-                      ''
-                  ) NOT LIKE '<local-command-caveat>%'
-            ) sub WHERE rn = 1
-        ) fp ON tc.session_id = fp.session_id
+        LEFT JOIN session_titles fp ON tc.session_id = fp.session_id
         {where}
         ORDER BY tc.called_at DESC
         LIMIT 100
@@ -675,41 +602,7 @@ async def mcps(
             tc.execution_time,
             fp.first_prompt
         FROM tool_calls tc
-        LEFT JOIN (
-            SELECT session_id,
-                   regexp_replace(first_prompt, '^<[^>]+>', '') AS first_prompt
-            FROM (
-                SELECT
-                    session_id,
-                    COALESCE(
-                        json_extract_string(message, '$.content[0].text'),
-                        json_extract_string(message, '$.content')
-                    ) AS first_prompt,
-                    ROW_NUMBER() OVER (
-                        PARTITION BY session_id ORDER BY timestamp
-                    ) AS rn
-                FROM raw_messages
-                WHERE type = 'user' AND role = 'user'
-                  AND json_extract_string(
-                      message, '$.content[0].type'
-                  ) IS DISTINCT FROM 'tool_result'
-                  AND COALESCE(
-                      json_extract_string(message, '$.content[0].text'),
-                      json_extract_string(message, '$.content'),
-                      ''
-                  ) NOT LIKE '/clear%'
-                  AND COALESCE(
-                      json_extract_string(message, '$.content[0].text'),
-                      json_extract_string(message, '$.content'),
-                      ''
-                  ) NOT LIKE '<command-name>/clear%'
-                  AND COALESCE(
-                      json_extract_string(message, '$.content[0].text'),
-                      json_extract_string(message, '$.content'),
-                      ''
-                  ) NOT LIKE '<local-command-caveat>%'
-            ) sub WHERE rn = 1
-        ) fp ON tc.session_id = fp.session_id
+        LEFT JOIN session_titles fp ON tc.session_id = fp.session_id
         WHERE {" AND ".join(list_where)}
         ORDER BY tc.called_at DESC
         LIMIT 100

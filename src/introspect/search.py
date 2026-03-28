@@ -23,6 +23,16 @@ def _fts_available(conn: duckdb.DuckDBPyConnection) -> bool:
     return _fts_checked
 
 
+def ensure_search_corpus(conn: duckdb.DuckDBPyConnection) -> None:
+    """Build the search corpus table if it doesn't already exist."""
+    tables = conn.execute("""
+        SELECT table_name FROM information_schema.tables
+        WHERE table_name = 'search_corpus' AND table_type = 'BASE TABLE'
+    """).fetchall()
+    if not tables:
+        build_search_corpus(conn)
+
+
 def build_search_corpus(conn: duckdb.DuckDBPyConnection) -> None:
     """Create or refresh the search_corpus table and optionally FTS index.
 
