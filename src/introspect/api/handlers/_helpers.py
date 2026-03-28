@@ -27,6 +27,7 @@ SESSIONS_SORT_COLS = {
     "model": "ls.model",
     "project": "ls.cwd",
     "branch": "ls.git_branch",
+    "title": "fp.first_prompt",
 }
 SESSIONS_SORT_DEFAULT = "started_at"
 
