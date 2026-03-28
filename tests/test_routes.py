@@ -6,6 +6,7 @@ from contextlib import contextmanager
 from pathlib import Path
 from unittest.mock import patch
 
+import pytest
 from fastapi.testclient import TestClient
 
 from introspect.api.main import app
@@ -378,6 +379,57 @@ def test_sessions_filter_by_branch():
     """Sessions page filters by git branch."""
     with tempfile.TemporaryDirectory() as tmp, _patched_client(Path(tmp)) as client:
         response = client.get("/sessions?branch=main")
+        assert response.status_code == 200
+
+
+def test_sessions_empty_page_size_returns_200():
+    """Sessions page handles empty page_size param without 422."""
+    with tempfile.TemporaryDirectory() as tmp, _patched_client(Path(tmp)) as client:
+        response = client.get("/sessions?page_size=")
+        assert response.status_code == 200
+
+
+def test_sessions_empty_page_returns_200():
+    """Sessions page handles empty page param without 422."""
+    with tempfile.TemporaryDirectory() as tmp, _patched_client(Path(tmp)) as client:
+        response = client.get("/sessions?page=")
+        assert response.status_code == 200
+
+
+def test_sessions_all_empty_params_returns_200():
+    """Sessions page handles all empty query params without 422."""
+    with tempfile.TemporaryDirectory() as tmp, _patched_client(Path(tmp)) as client:
+        response = client.get(
+            "/sessions?page=1&page_size=&sort=asst_msgs&order=desc"
+            "&model=&project=&branch="
+        )
+        assert response.status_code == 200
+
+
+@pytest.mark.parametrize(
+    "col",
+    [
+        "started_at",
+        "duration",
+        "user_msgs",
+        "asst_msgs",
+        "tool_calls",
+        "model",
+        "project",
+        "branch",
+    ],
+)
+def test_sessions_sort_column(col):
+    """Sessions page accepts sort by {{ col }}."""
+    with tempfile.TemporaryDirectory() as tmp, _patched_client(Path(tmp)) as client:
+        response = client.get(f"/sessions?sort={col}&order=desc")
+        assert response.status_code == 200
+
+
+def test_sessions_invalid_sort_falls_back():
+    """Sessions page falls back to default for invalid sort column."""
+    with tempfile.TemporaryDirectory() as tmp, _patched_client(Path(tmp)) as client:
+        response = client.get("/sessions?sort=nonexistent&order=desc")
         assert response.status_code == 200
 
 
