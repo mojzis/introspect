@@ -25,7 +25,7 @@ SESSIONS_SORT_COLS = {
     "asst_msgs": "ls.assistant_messages",
     "tool_calls": "tc.tool_count",
     "model": "ls.model",
-    "project": "ls.cwd",
+    "project": "ls.project",
     "branch": "ls.git_branch",
 }
 SESSIONS_SORT_DEFAULT = "started_at"

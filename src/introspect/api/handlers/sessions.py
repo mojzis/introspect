@@ -47,8 +47,8 @@ async def sessions(  # noqa: PLR0913
         where_clauses.append("ls.model = ?")
         params.append(model.strip())
     if project.strip():
-        where_clauses.append("ls.cwd LIKE ?")
-        params.append(f"%/{project.strip()}")
+        where_clauses.append("ls.project = ?")
+        params.append(project.strip())
     if branch.strip():
         where_clauses.append("ls.git_branch = ?")
         params.append(branch.strip())
@@ -86,6 +86,7 @@ async def sessions(  # noqa: PLR0913
             ls.assistant_messages,
             ls.model,
             ls.cwd,
+            ls.project,
             ls.git_branch,
             fp.first_prompt,
             COALESCE(tc.tool_count, 0) AS tool_count,
@@ -111,7 +112,8 @@ async def sessions(  # noqa: PLR0913
             user_msgs,
             asst_msgs,
             _model,
-            cwd,
+            _cwd,
+            proj,
             git_branch,
             first_prompt,
             tool_count,
@@ -121,9 +123,6 @@ async def sessions(  # noqa: PLR0913
         if duration:
             total_secs = int(duration.total_seconds())
             dur_str = f"{total_secs // 60}:{total_secs % 60:02d}"
-        proj = ""
-        if cwd:
-            proj = cwd.rstrip("/").rsplit("/", 1)[-1]
         session_list.append(
             {
                 "id": session_id,
@@ -134,7 +133,7 @@ async def sessions(  # noqa: PLR0913
                 "user_msgs": user_msgs or 0,
                 "asst_msgs": asst_msgs or 0,
                 "model": _model or "",
-                "project": proj,
+                "project": proj or "",
                 "branch": git_branch or "",
                 "title": clean_title(first_prompt or "")[:120],
                 "tool_count": tool_count or 0,
@@ -148,9 +147,9 @@ async def sessions(  # noqa: PLR0913
         WHERE model IS NOT NULL ORDER BY model
     """).fetchall()
     projects = db.execute("""
-        SELECT DISTINCT split_part(rtrim(cwd, '/'), '/', -1) AS proj
+        SELECT DISTINCT project AS proj
         FROM logical_sessions
-        WHERE cwd IS NOT NULL
+        WHERE project IS NOT NULL
         ORDER BY proj
     """).fetchall()
     branches = db.execute("""

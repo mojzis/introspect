@@ -326,6 +326,11 @@ def materialize(
     days: int = typer.Option(
         10, "-d", "--days", help="Days of history to load (0 = no limit)"
     ),
+    no_resolve_projects: bool = typer.Option(
+        False,
+        "--no-resolve-projects",
+        help="Skip git worktree resolution for project names",
+    ),
 ):
     """Materialize data into DuckDB for fast CLI and MCP queries."""
     import duckdb  # noqa: PLC0415
@@ -339,7 +344,9 @@ def materialize(
             console.print(f"[dim]Materializing last {days} days of data...[/dim]")
         else:
             console.print("[dim]Materializing all data (no day limit)...[/dim]")
-        materialize_views(conn, jsonl_glob, days)
+        materialize_views(
+            conn, jsonl_glob, days, resolve_projects=not no_resolve_projects
+        )
         build_search_corpus(conn)
         row = conn.execute("SELECT COUNT(*) FROM raw_messages").fetchone()
         count = row[0] if row else 0
@@ -355,6 +362,11 @@ def serve(
     days: int = typer.Option(
         10, "-d", "--days", help="Days of history to load (0 = no limit)"
     ),
+    no_resolve_projects: bool = typer.Option(
+        False,
+        "--no-resolve-projects",
+        help="Skip git worktree resolution for project names",
+    ),
 ):
     """Launch the web UI."""
     import os  # noqa: PLC0415
@@ -362,6 +374,8 @@ def serve(
     import uvicorn  # noqa: PLC0415
 
     os.environ["INTROSPECT_DAYS"] = str(days)
+    if no_resolve_projects:
+        os.environ["INTROSPECT_RESOLVE_PROJECTS"] = "0"
     console.print(f"[bold]Starting Introspect web UI on http://{host}:{port}[/bold]")
     console.print(f"[dim]MCP endpoint: http://{host}:{port}/mcp[/dim]")
     if days > 0:

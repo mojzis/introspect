@@ -23,8 +23,9 @@ async def lifespan(app: FastAPI):
     days = int(os.environ.get("INTROSPECT_DAYS", "10"))
     db_path.parent.mkdir(parents=True, exist_ok=True)
     conn = duckdb.connect(str(db_path))
+    resolve_projects = os.environ.get("INTROSPECT_RESOLVE_PROJECTS", "1") != "0"
     try:
-        materialize_views(conn, jsonl_glob, days)
+        materialize_views(conn, jsonl_glob, days, resolve_projects=resolve_projects)
         build_search_corpus(conn)
     finally:
         conn.close()
