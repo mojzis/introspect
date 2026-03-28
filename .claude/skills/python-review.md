@@ -1,17 +1,14 @@
 ---
 name: python-review
 context: fork
-description: Deep Python code quality review. Auto-invoke when finishing a task, before marking work complete, when the user asks to review code, or when preparing a PR. Focuses on design judgment, naming, performance, and test quality — things that ruff and mypy cannot catch.
+description: Deep Python code quality review. Auto-invoke when finishing a task, before marking work complete, when the user asks to review code, or when preparing a PR. Focuses on design judgment, naming, performance, and test quality — things that ruff and ty cannot catch.
 ---
 
 # Deep Code Review
 
 Review the changes for design quality — what automated tools miss. Report findings as 🔴 Must Fix, 🟡 Should Fix, 🟢 Suggestion.
 
-First, confirm `ruff check .`, `ruff format --check .`, and `mypy .` pass. Fix those before proceeding.
-
-If the project uses a specific framework, read the relevant reference before reviewing:
-FastAPI → `references/fastapi.md` · Typer → `references/typer.md` · Streamlit → `references/streamlit.md` · Pandas → `references/pandas.md`
+First, confirm `uv run poe check` passes (ruff, ty, tests). Fix those before proceeding.
 
 ---
 
@@ -65,7 +62,6 @@ Patterns that cause real problems, not micro-optimization.
 
 - `in` on a `list` that should be a `set` (>~20 elements: O(n) vs O(1)).
 - `+` string concatenation in a loop → `"".join()`.
-- `pd.concat()` / `.append()` in a loop → batch.
 - `await` in a loop → `asyncio.gather()` / `TaskGroup`.
 - N+1: querying a DB or API per item instead of batching.
 - `f.read()` on large files when line-by-line streaming works.
@@ -97,19 +93,7 @@ Patterns that cause real problems, not micro-optimization.
 - Public names (`no _` prefix) that aren't intended API.
 - CLI entrypoints containing logic instead of parsing args and delegating.
 
-## 9. Doc-Code Alignment
-
-If a doc or code file contains cross-reference tags, verify they haven't drifted.
-
-Convention — **docs** reference code with `<!-- source: path/to/module.py::function_name -->`, **code** references docs with `# doc: path/to/doc.md#section`. Both are optional but when present, they form a contract.
-
-- Changed a function that has a `# doc:` tag → check the linked doc still describes the actual behavior.
-- Changed a doc section with a `<!-- source: -->` tag → check the referenced code still works as described.
-- Broken links (referenced function renamed/deleted, doc section removed) → 🔴.
-- Behavioral drift (code changed but doc still describes old behavior) → 🟡.
-- Don't nag about undocumented code. Only linked pairs are checked.
-
-## 10. Dependencies
+## 9. Dependencies
 
 - Mixed HTTP clients (`requests` + `httpx`) → pick one.
 - Mixed serialization (`json` + `orjson`/`msgspec`) → use what's in the dep tree.
