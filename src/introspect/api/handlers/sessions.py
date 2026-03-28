@@ -77,9 +77,15 @@ async def sessions(  # noqa: PLR0913
             ls.model,
             ls.cwd,
             ls.git_branch,
-            fp.first_prompt
+            fp.first_prompt,
+            COALESCE(tc.tool_count, 0) AS tool_count
         FROM logical_sessions ls
         LEFT JOIN session_titles fp ON ls.session_id = fp.session_id
+        LEFT JOIN (
+            SELECT session_id, COUNT(*) AS tool_count
+            FROM tool_calls
+            GROUP BY session_id
+        ) tc ON ls.session_id = tc.session_id
         {where}
         ORDER BY {sort_col} {sort_dir} {nulls}
         LIMIT ? OFFSET ?
@@ -100,6 +106,7 @@ async def sessions(  # noqa: PLR0913
             cwd,
             git_branch,
             first_prompt,
+            tool_count,
         ) = row
         dur_str = ""
         if duration:
@@ -121,6 +128,7 @@ async def sessions(  # noqa: PLR0913
                 "project": proj,
                 "branch": git_branch or "",
                 "title": clean_title(first_prompt or "")[:120],
+                "tool_count": tool_count or 0,
             }
         )
 
@@ -177,6 +185,41 @@ async def session_detail(request: Request, session_id: str) -> HTMLResponse:
         [session_id],
     ).fetchone()
 
+    # Token usage for this session
+    try:
+        token_usage = db.execute(
+            """
+            SELECT
+                SUM(CAST(json_extract(message, '$.usage.input_tokens') AS BIGINT)),
+                SUM(CAST(json_extract(message, '$.usage.output_tokens') AS BIGINT)),
+                SUM(CAST(json_extract(
+                    message, '$.usage.cache_creation_input_tokens'
+                ) AS BIGINT)),
+                SUM(CAST(json_extract(
+                    message, '$.usage.cache_read_input_tokens'
+                ) AS BIGINT))
+            FROM raw_messages
+            WHERE session_id = ? AND type = 'assistant'
+              AND json_extract(message, '$.usage.input_tokens') IS NOT NULL
+        """,
+            [session_id],
+        ).fetchone()
+    except Exception:
+        token_usage = None
+
+    # Tool call summary
+    tool_summary = db.execute(
+        """
+        SELECT
+            COUNT(*) AS total_calls,
+            COUNT(*) FILTER (WHERE is_error = 'true') AS failed_calls,
+            MODE(tool_name) AS most_used_tool
+        FROM tool_calls
+        WHERE session_id = ?
+    """,
+        [session_id],
+    ).fetchone()
+
     messages = db.execute(
         """
         SELECT timestamp, type, role, message, uuid
@@ -226,5 +269,7 @@ async def session_detail(request: Request, session_id: str) -> HTMLResponse:
             "session": session_info,
             "session_id": session_id,
             "messages": parsed_messages,
+            "token_usage": token_usage,
+            "tool_summary": tool_summary,
         },
     )

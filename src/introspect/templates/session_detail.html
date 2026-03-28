@@ -17,6 +17,39 @@
         <tr><th>Branch</th><td>{{ session[8] or '' }}</td></tr>
     </table>
 </div>
+
+{% if token_usage and token_usage[0] %}
+<div class="stat-grid">
+    <div class="stat-card">
+        <div class="value">{{ "{:,}".format(token_usage[0] or 0) }}</div>
+        <div class="label">Input Tokens</div>
+    </div>
+    <div class="stat-card">
+        <div class="value">{{ "{:,}".format(token_usage[1] or 0) }}</div>
+        <div class="label">Output Tokens</div>
+    </div>
+    {% if token_usage[2] %}
+    <div class="stat-card">
+        <div class="value">{{ "{:,}".format(token_usage[2]) }}</div>
+        <div class="label">Cache Write Tokens</div>
+    </div>
+    {% endif %}
+    {% if token_usage[3] %}
+    <div class="stat-card">
+        <div class="value">{{ "{:,}".format(token_usage[3]) }}</div>
+        <div class="label">Cache Read Tokens</div>
+    </div>
+    {% endif %}
+</div>
+{% endif %}
+
+{% if tool_summary and tool_summary[0] > 0 %}
+<p style="margin:0.5rem 0 1rem;color:#555;">
+    {{ tool_summary[0] }} tool call{{ 's' if tool_summary[0] != 1 else '' }}
+    {% if tool_summary[1] > 0 %} ({{ tool_summary[1] }} failed){% endif %}
+    {% if tool_summary[2] %} &mdash; most used: <strong>{{ tool_summary[2] }}</strong>{% endif %}
+</p>
+{% endif %}
 {% endif %}
 
 <h2>Messages ({{ messages|length }})</h2>
@@ -30,17 +63,41 @@
         {% elif block.type == 'tool_use' %}
             <div class="msg msg-tool" style="margin-top:0.25rem;">
                 <strong>Tool: {{ block.name }}</strong>
+                {% if block.input|length > 200 %}
+                <div x-data="{ open: false }">
+                    <pre x-show="!open">{{ block.input[:200] }}...</pre>
+                    <pre x-show="open" style="display:none;">{{ block.input }}</pre>
+                    <button @click="open = !open" class="tool-btn tool-btn-sm" x-text="open ? 'Collapse' : 'Expand'" style="margin-top:0.25rem;"></button>
+                </div>
+                {% else %}
                 <pre>{{ block.input }}</pre>
+                {% endif %}
             </div>
         {% elif block.type == 'tool_result' %}
             <div class="msg {% if block.is_error %}msg-error{% else %}msg-tool-result{% endif %}" style="margin-top:0.25rem;">
                 <strong>Result{% if block.is_error %} (error){% endif %}</strong>
+                {% if block.content|length > 200 %}
+                <div x-data="{ open: false }">
+                    <pre x-show="!open">{{ block.content[:200] }}...</pre>
+                    <pre x-show="open" style="display:none;">{{ block.content }}</pre>
+                    <button @click="open = !open" class="tool-btn tool-btn-sm" x-text="open ? 'Collapse' : 'Expand'" style="margin-top:0.25rem;"></button>
+                </div>
+                {% else %}
                 <pre>{{ block.content }}</pre>
+                {% endif %}
             </div>
         {% elif block.type == 'thinking' %}
             <div class="msg msg-thinking" style="margin-top:0.25rem;">
                 <strong>Thinking</strong>
+                {% if block.text|length > 200 %}
+                <div x-data="{ open: false }">
+                    <pre x-show="!open">{{ block.text[:200] }}...</pre>
+                    <pre x-show="open" style="display:none;">{{ block.text }}</pre>
+                    <button @click="open = !open" class="tool-btn tool-btn-sm" x-text="open ? 'Collapse' : 'Expand'" style="margin-top:0.25rem;"></button>
+                </div>
+                {% else %}
                 <pre>{{ block.text }}</pre>
+                {% endif %}
             </div>
         {% endif %}
     {% endfor %}

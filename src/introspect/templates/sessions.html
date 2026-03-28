@@ -56,6 +56,7 @@ page={{ page }}&page_size={{ page_size }}&sort={{ sort }}&order={{ order }}&mode
                 {{ sort_header('Duration', 'duration') }}
                 {{ sort_header('User', 'user_msgs') }}
                 {{ sort_header('Asst', 'asst_msgs') }}
+                {{ sort_header('Tools', 'tool_calls') }}
                 {{ sort_header('Model', 'model') }}
                 {{ sort_header('Project', 'project') }}
                 {{ sort_header('Branch', 'branch') }}
@@ -71,6 +72,7 @@ page={{ page }}&page_size={{ page_size }}&sort={{ sort }}&order={{ order }}&mode
                 <td style="white-space:nowrap;">{{ s.duration }}</td>
                 <td>{{ s.user_msgs }}</td>
                 <td>{{ s.asst_msgs }}</td>
+                <td>{{ s.tool_count }}</td>
                 <td>{{ s.model }}</td>
                 <td><span class="truncate">{{ s.project }}</span></td>
                 <td><span class="truncate">{{ s.branch }}</span></td>

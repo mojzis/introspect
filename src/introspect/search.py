@@ -119,6 +119,7 @@ def fts_search(
     conn: duckdb.DuckDBPyConnection,
     query: str,
     limit: int = 20,
+    offset: int = 0,
 ) -> list[tuple]:
     """Search the corpus. Uses FTS/BM25 if available, else ILIKE.
 
@@ -143,8 +144,9 @@ def fts_search(
             WHERE score IS NOT NULL
             ORDER BY score
             LIMIT ?
+            OFFSET ?
             """,
-            [query, limit],
+            [query, limit, offset],
         ).fetchall()
 
     # Fallback: ILIKE search with word-count scoring
@@ -158,10 +160,11 @@ def fts_search(
     score_expr = " + ".join(
         "CASE WHEN content_text ILIKE ? THEN 1 ELSE 0 END" for _ in terms
     )
-    # Parameters: score terms first, then where terms, then limit
+    # Parameters: score terms first, then where terms, then limit, offset
     params: list[str | int] = [f"%{t}%" for t in terms]
     params.extend(f"%{t}%" for t in terms)
     params.append(limit)
+    params.append(offset)
 
     return conn.execute(
         f"""
@@ -175,6 +178,7 @@ def fts_search(
         WHERE {where_clauses}
         ORDER BY score DESC, timestamp DESC
         LIMIT ?
+        OFFSET ?
         """,  # nosec B608
         params,
     ).fetchall()

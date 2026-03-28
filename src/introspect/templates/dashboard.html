@@ -16,14 +16,38 @@
         <div class="value">{{ failed_count }}</div>
         <div class="label">Failed Tools</div>
     </div>
+    <div class="stat-card">
+        <div class="value">{{ success_rate }}%</div>
+        <div class="label">Success Rate</div>
+    </div>
+    <div class="stat-card">
+        <div class="value">{{ project_count }}</div>
+        <div class="label">Projects</div>
+    </div>
+    <div class="stat-card">
+        <div class="value">{{ avg_duration }}</div>
+        <div class="label">Avg Duration</div>
+    </div>
+    {% if token_usage and token_usage[0] %}
+    <div class="stat-card">
+        <div class="value">{{ "{:,}".format(token_usage[0] or 0) }}</div>
+        <div class="label">Input Tokens</div>
+    </div>
+    <div class="stat-card">
+        <div class="value">{{ "{:,}".format(token_usage[1] or 0) }}</div>
+        <div class="label">Output Tokens</div>
+    </div>
+    {% endif %}
 </div>
+
+<p style="color:#888;margin:0.5rem 0 1rem;">Today: {{ activity_today }} session{{ 's' if activity_today != 1 else '' }} | This week: {{ activity_week }}</p>
 
 <div class="card">
     <h2>Recent Sessions</h2>
     <table>
         <thead>
             <tr>
-                <th>Session ID</th>
+                <th>Title</th>
                 <th>Started</th>
                 <th>Duration</th>
                 <th>User Msgs</th>
@@ -34,7 +58,7 @@
         <tbody>
             {% for s in recent_sessions %}
             <tr>
-                <td><a href="/sessions/{{ s[0] }}" hx-get="/sessions/{{ s[0] }}" hx-target="#content" hx-push-url="true"><span class="truncate">{{ (s[0]|string)[:12] }}...</span></a></td>
+                <td><a href="/sessions/{{ s[0] }}" hx-get="/sessions/{{ s[0] }}" hx-target="#content" hx-push-url="true"><span class="truncate" style="max-width:350px;" title="{{ (clean_title(s[7] or '')|e) or s[0] }}">{{ clean_title(s[7] or '')[:80] or (s[0]|string)[:12] + '...' }}</span></a></td>
                 <td>{{ (s[1]|string)[:19] }}</td>
                 <td>{{ s[2] or '' }}</td>
                 <td>{{ s[3] or 0 }}</td>

@@ -49,8 +49,12 @@ async def session_detail(request: Request, session_id: str):
 
 
 @router.get("/search", response_class=HTMLResponse)
-async def search(request: Request, q: str = Query("", alias="q")):
-    return await _search(request, q)
+async def search(
+    request: Request,
+    q: str = Query("", alias="q"),
+    page: int = Query(1, ge=1),
+):
+    return await _search(request, q, page)
 
 
 @router.get("/tools", response_class=HTMLResponse)
@@ -58,8 +62,9 @@ async def tools(
     request: Request,
     failed: bool = Query(False),
     name: str = Query("", alias="name"),
+    page: int = Query(1, ge=1),
 ):
-    return await _tools(request, failed, name)
+    return await _tools(request, failed, name, page)
 
 
 @router.get("/raw", response_class=HTMLResponse)
@@ -78,8 +83,9 @@ async def mcps(
     server: str = Query("", alias="server"),
     command: str = Query("", alias="command"),
     failed: bool = Query(False),
+    page: int = Query(1, ge=1),
 ):
-    return await _mcps(request, server, command, failed)
+    return await _mcps(request, server, command, failed, page)
 
 
 @router.get("/stats", response_class=HTMLResponse)

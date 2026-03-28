@@ -19,6 +19,7 @@ SESSIONS_SORT_COLS = {
     "duration": "ls.duration",
     "user_msgs": "ls.user_messages",
     "asst_msgs": "ls.assistant_messages",
+    "tool_calls": "tc.tool_count",
     "model": "ls.model",
     "project": "ls.cwd",
     "branch": "ls.git_branch",
@@ -30,7 +31,7 @@ RAW_PER_PAGE = 20
 _XML_TAG_PREFIX_RE = re.compile(r"^<[^>]+>")
 
 # Max chars to include in content block previews (tool inputs, results, etc.)
-_CONTENT_PREVIEW_MAX = 500
+_CONTENT_PREVIEW_MAX = 5000
 
 
 def clean_title(raw: str) -> str:

@@ -11,7 +11,7 @@
 </div>
 
 {% if query %}
-<p style="margin-bottom:1rem;color:#666;">{{ results|length }} result(s) for "{{ query }}"</p>
+<p style="margin-bottom:1rem;color:#666;">{{ results|length }}{% if has_next %}+{% endif %} result(s) for "{{ query }}"{% if page > 1 %} (page {{ page }}){% endif %}</p>
 {% endif %}
 
 {% if results %}
@@ -38,6 +38,16 @@
             {% endfor %}
         </tbody>
     </table>
+</div>
+
+<div class="pagination">
+    {% if page > 1 %}
+    <a href="/search?q={{ query }}&page={{ page - 1 }}" hx-get="/search?q={{ query }}&page={{ page - 1 }}" hx-target="#content" hx-push-url="true">Prev</a>
+    {% endif %}
+    <span class="current">Page {{ page }}</span>
+    {% if has_next %}
+    <a href="/search?q={{ query }}&page={{ page + 1 }}" hx-get="/search?q={{ query }}&page={{ page + 1 }}" hx-target="#content" hx-push-url="true">Next</a>
+    {% endif %}
 </div>
 {% elif query %}
 <div class="card"><p>No results found.</p></div>

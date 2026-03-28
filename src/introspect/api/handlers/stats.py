@@ -255,6 +255,63 @@ async def stats(request: Request) -> HTMLResponse:
         logging.getLogger(__name__).debug("token usage query failed", exc_info=True)
         token_usage = None
 
+    # Cache token stats
+    try:
+        cache_tokens = db.execute("""
+            SELECT
+                SUM(CAST(json_extract(
+                    message, '$.usage.cache_creation_input_tokens'
+                ) AS BIGINT)),
+                SUM(CAST(json_extract(
+                    message, '$.usage.cache_read_input_tokens'
+                ) AS BIGINT))
+            FROM raw_messages
+            WHERE type = 'assistant'
+              AND json_extract(
+                  message, '$.usage.cache_creation_input_tokens'
+              ) IS NOT NULL
+        """).fetchone()
+    except Exception:
+        logging.getLogger(__name__).debug("cache token query failed", exc_info=True)
+        cache_tokens = None
+
+    # Per-model breakdown
+    model_breakdown = db.execute("""
+        SELECT
+            ls.model,
+            COUNT(*) AS session_count,
+            AVG(EXTRACT(EPOCH FROM ls.duration)) AS avg_duration_secs,
+            AVG(COALESCE(tc.tool_count, 0)) AS avg_tool_calls
+        FROM logical_sessions ls
+        LEFT JOIN (
+            SELECT session_id, COUNT(*) AS tool_count
+            FROM tool_calls GROUP BY session_id
+        ) tc ON ls.session_id = tc.session_id
+        WHERE ls.model IS NOT NULL
+        GROUP BY ls.model
+        ORDER BY session_count DESC
+    """).fetchall()
+
+    # Average metrics
+    averages = db.execute("""
+        SELECT
+            AVG(EXTRACT(EPOCH FROM ls.duration))
+                FILTER (WHERE ls.duration IS NOT NULL),
+            AVG(COALESCE(tc.tool_count, 0))
+        FROM logical_sessions ls
+        LEFT JOIN (
+            SELECT session_id, COUNT(*) AS tool_count
+            FROM tool_calls GROUP BY session_id
+        ) tc ON ls.session_id = tc.session_id
+    """).fetchone()
+    avg_secs = averages[0] or 0
+    avg_duration_str = f"{int(avg_secs) // 60}:{int(avg_secs) % 60:02d}"
+    avg_tool_calls = round(averages[1] or 0, 1)
+
+    # Compute max bucket counts for bar chart widths
+    max_duration_count = max((b[1] for b in duration_buckets), default=1)
+    max_turns_count = max((b[1] for b in turns_buckets), default=1)
+
     return templates.TemplateResponse(
         request,
         "stats.html",
@@ -278,5 +335,11 @@ async def stats(request: Request) -> HTMLResponse:
             "most_tools_sessions": most_tools_sessions,
             "sessions_per_day": sessions_per_day,
             "token_usage": token_usage,
+            "cache_tokens": cache_tokens,
+            "model_breakdown": model_breakdown,
+            "avg_duration": avg_duration_str,
+            "avg_tool_calls": avg_tool_calls,
+            "max_duration_count": max_duration_count,
+            "max_turns_count": max_turns_count,
         },
     )
