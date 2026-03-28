@@ -7,7 +7,7 @@ import duckdb
 _fts_cache: dict[str, bool] = {}
 
 
-def _fts_available(conn: duckdb.DuckDBPyConnection) -> bool:
+def fts_available(conn: duckdb.DuckDBPyConnection) -> bool:
     """Check if the FTS extension is already installed and loadable.
 
     Does NOT attempt INSTALL — avoids hanging when there's no network.
@@ -107,7 +107,7 @@ def build_search_corpus(conn: duckdb.DuckDBPyConnection) -> None:
     conn.execute("DELETE FROM search_corpus WHERE content_text = ''")
 
     # Try to build FTS index if extension is available
-    if _fts_available(conn):
+    if fts_available(conn):
         conn.execute(
             "PRAGMA create_fts_index("
             "'search_corpus', 'rowid', 'content_text',"
@@ -125,7 +125,7 @@ def fts_search(
 
     Returns rows of (session_id, timestamp, role, snippet, score).
     """
-    if _fts_available(conn):
+    if fts_available(conn):
         return conn.execute(
             """
             SELECT

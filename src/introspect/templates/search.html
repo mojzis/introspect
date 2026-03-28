@@ -8,6 +8,13 @@
         <input type="search" name="q" value="{{ query }}" placeholder="Search conversations..." style="flex:1;" />
         <button type="submit">Search</button>
     </form>
+    <p style="margin-top:0.5rem;font-size:0.85rem;color:#888;">
+        {% if fts_loaded %}
+        <span style="color:#2a7;font-weight:600;">FTS</span> Full-text search (BM25) active
+        {% else %}
+        <span style="color:#b73;font-weight:600;">FTS</span> Full-text search unavailable — using ILIKE fallback
+        {% endif %}
+    </p>
 </div>
 
 {% if query %}

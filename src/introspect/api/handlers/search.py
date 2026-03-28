@@ -3,7 +3,7 @@
 from fastapi import Request
 from fastapi.responses import HTMLResponse
 
-from introspect.search import ensure_search_corpus, fts_search
+from introspect.search import ensure_search_corpus, fts_available, fts_search
 
 from ._helpers import DEFAULT_PAGE_SIZE, conn, parent, templates
 
@@ -23,6 +23,8 @@ async def search(request: Request, q: str, page: int = 1) -> HTMLResponse:
             has_next = True
             results = results[:DEFAULT_PAGE_SIZE]
 
+    fts_loaded = fts_available(db)
+
     return templates.TemplateResponse(
         request,
         "search.html",
@@ -32,5 +34,6 @@ async def search(request: Request, q: str, page: int = 1) -> HTMLResponse:
             "results": results,
             "page": page,
             "has_next": has_next,
+            "fts_loaded": fts_loaded,
         },
     )
