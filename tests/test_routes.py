@@ -242,6 +242,23 @@ def test_mcps_filter_by_server():
         assert "github" in response.text
 
 
+def test_base_template_has_history_restore_spinner_fix():
+    """Regression: htmx:historyRestore listener must clear the loading spinner."""
+    with tempfile.TemporaryDirectory() as tmp, _patched_client(Path(tmp)) as client:
+        response = client.get("/sessions")
+        assert response.status_code == 200
+        assert "htmx:historyRestore" in response.text
+        assert "loading-overlay" in response.text
+
+
+def test_htmx_partial_response_excludes_spinner():
+    """HTMX partial responses should not contain the loading overlay."""
+    with tempfile.TemporaryDirectory() as tmp, _patched_client(Path(tmp)) as client:
+        response = client.get("/sessions", headers={"HX-Request": "true"})
+        assert response.status_code == 200
+        assert "loading-overlay" not in response.text
+
+
 def test_stats_returns_200():
     """Stats page loads without error."""
     with tempfile.TemporaryDirectory() as tmp, _patched_client(Path(tmp)) as client:
