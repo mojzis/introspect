@@ -5,6 +5,8 @@ from pathlib import Path
 
 import duckdb
 
+from introspect.projects import resolve_project_map
+
 DEFAULT_DB_PATH = Path.home() / ".introspect" / "introspect.duckdb"
 DEFAULT_JSONL_GLOB = str(Path.home() / ".claude" / "projects" / "**" / "*.jsonl")
 
@@ -66,6 +68,8 @@ def materialize_views(
     conn: duckdb.DuckDBPyConnection,
     jsonl_glob: str,
     days: int = 0,
+    *,
+    resolve_projects: bool = True,
 ) -> None:
     """Materialize raw data into tables for fast querying.
 
@@ -90,6 +94,7 @@ def materialize_views(
         "conversation_turns",
         "tool_calls",
         "logical_sessions",
+        "project_map",
         "raw_messages",
         "raw_data",
         "search_corpus",
@@ -120,7 +125,40 @@ def materialize_views(
     conn.execute("CREATE INDEX idx_rm_type ON raw_messages(type)")
     conn.execute("CREATE INDEX idx_rm_timestamp ON raw_messages(timestamp)")
 
+    _build_project_map(conn, resolve_projects=resolve_projects)
     _create_derived_views(conn)
+
+
+def _build_project_map(
+    conn: duckdb.DuckDBPyConnection, *, resolve_projects: bool = True
+) -> None:
+    """Build the project_map table mapping cwd → canonical project."""
+    conn.execute("""
+        CREATE TABLE project_map (
+            cwd VARCHAR PRIMARY KEY,
+            canonical_path VARCHAR NOT NULL,
+            project_name VARCHAR NOT NULL
+        )
+    """)
+
+    rows = conn.execute(
+        "SELECT DISTINCT cwd FROM raw_messages WHERE cwd IS NOT NULL"
+    ).fetchall()
+    cwds = [r[0] for r in rows]
+    if not cwds:
+        return
+
+    mapping = (
+        resolve_project_map(cwds)
+        if resolve_projects
+        else dict(zip(cwds, cwds, strict=True))
+    )
+
+    rows = [
+        (cwd, canonical, canonical.rstrip("/").rsplit("/", 1)[-1])
+        for cwd, canonical in mapping.items()
+    ]
+    conn.executemany("INSERT INTO project_map VALUES (?, ?, ?)", rows)
 
 
 def _create_views(conn: duckdb.DuckDBPyConnection, jsonl_glob: str) -> None:
@@ -139,6 +177,15 @@ def _create_views(conn: duckdb.DuckDBPyConnection, jsonl_glob: str) -> None:
         WHERE type IN ('user', 'assistant')
     """)  # nosec B608
 
+    # Empty project_map so the JOIN in logical_sessions works in lazy mode
+    conn.execute("""
+        CREATE TABLE IF NOT EXISTS project_map (
+            cwd VARCHAR PRIMARY KEY,
+            canonical_path VARCHAR NOT NULL,
+            project_name VARCHAR NOT NULL
+        )
+    """)
+
     _create_derived_views(conn)
 
 
@@ -148,24 +195,29 @@ def _create_derived_views(conn: duckdb.DuckDBPyConnection) -> None:
     conn.execute("""
         CREATE OR REPLACE VIEW logical_sessions AS
         SELECT
-            session_id,
-            MIN(timestamp) AS started_at,
-            MAX(timestamp) AS ended_at,
-            age(MAX(timestamp), MIN(timestamp)) AS duration,
+            rm.session_id,
+            MIN(rm.timestamp) AS started_at,
+            MAX(rm.timestamp) AS ended_at,
+            age(MAX(rm.timestamp), MIN(rm.timestamp)) AS duration,
             COUNT(*) FILTER (
-                WHERE type = 'user'
-                AND role = 'user'
+                WHERE rm.type = 'user'
+                AND rm.role = 'user'
                 AND json_extract_string(
-                    message, '$.content[0].type'
+                    rm.message, '$.content[0].type'
                 ) IS DISTINCT FROM 'tool_result'
             ) AS user_messages,
-            COUNT(*) FILTER (WHERE type = 'assistant') AS assistant_messages,
-            ANY_VALUE(model) AS model,
-            ANY_VALUE(cwd) AS cwd,
-            ANY_VALUE(git_branch) AS git_branch,
-            ANY_VALUE(entrypoint) AS entrypoint,
-        FROM raw_messages
-        GROUP BY session_id
+            COUNT(*) FILTER (WHERE rm.type = 'assistant') AS assistant_messages,
+            ANY_VALUE(rm.model) AS model,
+            ANY_VALUE(rm.cwd) AS cwd,
+            COALESCE(
+                ANY_VALUE(pm.project_name),
+                split_part(rtrim(ANY_VALUE(rm.cwd), '/'), '/', -1)
+            ) AS project,
+            ANY_VALUE(rm.git_branch) AS git_branch,
+            ANY_VALUE(rm.entrypoint) AS entrypoint,
+        FROM raw_messages rm
+        LEFT JOIN project_map pm ON rm.cwd = pm.cwd
+        GROUP BY rm.session_id
     """)
 
     # Tool calls: assistant tool_use content blocks joined with results.

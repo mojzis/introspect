@@ -21,8 +21,8 @@ async def dashboard(request: Request) -> HTMLResponse:
     summary = db.execute("""
         SELECT
             COUNT(*),
-            COUNT(DISTINCT split_part(rtrim(cwd, '/'), '/', -1))
-                FILTER (WHERE cwd IS NOT NULL),
+            COUNT(DISTINCT project)
+                FILTER (WHERE project IS NOT NULL),
             AVG(EXTRACT(EPOCH FROM duration))
                 FILTER (WHERE duration IS NOT NULL),
             COUNT(*) FILTER (
