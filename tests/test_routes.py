@@ -509,6 +509,15 @@ def test_stats_shows_model_breakdown():
 # --- Search pagination tests ---
 
 
+def test_search_shows_fts_status():
+    """Search page shows FTS availability indicator."""
+    with tempfile.TemporaryDirectory() as tmp, _patched_client(Path(tmp)) as client:
+        response = client.get("/search")
+        assert response.status_code == 200
+        # Test DuckDB connections don't have FTS installed
+        assert "using ILIKE fallback" in response.text
+
+
 def test_search_pagination_next():
     """Search page shows page number."""
     with tempfile.TemporaryDirectory() as tmp, _patched_client(Path(tmp)) as client:
