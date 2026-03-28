@@ -611,6 +611,22 @@ def test_tools_filter_with_pagination():
         assert response.status_code == 200
 
 
+def test_tools_filter_by_session():
+    """Tools page filters by session ID."""
+    with tempfile.TemporaryDirectory() as tmp, _patched_client(Path(tmp)) as client:
+        response = client.get(f"/tools?session={SID}")
+        assert response.status_code == 200
+        assert SID[:12] in response.text
+
+
+def test_sessions_tool_count_links_to_tools():
+    """Sessions page tool count links to tools page filtered by session."""
+    with tempfile.TemporaryDirectory() as tmp, _patched_client(Path(tmp)) as client:
+        response = client.get("/sessions")
+        assert response.status_code == 200
+        assert f"/tools?session={SID}" in response.text
+
+
 # --- MCPs pagination tests ---
 
 

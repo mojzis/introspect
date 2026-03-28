@@ -93,7 +93,7 @@ page={{ page }}&page_size={{ page_size }}&sort={{ sort }}&order={{ order }}&mode
                 <td style="white-space:nowrap;">{{ s.duration }}</td>
                 <td>{{ s.user_msgs }}</td>
                 <td>{{ s.asst_msgs }}</td>
-                <td>{{ s.tool_count }}</td>
+                <td>{% if s.tool_count %}<a href="/tools?session={{ s.id }}" hx-get="/tools?session={{ s.id }}" hx-target="#content" hx-push-url="true">{{ s.tool_count }}</a>{% else %}0{% endif %}</td>
                 <td>{% if s.commands %}{% for c in s.commands.split(', ') %}<span class="tool-btn tool-btn-sm" style="font-size:0.75rem;padding:0.1rem 0.4rem;margin:0.1rem;">{{ c }}</span>{% endfor %}{% endif %}</td>
                 <td>{{ s.model }}</td>
             </tr>

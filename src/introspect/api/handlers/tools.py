@@ -9,10 +9,11 @@ from ._helpers import DEFAULT_PAGE_SIZE, conn, parent, templates
 
 
 async def tools(
-    request: Request, failed: bool, name: str, page: int = 1
+    request: Request, failed: bool, name: str, session: str, page: int = 1
 ) -> HTMLResponse:
     """Tool call stats with filtering (non-MCP tools only)."""
     db = conn(request)
+    session = session.strip()
 
     # Base filter: exclude MCP tools (they have their own page)
     where_clauses = ["tool_name NOT LIKE 'mcp__%'"]
@@ -22,6 +23,9 @@ async def tools(
     if name.strip():
         where_clauses.append("tool_name = ?")
         params.append(name.strip())
+    if session:
+        where_clauses.append("session_id = ?")
+        params.append(session)
 
     where = "WHERE " + " AND ".join(where_clauses)
 
@@ -51,7 +55,7 @@ async def tools(
             tc.execution_time,
             fp.first_prompt
         FROM tool_calls tc
-        LEFT JOIN session_titles fp ON tc.session_id = fp.session_id
+        LEFT JOIN session_titles fp USING (session_id)
         {where}
         ORDER BY tc.called_at DESC
         LIMIT ? OFFSET ?
@@ -60,18 +64,25 @@ async def tools(
     ).fetchall()
 
     # Get tool names with counts and success rate for filter buttons (non-MCP only)
-    tool_names = db.execute("""
+    tn_where = ["tool_name IS NOT NULL", "tool_name NOT LIKE 'mcp__%'"]
+    tn_params: list[str] = []
+    if session:
+        tn_where.append("session_id = ?")
+        tn_params.append(session)
+    tool_names = db.execute(
+        f"""
         SELECT
             tool_name,
             COUNT(*) AS cnt,
             100.0 * COUNT(*) FILTER (WHERE is_error IS DISTINCT FROM 'true')
                 / COUNT(*) AS success_rate
         FROM tool_calls
-        WHERE tool_name IS NOT NULL
-          AND tool_name NOT LIKE 'mcp__%'
+        WHERE {" AND ".join(tn_where)}
         GROUP BY tool_name
         ORDER BY cnt DESC
-    """).fetchall()
+    """,  # nosec B608
+        tn_params,
+    ).fetchall()
 
     return templates.TemplateResponse(
         request,
@@ -82,6 +93,7 @@ async def tools(
             "tool_names": tool_names,
             "filter_failed": failed,
             "filter_name": name,
+            "filter_session": session,
             "stats": stats,
             "page": page,
             "total_pages": total_pages,
