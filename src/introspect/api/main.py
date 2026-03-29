@@ -1,6 +1,8 @@
 """FastAPI application for introspect web UI."""
 
+import logging
 import os
+import time
 import uuid
 from contextlib import asynccontextmanager
 from pathlib import Path
@@ -21,14 +23,25 @@ async def lifespan(app: FastAPI):
     db_path = Path(os.environ.get("INTROSPECT_DB_PATH", str(DEFAULT_DB_PATH)))
     jsonl_glob = os.environ.get("INTROSPECT_JSONL_GLOB", DEFAULT_JSONL_GLOB)
     days = int(os.environ.get("INTROSPECT_DAYS", "10"))
+    watch = os.environ.get("INTROSPECT_WATCH") == "1"
     db_path.parent.mkdir(parents=True, exist_ok=True)
-    conn = duckdb.connect(str(db_path))
-    resolve_projects = os.environ.get("INTROSPECT_RESOLVE_PROJECTS", "1") != "0"
-    try:
-        materialize_views(conn, jsonl_glob, days, resolve_projects=resolve_projects)
-        build_search_corpus(conn)
-    finally:
-        conn.close()
+
+    # In watch mode, skip re-materialization if the DB was built recently
+    db_fresh = (
+        watch
+        and db_path.exists()
+        and (time.time() - db_path.stat().st_mtime) < 30
+    )
+    if not db_fresh:
+        conn = duckdb.connect(str(db_path))
+        resolve_projects = os.environ.get("INTROSPECT_RESOLVE_PROJECTS", "1") != "0"
+        try:
+            materialize_views(
+                conn, jsonl_glob, days, resolve_projects=resolve_projects
+            )
+            build_search_corpus(conn)
+        finally:
+            conn.close()
 
     # Open a shared read-only connection for request handling
     app.state.read_conn = duckdb.connect(str(db_path), read_only=True)
@@ -48,6 +61,8 @@ async def lifespan(app: FastAPI):
         finally:
             app.state.read_conn.close()
 
+
+_STARTUP_TIME = str(time.time())
 
 app = FastAPI(title="Introspect", lifespan=lifespan)
 
@@ -82,6 +97,12 @@ async def chrome_devtools():
     return JSONResponse({"workspace": {"root": workspace_root, "uuid": workspace_uuid}})
 
 
+@app.get("/public-files-sw.js", include_in_schema=False)
+async def devtools_service_worker():
+    """No-op service worker for Chrome DevTools workspace integration."""
+    return HTMLResponse(content="// no-op", media_type="application/javascript")
+
+
 @app.get("/favicon.ico", include_in_schema=False)
 async def favicon():
     """Return an SVG favicon."""
@@ -91,3 +112,19 @@ async def favicon():
         "</svg>"
     )
     return HTMLResponse(content=svg, media_type="image/svg+xml")
+
+
+@app.get("/_dev/version", include_in_schema=False)
+async def dev_version():
+    """Return server startup timestamp for live-reload polling."""
+    return JSONResponse({"v": _STARTUP_TIME})
+
+
+class _DevVersionFilter(logging.Filter):
+    """Suppress noisy /_dev/version polling from access logs."""
+
+    def filter(self, record: logging.LogRecord) -> bool:
+        return "/_dev/version" not in getattr(record, "message", record.getMessage())
+
+
+logging.getLogger("uvicorn.access").addFilter(_DevVersionFilter())

@@ -89,5 +89,20 @@
             document.getElementById('loading-overlay').classList.remove('active');
         });
     </script>
+    {% if watch_mode %}
+    <script>
+        (function() {
+            let lastVersion = null;
+            setInterval(async () => {
+                try {
+                    const r = await fetch('/_dev/version');
+                    const data = await r.json();
+                    if (lastVersion && data.v !== lastVersion) location.reload();
+                    lastVersion = data.v;
+                } catch(e) {}
+            }, 1000);
+        })();
+    </script>
+    {% endif %}
 </body>
 </html>

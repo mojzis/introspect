@@ -367,6 +367,9 @@ def serve(
         "--no-resolve-projects",
         help="Skip git worktree resolution for project names",
     ),
+    watch: bool = typer.Option(
+        False, "-w", "--watch", help="Auto-reload on source changes"
+    ),
 ):
     """Launch the web UI."""
     import os  # noqa: PLC0415
@@ -382,7 +385,17 @@ def serve(
         console.print(f"[dim]Loading last {days} days of data...[/dim]")
     else:
         console.print("[dim]Loading all data (no day limit)...[/dim]")
-    uvicorn.run("introspect.api.main:app", host=host, port=port, log_level="info")
+    if watch:
+        os.environ["INTROSPECT_WATCH"] = "1"
+        console.print("[dim]Watch mode enabled — reloading on changes...[/dim]")
+    uvicorn.run(
+        "introspect.api.main:app",
+        host=host,
+        port=port,
+        log_level="info",
+        reload=watch,
+        reload_dirs=["src/introspect"] if watch else None,
+    )
 
 
 @app.command()
