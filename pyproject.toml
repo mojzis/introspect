@@ -35,6 +35,7 @@ dev = [
     "deptry",
     "interrogate",
     "poethepoet",
+    "beautifulsoup4",
 ]
 
 [tool.uv]
@@ -145,6 +146,10 @@ sequence = [
 ]
 ignore_fail = true
 help = "Run all checks (report all failures)"
+
+[tool.poe.tasks.test-e2e]
+cmd = "pytest tests/e2e -v"
+help = "Run E2E tests"
 
 [tool.poe.tasks.setup]
 cmd = "bash scripts/install-hooks.sh"
