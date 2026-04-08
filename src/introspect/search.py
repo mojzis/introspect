@@ -180,6 +180,6 @@ def fts_search(
         ORDER BY score DESC, timestamp DESC
         LIMIT ?
         OFFSET ?
-        """,  # nosec B608
+        """,  # noqa: S608
         params,
     ).fetchall()

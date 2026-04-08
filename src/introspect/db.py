@@ -101,9 +101,9 @@ def materialize_views(
         "search_corpus",
     ):
         with contextlib.suppress(duckdb.CatalogException):
-            conn.execute(f"DROP VIEW IF EXISTS {name}")  # nosec B608
+            conn.execute(f"DROP VIEW IF EXISTS {name}")
         with contextlib.suppress(duckdb.CatalogException):
-            conn.execute(f"DROP TABLE IF EXISTS {name}")  # nosec B608
+            conn.execute(f"DROP TABLE IF EXISTS {name}")
 
     _read = f"read_json_auto('{jsonl_glob}', {_READ_JSON_OPTS})"
 
@@ -111,7 +111,7 @@ def materialize_views(
         CREATE TABLE raw_data AS
         SELECT * FROM {_read}
         {day_filter}
-    """)  # nosec B608
+    """)  # noqa: S608
 
     conn.execute(f"""
         CREATE TABLE raw_messages AS
@@ -119,7 +119,7 @@ def materialize_views(
         FROM {_read}
         WHERE type IN ('user', 'assistant')
         {and_day_filter}
-    """)  # nosec B608
+    """)  # noqa: S608
 
     # Add indexes for common query patterns
     conn.execute("CREATE INDEX idx_rm_session ON raw_messages(session_id)")
@@ -169,14 +169,14 @@ def _create_views(conn: duckdb.DuckDBPyConnection, jsonl_glob: str) -> None:
     conn.execute(f"""
         CREATE OR REPLACE VIEW raw_data AS
         SELECT * FROM {_read}
-    """)  # nosec B608
+    """)  # noqa: S608
 
     conn.execute(f"""
         CREATE OR REPLACE VIEW raw_messages AS
         SELECT {_RAW_MESSAGES_COLUMNS}
         FROM {_read}
         WHERE type IN ('user', 'assistant')
-    """)  # nosec B608
+    """)  # noqa: S608
 
     # Empty project_map so the JOIN in logical_sessions works in lazy mode
     conn.execute("""

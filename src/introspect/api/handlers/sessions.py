@@ -85,7 +85,7 @@ async def sessions(  # noqa: PLR0913
 
     # Count with filters
     total = db.execute(
-        f"SELECT COUNT(*) FROM logical_sessions ls {where}",  # nosec B608
+        f"SELECT COUNT(*) FROM logical_sessions ls {where}",  # noqa: S608
         params,
     ).fetchone()[0]
     total_pages = max(1, math.ceil(total / page_size))
@@ -105,7 +105,7 @@ async def sessions(  # noqa: PLR0913
         {where}
         ORDER BY {sort_col} {sort_dir} {nulls}
         LIMIT ? OFFSET ?
-    """,  # nosec B608
+    """,  # noqa: S608
         [*params, page_size, offset],
     ).fetchall()
 
@@ -130,7 +130,7 @@ async def sessions(  # noqa: PLR0913
         SELECT DISTINCT command FROM message_commands
         WHERE command NOT IN {OBVIOUS_COMMANDS_SQL}
         ORDER BY command
-    """).fetchall()  # nosec B608
+    """).fetchall()  # noqa: S608
 
     return templates.TemplateResponse(
         request,

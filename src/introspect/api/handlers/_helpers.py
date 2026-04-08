@@ -127,7 +127,7 @@ OBVIOUS_COMMANDS: frozenset[str] = frozenset(
 OBVIOUS_COMMANDS_SQL = "(" + ", ".join(f"'{c}'" for c in sorted(OBVIOUS_COMMANDS)) + ")"
 
 COMMAND_LIST_SUBQUERY = (
-    "(SELECT session_id,"  # nosec B608
+    "(SELECT session_id,"  # noqa: S608
     " string_agg(DISTINCT command, ', ' ORDER BY command) AS commands"
     " FROM message_commands"
     f" WHERE command NOT IN {OBVIOUS_COMMANDS_SQL}"
@@ -258,7 +258,7 @@ def fetch_token_usage(
             WHERE type = 'assistant'
               AND json_extract(message, '$.usage.input_tokens') IS NOT NULL
               {session_filter}
-        """,  # nosec B608
+        """,  # noqa: S608
             params,
         ).fetchone()
     except Exception:

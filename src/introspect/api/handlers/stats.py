@@ -206,7 +206,7 @@ async def stats(request: Request) -> HTMLResponse:
             ON ls.session_id = tc.session_id
         ORDER BY ls.duration DESC
         LIMIT 15
-    """).fetchall()  # nosec B608
+    """).fetchall()  # noqa: S608
 
     # Most tool calls sessions top 15 with all metrics
     most_tools_sessions = db.execute(f"""
@@ -222,7 +222,7 @@ async def stats(request: Request) -> HTMLResponse:
             ON ls.session_id = tc.session_id
         ORDER BY tc.tool_count DESC NULLS LAST
         LIMIT 15
-    """).fetchall()  # nosec B608
+    """).fetchall()  # noqa: S608
 
     # Sessions per day
     sessions_per_day = db.execute("""
@@ -253,7 +253,7 @@ async def stats(request: Request) -> HTMLResponse:
         WHERE ls.model IS NOT NULL
         GROUP BY ls.model
         ORDER BY session_count DESC
-    """).fetchall()  # nosec B608
+    """).fetchall()  # noqa: S608
 
     # Average metrics
     averages = db.execute(f"""
@@ -263,7 +263,7 @@ async def stats(request: Request) -> HTMLResponse:
             AVG(COALESCE(tc.tool_count, 0))
         FROM logical_sessions ls
         LEFT JOIN {TOOL_COUNTS_SUBQUERY} ON ls.session_id = tc.session_id
-    """).fetchone()  # nosec B608
+    """).fetchone()  # noqa: S608
     avg_duration_str = format_duration(averages[0] or 0)
     avg_tool_calls = round(averages[1] or 0, 1)
 

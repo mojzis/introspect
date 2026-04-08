@@ -1,6 +1,6 @@
 """Git worktree-aware project resolution."""
 
-import subprocess  # nosec B404
+import subprocess
 from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 
@@ -12,8 +12,8 @@ def get_canonical_project(cwd: str) -> str:
     checkout and any worktrees resolve to the same path.
     """
     try:
-        result = subprocess.run(  # nosec B603 B607
-            ["git", "-C", cwd, "rev-parse", "--git-common-dir"],
+        result = subprocess.run(  # noqa: S603
+            ["git", "-C", cwd, "rev-parse", "--git-common-dir"],  # noqa: S607
             capture_output=True,
             text=True,
             check=True,

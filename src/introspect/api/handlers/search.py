@@ -40,7 +40,7 @@ async def search(request: Request, q: str, page: int = 1) -> HTMLResponse:
                 FROM logical_sessions ls
                 {SESSION_INFO_JOINS}
                 WHERE ls.session_id IN ({placeholders})
-            """,  # nosec B608
+            """,  # noqa: S608
                 session_ids,
             ).fetchall()
 
