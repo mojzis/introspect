@@ -261,11 +261,8 @@ E2E_DATA_DIR = Path(__file__).parent / "data"
 @pytest.fixture
 def e2e(tmp_path):
     """E2E test client with test data from tests/e2e/data/."""
-    from introspect.search import _fts_cache  # noqa: PLC0415
-
     glob_pattern = str(E2E_DATA_DIR / "projects" / "**" / "*.jsonl")
     db_path = tmp_path / "test.duckdb"
-    _fts_cache.clear()
 
     with patch.dict(
         os.environ,

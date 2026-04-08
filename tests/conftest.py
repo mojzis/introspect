@@ -3,6 +3,47 @@
 import json
 from pathlib import Path
 
+import duckdb
+import pytest
+
+
+@pytest.fixture(scope="session", autouse=True)
+def _prewarm_fts_cache():
+    """Detect FTS availability once per session.
+
+    ``introspect.search.fts_available`` calls ``INSTALL fts``, which contacts
+    ``extensions.duckdb.org``. In offline/sandboxed environments each attempt
+    takes ~80s to fail due to DNS timeouts. Detecting availability once per
+    session (instead of once per test) keeps the suite fast.
+
+    Uses a localhost custom repository for the INSTALL probe so the fallback
+    fails immediately (no network wait) if the extension isn't already on disk.
+    """
+    from introspect.search import _fts_cache  # noqa: PLC0415
+
+    conn = duckdb.connect(":memory:")
+    try:
+        # Fast path: extension already on disk, LOAD succeeds without network
+        already_loaded = False
+        try:
+            conn.execute("LOAD fts")
+            already_loaded = True
+        except duckdb.IOException:
+            pass
+        if already_loaded:
+            _fts_cache["available"] = True
+            return
+        # Fallback: try INSTALL with a localhost repo so it fails fast offline
+        conn.execute("SET custom_extension_repository = 'http://127.0.0.1:1'")
+        try:
+            conn.execute("INSTALL fts")
+            conn.execute("LOAD fts")
+            _fts_cache["available"] = True
+        except (duckdb.IOException, duckdb.CatalogException, duckdb.HTTPException):
+            _fts_cache["available"] = False
+    finally:
+        conn.close()
+
 
 def make_user_message(
     session_id: str,
