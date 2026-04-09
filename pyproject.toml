@@ -30,10 +30,8 @@ dev = [
     "pytest",
     "pytest-cov",
     "httpx",
-    "bandit",
     "vulture",
     "deptry",
-    "interrogate",
     "poethepoet",
     "beautifulsoup4",
 ]
@@ -46,10 +44,10 @@ line-length = 88
 target-version = "py311"
 
 [tool.ruff.lint]
-select = ["E", "F", "W", "I", "UP", "B", "SIM", "C4", "DTZ", "T20", "PTH", "ERA", "PL", "TRY", "RUF"]
+select = ["E", "F", "W", "I", "UP", "B", "SIM", "C4", "DTZ", "T20", "PTH", "ERA", "PL", "TRY", "RUF", "S", "PERF", "FURB"]
 
 [tool.ruff.lint.per-file-ignores]
-"tests/**" = ["PLR2004", "PLR0913"]
+"tests/**" = ["PLR2004", "PLR0913", "S"]
 
 [tool.ruff.format]
 
@@ -65,18 +63,12 @@ source = ["src"]
 [tool.coverage.report]
 show_missing = true
 
-[tool.bandit]
-exclude_dirs = ["tests"]
-
 [tool.vulture]
 paths = ["src"]
 min_confidence = 80
 
 [tool.deptry]
 per_rule_ignores = {"DEP002" = ["jinja2"], "DEP003" = ["introspect"]}
-
-[tool.interrogate]
-fail_under = 0
 
 [tool.poe]
 verbosity = -1
@@ -100,10 +92,6 @@ help = "Run type checker"
 cmd = "pytest -q --tb=short"
 help = "Run tests"
 
-[tool.poe.tasks.security]
-cmd = "bandit -r src -q"
-help = "Security scan (bandit)"
-
 [tool.poe.tasks.vulns]
 shell = "uvx pysentry-rs . || true"
 interpreter = "bash"
@@ -121,7 +109,8 @@ help = "Unused dependency check"
 shell = """
   ruff check . &
   ty check &
-  bandit -r src -q &
+  vulture src &
+  deptry . &
   (uvx pysentry-rs . || true) &
   wait
 """
@@ -138,7 +127,6 @@ help = "Run all checks (parallel where possible)"
 sequence = [
     { ref = "lint" },
     { ref = "typecheck" },
-    { ref = "security" },
     { ref = "vulns" },
     { ref = "dead-code" },
     { ref = "unused-deps" },

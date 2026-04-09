@@ -10,7 +10,6 @@ import pytest
 from fastapi.testclient import TestClient
 
 from introspect.api.main import app
-from introspect.search import _fts_cache
 
 from .conftest import (
     glob_pattern,
@@ -122,8 +121,6 @@ def _patched_client(tmp_path: Path):
     """Context manager that yields a TestClient with materialized test data."""
     _write_sample_jsonl(tmp_path)
     db_path = tmp_path / "test.duckdb"
-    # Clear FTS cache so each test detects FTS availability fresh
-    _fts_cache.clear()
 
     with (
         patch.dict(

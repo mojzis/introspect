@@ -113,7 +113,7 @@ def tools(
         {where}
         ORDER BY called_at DESC
         LIMIT ?
-    """,  # nosec B608
+    """,  # noqa: S608
         params,
     ).fetchall()
 
@@ -220,7 +220,7 @@ def raw(
             where = "WHERE CAST(sessionId AS VARCHAR) LIKE ?"
             params.append(f"{session}%")
         result = conn.execute(
-            f"SELECT * FROM raw_data {where} LIMIT {limit}",  # nosec B608
+            f"SELECT * FROM raw_data {where} LIMIT {limit}",  # noqa: S608
             params,
         )
         columns = [desc[0] for desc in result.description]

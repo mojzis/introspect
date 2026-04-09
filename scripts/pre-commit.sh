@@ -24,12 +24,6 @@ echo "$STAGED_PY_FILES" | xargs uv run ruff check --no-fix || FAILED=1
 
 uv run ty check || FAILED=1
 
-# Run bandit only on src files (skip tests)
-STAGED_SRC_FILES=$(echo "$STAGED_PY_FILES" | grep -v '^tests/' || true)
-if [ -n "$STAGED_SRC_FILES" ]; then
-    echo "$STAGED_SRC_FILES" | xargs uv run bandit -q || FAILED=1
-fi
-
 if [ "$FAILED" -ne 0 ]; then
     echo ""
     echo "Pre-commit checks failed. Fix the issues above or bypass with:"

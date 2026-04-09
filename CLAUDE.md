@@ -14,7 +14,7 @@ Explore Claude Code conversation logs via CLI, web UI, MCP server.
 ## Key Patterns
 
 - **Adding a page**: handler in `handlers/`, route in `routes.py`, template, tests in `test_routes.py`
-- **DB access**: `request.state.conn`, `json_extract()` for JSON fields, `# nosec B608` for dynamic SQL
+- **DB access**: `request.state.conn`, `json_extract()` for JSON fields, `# noqa: S608` for dynamic SQL
 - **Pagination**: 1-based, fetch `size+1` to detect next page
 - **HTMX**: `parent(request)` selects `base.html` (full) vs `partial.html` (fragment)
 - **Views** (`db.py`): `raw_data`, `raw_messages`, `logical_sessions`, `tool_calls`, `conversation_turns`, `session_titles`, `search_corpus`
@@ -25,7 +25,7 @@ Explore Claude Code conversation logs via CLI, web UI, MCP server.
 
 ## Commands
 
-- `uv run poe check` — run lint, typecheck, security, vulns, then tests
+- `uv run poe check` — run lint, typecheck, vulns, then tests
 - `uv run poe fix` — auto-format and fix lint issues
 - `uv run poe test` — run tests only
 - `uv run poe check-all` — run all checks including dead-code and unused-deps

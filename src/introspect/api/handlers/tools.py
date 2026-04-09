@@ -37,7 +37,7 @@ async def tools(
             COUNT(*) FILTER (WHERE is_error = 'true') AS failed_total
         FROM tool_calls
         {where}
-    """,  # nosec B608
+    """,  # noqa: S608
         params,
     ).fetchone()
 
@@ -59,7 +59,7 @@ async def tools(
         {where}
         ORDER BY tc.called_at DESC
         LIMIT ? OFFSET ?
-    """,  # nosec B608
+    """,  # noqa: S608
         [*params, DEFAULT_PAGE_SIZE, offset],
     ).fetchall()
 
@@ -80,7 +80,7 @@ async def tools(
         WHERE {" AND ".join(tn_where)}
         GROUP BY tool_name
         ORDER BY cnt DESC
-    """,  # nosec B608
+    """,  # noqa: S608
         tn_params,
     ).fetchall()
 

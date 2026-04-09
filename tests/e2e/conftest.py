@@ -45,25 +45,25 @@ class HTMXResponse:
         """Extract all HTMX and link endpoints from the page."""
         endpoints: list[dict] = []
 
-        for el in self.soup.select("[hx-get]"):
-            endpoints.append(
-                {
-                    "url": str(el["hx-get"]),
-                    "method": "GET",
-                    "htmx": True,
-                    "source": f"hx-get on <{el.name}>",
-                }
-            )
+        endpoints.extend(
+            {
+                "url": str(el["hx-get"]),
+                "method": "GET",
+                "htmx": True,
+                "source": f"hx-get on <{el.name}>",
+            }
+            for el in self.soup.select("[hx-get]")
+        )
 
-        for el in self.soup.select("[hx-post]"):
-            endpoints.append(
-                {
-                    "url": str(el["hx-post"]),
-                    "method": "POST",
-                    "htmx": True,
-                    "source": f"hx-post on <{el.name}>",
-                }
-            )
+        endpoints.extend(
+            {
+                "url": str(el["hx-post"]),
+                "method": "POST",
+                "htmx": True,
+                "source": f"hx-post on <{el.name}>",
+            }
+            for el in self.soup.select("[hx-post]")
+        )
 
         for el in self.soup.select("a[href]"):
             href = str(el["href"])
@@ -78,15 +78,15 @@ class HTMXResponse:
                     }
                 )
 
-        for el in self.soup.select("form[action]"):
-            endpoints.append(
-                {
-                    "url": str(el.get("action", "")),
-                    "method": str(el.get("method", "GET")).upper(),
-                    "htmx": (el.has_attr("hx-post") or el.has_attr("hx-get")),
-                    "source": "form action",
-                }
-            )
+        endpoints.extend(
+            {
+                "url": str(el.get("action", "")),
+                "method": str(el.get("method", "GET")).upper(),
+                "htmx": (el.has_attr("hx-post") or el.has_attr("hx-get")),
+                "source": "form action",
+            }
+            for el in self.soup.select("form[action]")
+        )
 
         return endpoints
 
@@ -106,8 +106,10 @@ class CrawlResult:
         lines = [f"Crawled {len(self.visited)} URLs"]
         if self.errors:
             lines.append(f"Errors ({len(self.errors)}):")
-            for err in self.errors:
-                lines.append(f"  {err['url']}: {err['status']} ({err['source']})")
+            lines.extend(
+                f"  {err['url']}: {err['status']} ({err['source']})"
+                for err in self.errors
+            )
         return "\n".join(lines)
 
 
@@ -259,11 +261,8 @@ E2E_DATA_DIR = Path(__file__).parent / "data"
 @pytest.fixture
 def e2e(tmp_path):
     """E2E test client with test data from tests/e2e/data/."""
-    from introspect.search import _fts_cache  # noqa: PLC0415
-
     glob_pattern = str(E2E_DATA_DIR / "projects" / "**" / "*.jsonl")
     db_path = tmp_path / "test.duckdb"
-    _fts_cache.clear()
 
     with patch.dict(
         os.environ,

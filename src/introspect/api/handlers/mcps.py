@@ -51,7 +51,7 @@ async def mcps(
         WHERE {" AND ".join(cmd_where)}
         GROUP BY server_name, command_name
         ORDER BY cnt DESC
-    """,  # nosec B608
+    """,  # noqa: S608
         mcp_params,
     ).fetchall()
 
@@ -74,7 +74,7 @@ async def mcps(
             COUNT(*) FILTER (WHERE is_error = 'true') AS failed_total
         FROM tool_calls tc
         WHERE {" AND ".join(list_where)}
-    """,  # nosec B608
+    """,  # noqa: S608
         list_params,
     ).fetchone()
 
@@ -97,7 +97,7 @@ async def mcps(
         WHERE {" AND ".join(list_where)}
         ORDER BY tc.called_at DESC
         LIMIT ? OFFSET ?
-    """,  # nosec B608
+    """,  # noqa: S608
         [*list_params, DEFAULT_PAGE_SIZE, offset],
     ).fetchall()
 

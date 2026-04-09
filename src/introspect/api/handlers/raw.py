@@ -30,14 +30,14 @@ async def raw_data(
     where = "WHERE " + " AND ".join(where_clauses) if where_clauses else ""
 
     total = db.execute(
-        f"SELECT COUNT(*) FROM raw_data {where}",  # nosec B608
+        f"SELECT COUNT(*) FROM raw_data {where}",  # noqa: S608
         params,
     ).fetchone()[0]
     total_pages = max(1, math.ceil(total / RAW_PER_PAGE))
     offset = (page - 1) * RAW_PER_PAGE
 
     result = db.execute(
-        f"SELECT * FROM raw_data {where} LIMIT ? OFFSET ?",  # nosec B608
+        f"SELECT * FROM raw_data {where} LIMIT ? OFFSET ?",  # noqa: S608
         [*params, RAW_PER_PAGE, offset],
     )
     columns = [desc[0] for desc in result.description]
