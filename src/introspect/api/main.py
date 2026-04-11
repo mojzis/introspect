@@ -1,5 +1,7 @@
 """FastAPI application for introspect web UI."""
 
+import asyncio
+import contextlib
 import os
 import uuid
 from contextlib import asynccontextmanager
@@ -12,6 +14,7 @@ from fastapi.responses import HTMLResponse, JSONResponse
 from introspect.api.routes import router
 from introspect.db import DEFAULT_DB_PATH, DEFAULT_JSONL_GLOB, materialize_views
 from introspect.mcp.server import create_mcp_server
+from introspect.refresh import refresh_loop
 from introspect.search import build_search_corpus
 
 
@@ -21,6 +24,7 @@ async def lifespan(app: FastAPI):
     db_path = Path(os.environ.get("INTROSPECT_DB_PATH", str(DEFAULT_DB_PATH)))
     jsonl_glob = os.environ.get("INTROSPECT_JSONL_GLOB", DEFAULT_JSONL_GLOB)
     days = int(os.environ.get("INTROSPECT_DAYS", "10"))
+    interval = float(os.environ.get("INTROSPECT_REFRESH_INTERVAL_SECONDS", "30"))
     db_path.parent.mkdir(parents=True, exist_ok=True)
     conn = duckdb.connect(str(db_path))
     resolve_projects = os.environ.get("INTROSPECT_RESOLVE_PROJECTS", "1") != "0"
@@ -32,6 +36,12 @@ async def lifespan(app: FastAPI):
 
     # Open a shared read-only connection for request handling
     app.state.read_conn = duckdb.connect(str(db_path), read_only=True)
+
+    refresh_task: asyncio.Task[None] | None = None
+    if interval > 0:
+        refresh_task = asyncio.create_task(
+            refresh_loop(app, db_path, jsonl_glob, days, resolve_projects, interval)
+        )
 
     # Create a fresh MCP server and replace the placeholder mount
     mcp_server = create_mcp_server()
@@ -46,6 +56,10 @@ async def lifespan(app: FastAPI):
         try:
             yield
         finally:
+            if refresh_task is not None:
+                refresh_task.cancel()
+                with contextlib.suppress(asyncio.CancelledError):
+                    await refresh_task
             app.state.read_conn.close()
 
 
