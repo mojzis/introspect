@@ -2,6 +2,7 @@
 
 import json
 import math
+import re
 
 from fastapi import Request
 from fastapi.responses import HTMLResponse
@@ -19,10 +20,128 @@ from ._helpers import (
     conn,
     fetch_token_usage,
     parent,
-    parse_content_block,
     session_row_to_dict,
     templates,
 )
+
+_MESSAGE_HARD_CAP = 5000
+_THINKING_PREVIEW_MAX = 200
+_TOOL_HINT_MAX = 120
+_COMMAND_NAME_RE = re.compile(r"<command-name>([^<]+)</command-name>")
+
+# Per-tool preferred input keys for the one-line collapsed summary.
+# First matching key in order wins; missing tools fall back to the first value.
+_TOOL_HINT_KEYS: dict[str, tuple[str, ...]] = {
+    "Read": ("file_path",),
+    "Edit": ("file_path",),
+    "MultiEdit": ("file_path",),
+    "Write": ("file_path",),
+    "NotebookEdit": ("notebook_path",),
+    "Bash": ("command",),
+    "Glob": ("pattern",),
+    "Grep": ("pattern",),
+    "WebFetch": ("url",),
+    "WebSearch": ("query",),
+    "Task": ("description", "subagent_type"),
+    "Agent": ("description", "subagent_type"),
+    "TaskCreate": ("subject",),
+    "TaskUpdate": ("taskId", "status"),
+    "Skill": ("skill", "args"),
+    "ScheduleWakeup": ("reason",),
+}
+
+
+def _format_exec_time(seconds: float) -> str:
+    if seconds < 1:
+        return f"{seconds:.2f}s"
+    if seconds < 60:
+        return f"{seconds:.1f}s"
+    mins, secs = divmod(int(seconds), 60)
+    return f"{mins}m {secs}s"
+
+
+def _cap(value: str | None, limit: int = _MESSAGE_HARD_CAP) -> str:
+    """Cap long strings with a visible truncation marker."""
+    if not value:
+        return ""
+    if len(value) <= limit:
+        return value
+    return value[:limit] + "\n… [truncated]"
+
+
+def _pretty_tool_input(raw: str | None) -> str:
+    """Pretty-print a tool input string. Falls back to the raw value on failure."""
+    if not raw:
+        return ""
+    try:
+        parsed = json.loads(raw)
+    except (ValueError, TypeError):
+        return _cap(raw)
+    try:
+        return _cap(json.dumps(parsed, indent=2, ensure_ascii=False))
+    except (TypeError, ValueError):
+        return _cap(raw)
+
+
+def _slash_command_label(text: str | None) -> str:
+    """Extract the command name from a <command-name>…</command-name> wrapper."""
+    if not text:
+        return ""
+    match = _COMMAND_NAME_RE.search(text)
+    if match:
+        return match.group(1).strip()
+    return text.strip().splitlines()[0][:80]
+
+
+def _thinking_preview(text: str | None) -> tuple[str, bool]:
+    """Return (preview, has_more) for a thinking block.
+
+    Preview is the first sentence if reasonably short, otherwise a hard cap.
+    """
+    if not text:
+        return "", False
+    stripped = text.strip()
+    first_period = stripped.find(". ")
+    if 20 < first_period < _THINKING_PREVIEW_MAX:
+        preview = stripped[: first_period + 1]
+    else:
+        preview = stripped[:_THINKING_PREVIEW_MAX]
+    has_more = len(stripped) > len(preview)
+    return preview, has_more
+
+
+def _tool_hint(tool_name: str, raw_input: str | None) -> str:
+    """One-line summary of a tool call's input for the collapsed view."""
+    if not raw_input:
+        return ""
+    try:
+        parsed = json.loads(raw_input)
+    except (ValueError, TypeError):
+        return _single_line(raw_input, _TOOL_HINT_MAX)
+    if not isinstance(parsed, dict):
+        return _single_line(str(parsed), _TOOL_HINT_MAX)
+    keys = _TOOL_HINT_KEYS.get(tool_name, ())
+    for key in keys:
+        if key in parsed and parsed[key] not in (None, ""):
+            return _single_line(str(parsed[key]), _TOOL_HINT_MAX)
+    for value in parsed.values():
+        if value not in (None, ""):
+            return _single_line(str(value), _TOOL_HINT_MAX)
+    return ""
+
+
+def _single_line(value: str, limit: int) -> str:
+    collapsed = " ".join(value.split())
+    return collapsed if len(collapsed) <= limit else collapsed[: limit - 1] + "…"
+
+
+def _coerce_bool(value: object) -> bool:
+    """Normalize DuckDB/JSON boolean-ish values to a Python bool."""
+    if value is None or value is False:
+        return False
+    if value is True:
+        return True
+    return str(value).strip().lower() == "true"
 
 
 async def sessions(  # noqa: PLR0913
@@ -187,44 +306,63 @@ async def session_detail(request: Request, session_id: str) -> HTMLResponse:
         [session_id],
     ).fetchone()
 
-    messages = db.execute(
+    # One row per classified content block, with paired tool results already
+    # joined in from the tool_calls view (so agent_tool_call rows know their
+    # result text, error flag, and execution time).
+    cur = db.execute(
         """
-        SELECT timestamp, type, role, message, uuid
-        FROM raw_messages
-        WHERE session_id = ?
-        ORDER BY timestamp ASC
-    """,
+        SELECT
+            e.timestamp,
+            e.kind,
+            e.is_sidechain,
+            e.text,
+            e.thinking_text,
+            e.tool_name,
+            e.tool_input,
+            tc.tool_use_result,
+            tc.is_error,
+            tc.execution_time,
+        FROM session_messages_enriched e
+        LEFT JOIN tool_calls tc ON tc.tool_use_id = e.tool_use_id
+        WHERE e.session_id = ?
+          AND e.kind <> 'tool_result'
+        ORDER BY e.timestamp ASC, e.block_idx ASC
+        """,
         [session_id],
-    ).fetchall()
-
+    )
+    col_names = [d[0] for d in cur.description]
     parsed_messages = []
-    for msg in messages:
-        timestamp, msg_type, role, message_json, uuid = msg
-        content_blocks = []
-
-        try:
-            msg_data = (
-                json.loads(message_json)
-                if isinstance(message_json, str)
-                else message_json
-            )
-        except (json.JSONDecodeError, TypeError):
-            msg_data = {}
-
-        raw_content = msg_data.get("content", "")
-
-        if isinstance(raw_content, str):
-            content_blocks.append({"type": "text", "text": raw_content})
-        elif isinstance(raw_content, list):
-            content_blocks = [parse_content_block(block) for block in raw_content]
-
+    for row in cur.fetchall():
+        rec = dict(zip(col_names, row, strict=True))
+        kind = rec["kind"]
+        exec_secs = (
+            rec["execution_time"].total_seconds()
+            if rec["execution_time"] is not None
+            else None
+        )
+        thinking_preview, thinking_has_more = _thinking_preview(rec["thinking_text"])
         parsed_messages.append(
             {
-                "timestamp": str(timestamp)[:19] if timestamp else "",
-                "type": msg_type,
-                "role": role or msg_type,
-                "content_blocks": content_blocks,
-                "uuid": uuid,
+                "timestamp": str(rec["timestamp"])[:19] if rec["timestamp"] else "",
+                "kind": kind,
+                "is_sidechain": bool(rec["is_sidechain"]),
+                "text": _cap(rec["text"]),
+                "thinking_text": _cap(rec["thinking_text"]),
+                "thinking_preview": thinking_preview,
+                "thinking_has_more": thinking_has_more,
+                "command_label": (
+                    _slash_command_label(rec["text"])
+                    if kind == "slash_command"
+                    else ""
+                ),
+                "tool_name": rec["tool_name"] or "",
+                "tool_hint": _tool_hint(rec["tool_name"] or "", rec["tool_input"]),
+                "tool_input": _pretty_tool_input(rec["tool_input"]),
+                "tool_result": _cap(rec["tool_use_result"]),
+                "is_error": _coerce_bool(rec["is_error"]),
+                "exec_time": (
+                    _format_exec_time(exec_secs) if exec_secs is not None else ""
+                ),
             }
         )
 

@@ -11,8 +11,10 @@ if TYPE_CHECKING:
 def register_tools(mcp: FastMCP) -> None:
     """Register all introspect MCP tools on the given server instance."""
     from introspect.mcp.tools import (  # noqa: PLC0415
+        describe_schema,
         get_session,
         recent_sessions,
+        run_sql,
         search_conversations,
         tool_failures,
     )
@@ -21,3 +23,5 @@ def register_tools(mcp: FastMCP) -> None:
     mcp.tool()(get_session)
     mcp.tool()(recent_sessions)
     mcp.tool()(tool_failures)
+    mcp.tool()(run_sql)
+    mcp.tool()(describe_schema)

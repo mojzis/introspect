@@ -302,18 +302,18 @@ def search(
         table.add_column("Session ID", style="cyan", max_width=12)
         table.add_column("Timestamp", style="green")
         table.add_column("Role")
+        table.add_column("CWD", style="dim", max_width=30)
         table.add_column("Snippet", max_width=80)
         table.add_column("Score", justify="right")
 
-        for row in results:
-            sid = _truncate_sid(row[0])
-            ts = str(row[1])[:19] if row[1] else ""
+        for session_id, timestamp, role, cwd, snippet, score in results:
             table.add_row(
-                sid,
-                ts,
-                row[2] or "",
-                row[3] or "",
-                f"{row[4]:.4f}" if row[4] is not None else "",
+                _truncate_sid(session_id),
+                str(timestamp)[:19] if timestamp else "",
+                role or "",
+                cwd or "",
+                snippet or "",
+                f"{score:.4f}" if score is not None else "",
             )
 
         console.print(table)
@@ -355,6 +355,44 @@ def materialize(
         conn.close()
 
 
+def _run_web_ui(
+    host: str,
+    port: int,
+    days: int,
+    no_resolve_projects: bool,
+    reload: bool,
+) -> None:
+    """Shared uvicorn launcher for the `serve` and `devserve` commands."""
+    import os  # noqa: PLC0415
+    from pathlib import Path  # noqa: PLC0415
+
+    import uvicorn  # noqa: PLC0415
+
+    os.environ["INTROSPECT_DAYS"] = str(days)
+    if no_resolve_projects:
+        os.environ["INTROSPECT_RESOLVE_PROJECTS"] = "0"
+
+    banner = "dev server" if reload else "web UI"
+    console.print(f"[bold]Starting Introspect {banner} on http://{host}:{port}[/bold]")
+    console.print(f"[dim]MCP endpoint: http://{host}:{port}/mcp[/dim]")
+    if days > 0:
+        console.print(f"[dim]Loading last {days} days of data...[/dim]")
+    else:
+        console.print("[dim]Loading all data (no day limit)...[/dim]")
+
+    kwargs: dict[str, object] = {
+        "host": host,
+        "port": port,
+        "log_level": "info",
+    }
+    if reload:
+        reload_dir = str(Path(__file__).resolve().parent)
+        console.print(f"[dim]Auto-reload watching {reload_dir}[/dim]")
+        kwargs["reload"] = True
+        kwargs["reload_dirs"] = [reload_dir]
+    uvicorn.run("introspect.api.main:app", **kwargs)  # ty: ignore[missing-argument]
+
+
 @app.command()
 def serve(
     port: int = typer.Option(8000, help="Port to listen on"),
@@ -369,20 +407,24 @@ def serve(
     ),
 ):
     """Launch the web UI."""
-    import os  # noqa: PLC0415
+    _run_web_ui(host, port, days, no_resolve_projects, reload=False)
 
-    import uvicorn  # noqa: PLC0415
 
-    os.environ["INTROSPECT_DAYS"] = str(days)
-    if no_resolve_projects:
-        os.environ["INTROSPECT_RESOLVE_PROJECTS"] = "0"
-    console.print(f"[bold]Starting Introspect web UI on http://{host}:{port}[/bold]")
-    console.print(f"[dim]MCP endpoint: http://{host}:{port}/mcp[/dim]")
-    if days > 0:
-        console.print(f"[dim]Loading last {days} days of data...[/dim]")
-    else:
-        console.print("[dim]Loading all data (no day limit)...[/dim]")
-    uvicorn.run("introspect.api.main:app", host=host, port=port, log_level="info")
+@app.command()
+def devserve(
+    port: int = typer.Option(8000, help="Port to listen on"),
+    host: str = typer.Option("127.0.0.1", help="Host to bind to"),
+    days: int = typer.Option(
+        10, "-d", "--days", help="Days of history to load (0 = no limit)"
+    ),
+    no_resolve_projects: bool = typer.Option(
+        False,
+        "--no-resolve-projects",
+        help="Skip git worktree resolution for project names",
+    ),
+):
+    """Launch the web UI with auto-reload on source changes."""
+    _run_web_ui(host, port, days, no_resolve_projects, reload=True)
 
 
 @app.command()

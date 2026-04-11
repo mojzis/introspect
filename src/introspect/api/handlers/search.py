@@ -46,14 +46,14 @@ async def search(request: Request, q: str, page: int = 1) -> HTMLResponse:
 
             info_map = {row[0]: session_row_to_dict(row) for row in rows}
 
-            for session_id, timestamp, role, snippet, score in results:
+            for session_id, timestamp, role, _cwd, snippet, score in results:
                 info = info_map.get(session_id, _EMPTY_SESSION_INFO)
                 enriched.append(
                     {
                         "session_id": session_id,
                         "timestamp": str(timestamp)[:19] if timestamp else "",
                         "role": role or "",
-                        "snippet": (snippet or "")[:200],
+                        "snippet": snippet or "",
                         "score": score,
                         **info,
                     }

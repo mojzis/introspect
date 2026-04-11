@@ -93,6 +93,7 @@ def materialize_views(
         "message_commands",
         "session_titles",
         "conversation_turns",
+        "session_messages_enriched",
         "tool_calls",
         "logical_sessions",
         "project_map",
@@ -287,6 +288,110 @@ def _create_derived_views(conn: duckdb.DuckDBPyConnection) -> None:
             age(r.result_at, u.called_at) AS execution_time,
         FROM uses u
         LEFT JOIN results r ON u.tool_use_id = r.tool_use_id
+    """)
+
+    # Enriched per-block view: one row per content block, classified into a
+    # 'kind' that the session detail page dispatches on. Unnests content blocks
+    # so an assistant message with text + thinking + 2 tool_use yields 4 rows.
+    conn.execute("""
+        CREATE OR REPLACE VIEW session_messages_enriched AS
+        WITH blocks AS (
+            SELECT
+                m.session_id,
+                m.uuid,
+                m.parent_uuid,
+                m.timestamp,
+                m.type,
+                m.role,
+                m.is_sidechain,
+                m.model,
+                i.idx AS block_idx,
+                json_extract_string(
+                    m.message, '$.content[' || i.idx || '].type'
+                ) AS block_type,
+                json_extract_string(
+                    m.message, '$.content[' || i.idx || '].text'
+                ) AS block_text,
+                json_extract_string(
+                    m.message, '$.content[' || i.idx || '].thinking'
+                ) AS block_thinking,
+                json_extract_string(
+                    m.message, '$.content[' || i.idx || '].name'
+                ) AS block_tool_name,
+                json_extract_string(
+                    m.message, '$.content[' || i.idx || '].id'
+                ) AS block_tool_use_id,
+                json_extract_string(
+                    m.message, '$.content[' || i.idx || '].input'
+                ) AS block_tool_input,
+            FROM raw_messages m,
+                 generate_series(
+                     0,
+                     CAST(json_array_length(
+                         json_extract(m.message, '$.content')
+                     ) - 1 AS BIGINT)
+                 ) AS i(idx)
+            WHERE json_array_length(json_extract(m.message, '$.content')) > 0
+        ),
+        string_content AS (
+            -- User messages where content is a plain string (not an array).
+            SELECT
+                session_id,
+                uuid,
+                parent_uuid,
+                timestamp,
+                type,
+                role,
+                is_sidechain,
+                model,
+                0 AS block_idx,
+                'text' AS block_type,
+                json_extract_string(message, '$.content') AS block_text,
+                NULL AS block_thinking,
+                NULL AS block_tool_name,
+                NULL AS block_tool_use_id,
+                NULL AS block_tool_input,
+            FROM raw_messages
+            -- Slash commands historically arrive as array content; the
+            -- string-content branch handles older/alternate user prompts.
+            WHERE type IN ('user', 'assistant')
+              AND json_type(json_extract(message, '$.content')) = 'VARCHAR'
+        ),
+        unified AS (
+            SELECT * FROM blocks
+            UNION ALL
+            SELECT * FROM string_content
+        )
+        SELECT
+            session_id,
+            uuid,
+            parent_uuid,
+            timestamp,
+            block_idx,
+            is_sidechain,
+            model,
+            CASE
+                WHEN block_type = 'thinking' THEN 'agent_thinking'
+                WHEN block_type = 'tool_use' THEN 'agent_tool_call'
+                WHEN block_type = 'tool_result' THEN 'tool_result'
+                WHEN type = 'assistant' THEN 'agent_text'
+                WHEN type = 'user' AND role = 'user' AND (
+                        COALESCE(block_text, '') LIKE '<command-name>%'
+                        OR COALESCE(block_text, '') LIKE '<local-command-%'
+                    ) THEN 'slash_command'
+                -- Sidechain user messages are the prompt the main agent
+                -- passed to the subagent via Task/Agent, NOT human input.
+                WHEN type = 'user' AND role = 'user' AND is_sidechain
+                    THEN 'subagent_prompt'
+                WHEN type = 'user' AND role = 'user' THEN 'human_prompt'
+                ELSE 'agent_text'
+            END AS kind,
+            block_text AS text,
+            block_thinking AS thinking_text,
+            block_tool_name AS tool_name,
+            block_tool_use_id AS tool_use_id,
+            block_tool_input AS tool_input,
+        FROM unified
     """)
 
     # Conversation turns: human/assistant pairs

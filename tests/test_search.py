@@ -152,10 +152,11 @@ def test_fts_search_finds_matching_content():
 
         results = fts_search(conn, "refactor database")
         assert len(results) > 0
-        # Results should contain session_id, timestamp, role, snippet, score
-        first = results[0]
-        assert first[0] == "test-session-search"
-        assert first[4] is not None  # score
+        # Row shape: (session_id, timestamp, role, cwd, snippet, score)
+        session_id, _timestamp, _role, _cwd, snippet, score = results[0]
+        assert session_id == "test-session-search"
+        assert score is not None
+        assert "refactor" in snippet.lower()
         conn.close()
 
 
@@ -198,6 +199,108 @@ def test_fts_search_includes_tool_content():
 
         results = fts_search(conn, "pytest fixtures")
         assert len(results) > 0
+        conn.close()
+
+
+def test_fts_search_filter_by_role():
+    """Role filter restricts results to user or assistant messages."""
+    with tempfile.TemporaryDirectory() as tmp:
+        tmp_path = Path(tmp)
+        conn = _get_test_conn(tmp_path)
+
+        build_search_corpus(conn)
+
+        user_only = fts_search(conn, "refactor database", role="user")
+        assert user_only
+        assert all(r[2] == "user" for r in user_only)
+
+        asst_only = fts_search(conn, "refactor database", role="assistant")
+        assert asst_only
+        assert all(r[2] == "assistant" for r in asst_only)
+        conn.close()
+
+
+def test_fts_search_filter_by_session_id():
+    """session_id filter restricts results to a single session."""
+    with tempfile.TemporaryDirectory() as tmp:
+        tmp_path = Path(tmp)
+        conn = _get_test_conn(tmp_path)
+
+        build_search_corpus(conn)
+
+        results = fts_search(conn, "refactor database", session_id=SID)
+        assert results
+        assert all(r[0] == SID for r in results)
+
+        empty = fts_search(conn, "refactor database", session_id="no-such-session")
+        assert empty == []
+        conn.close()
+
+
+def test_fts_search_require_all_narrows_matches():
+    """require_all (conjunctive) requires every term to match a row."""
+    with tempfile.TemporaryDirectory() as tmp:
+        tmp_path = Path(tmp)
+        conn = _get_test_conn(tmp_path)
+
+        build_search_corpus(conn)
+
+        any_mode = fts_search(conn, "pytest database")
+        all_mode = fts_search(conn, "pytest database", require_all=True)
+        # Neither message contains both terms, so conjunctive mode returns fewer rows.
+        assert len(all_mode) < len(any_mode)
+        conn.close()
+
+
+def test_fts_search_windowed_snippet_centers_on_match():
+    """Snippets center on the first query-term hit and add ellipsis padding."""
+    with tempfile.TemporaryDirectory() as tmp:
+        tmp_path = Path(tmp)
+        conn = _get_test_conn(tmp_path)
+
+        # Inject a long row where the hit is deep inside the text so a plain
+        # LEFT(content, 200) would miss it but a windowed snippet finds it.
+        build_search_corpus(conn)
+        prefix = "x" * 400
+        suffix = "y" * 400
+        conn.execute(
+            "INSERT INTO search_corpus VALUES (?, ?, ?, ?, ?)",
+            [
+                9999,
+                SID,
+                "2026-03-27T10:00:20.000Z",
+                "user",
+                f"{prefix} needle-keyword {suffix}",
+            ],
+        )
+        conn.execute(
+            "PRAGMA create_fts_index("
+            "'search_corpus', 'rowid', 'content_text', overwrite=1)"
+        )
+
+        results = fts_search(conn, "needle-keyword")
+        assert results
+        assert any("needle-keyword" in r[4] for r in results)
+        # The prefix and suffix are long enough that the snippet should be
+        # bounded on both sides with the ellipsis marker.
+        hit = next(r for r in results if "needle-keyword" in r[4])
+        assert hit[4].startswith("…") and hit[4].endswith("…")
+        conn.close()
+
+
+def test_fts_search_returns_cwd():
+    """Result tuples include the session's cwd from logical_sessions."""
+    with tempfile.TemporaryDirectory() as tmp:
+        tmp_path = Path(tmp)
+        conn = _get_test_conn(tmp_path)
+
+        build_search_corpus(conn)
+        results = fts_search(conn, "refactor database")
+        assert results
+        # cwd is column 3 in the returned tuple. The test fixture doesn't set
+        # a cwd so it'll be NULL here — the point is the shape and the join.
+        for row in results:
+            assert len(row) == 6
         conn.close()
 
 

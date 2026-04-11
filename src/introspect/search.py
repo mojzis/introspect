@@ -2,9 +2,44 @@
 
 from __future__ import annotations
 
+from datetime import datetime
+
 import duckdb
 
 _fts_cache: dict[str, bool] = {}
+
+# Snippet window size (characters) for results — wide enough to see context
+# around the match but small enough to keep LLM responses readable.
+_SNIPPET_WINDOW = 240
+
+
+def _windowed_snippet(text: str | None, terms: list[str]) -> str:
+    """Return a window of ``text`` centered on the first term hit.
+
+    ``terms`` is a pre-lowercased list so callers can hoist the split out
+    of tight loops. Falls back to the head of the text when no term matches
+    (can happen with stemmed FTS matches or ILIKE fallback quirks). Collapses
+    newlines and adds ellipses when the window has more text on either side.
+    """
+    if not text:
+        return ""
+    flat = text.replace("\n", " ").replace("\r", " ")
+    lower = flat.lower()
+    best = len(flat) + 1
+    for term in terms:
+        idx = lower.find(term)
+        if idx != -1 and idx < best:
+            best = idx
+    if best > len(flat):
+        return flat[:_SNIPPET_WINDOW]
+    half = _SNIPPET_WINDOW // 2
+    start = max(0, best - half)
+    end = min(len(flat), start + _SNIPPET_WINDOW)
+    start = max(0, end - _SNIPPET_WINDOW)
+    core = flat[start:end]
+    prefix = "…" if start > 0 else ""
+    suffix = "…" if end < len(flat) else ""
+    return prefix + core + suffix
 
 
 def fts_available(conn: duckdb.DuckDBPyConnection) -> bool:
@@ -116,70 +151,131 @@ def build_search_corpus(conn: duckdb.DuckDBPyConnection) -> None:
         )
 
 
+def _collect_filters(
+    cwd_prefix: str | None,
+    role: str | None,
+    since: str | datetime | None,
+    session_id: str | None,
+) -> tuple[list[str], list[object]]:
+    """Translate structured filter kwargs into WHERE clauses + params.
+
+    Returns (clauses, params) — clauses reference the joined ``search_corpus``
+    as ``s`` and ``logical_sessions`` as ``ls``.
+    """
+    clauses: list[str] = []
+    params: list[object] = []
+    if cwd_prefix:
+        clauses.append("ls.cwd LIKE ? || '%'")
+        params.append(cwd_prefix)
+    if role:
+        clauses.append("s.role = ?")
+        params.append(role)
+    if since:
+        clauses.append("s.timestamp >= ?")
+        params.append(since)
+    if session_id:
+        clauses.append("s.session_id = ?")
+        params.append(session_id)
+    return clauses, params
+
+
 def fts_search(
     conn: duckdb.DuckDBPyConnection,
     query: str,
     limit: int = 20,
     offset: int = 0,
+    *,
+    cwd_prefix: str | None = None,
+    role: str | None = None,
+    since: str | datetime | None = None,
+    session_id: str | None = None,
+    require_all: bool = False,
 ) -> list[tuple]:
     """Search the corpus. Uses FTS/BM25 if available, else ILIKE.
 
-    Returns rows of (session_id, timestamp, role, snippet, score).
+    Returns rows of ``(session_id, timestamp, role, cwd, snippet, score)``.
+    Snippets are windowed around the first query-term hit for context.
+
+    Optional filters:
+      - ``cwd_prefix``: only sessions whose working directory starts with this.
+      - ``role``: restrict to ``'user'`` or ``'assistant'`` messages.
+      - ``since``: ISO timestamp or ``datetime``; only messages at or after.
+      - ``session_id``: restrict to a single session.
+      - ``require_all``: multi-word queries must match all terms (FTS AND mode).
     """
+    filter_clauses, filter_params = _collect_filters(
+        cwd_prefix, role, since, session_id
+    )
+    filter_sql = (" AND " + " AND ".join(filter_clauses)) if filter_clauses else ""
+
     if fts_available(conn):
-        return conn.execute(
-            """
+        # ``conjunctive`` is inlined, not parameterized — DuckDB doesn't accept
+        # ``?`` placeholders for FTS named arguments, and the value comes from
+        # a typed bool we control, not user input.
+        conjunctive = 1 if require_all else 0
+        sql = f"""
             SELECT
                 s.session_id,
                 s.timestamp,
                 s.role,
-                LEFT(s.content_text, 200) AS snippet,
-                score,
+                ls.cwd,
+                s.content_text,
+                s.score,
             FROM (
                 SELECT *,
                     fts_main_search_corpus.match_bm25(
-                        rowid, ?
+                        rowid, ?, conjunctive := {conjunctive}
                     ) AS score
                 FROM search_corpus
             ) s
-            WHERE score IS NOT NULL
-            ORDER BY score
+            JOIN logical_sessions ls USING (session_id)
+            WHERE s.score IS NOT NULL{filter_sql}
+            ORDER BY s.score DESC
             LIMIT ?
             OFFSET ?
-            """,
-            [query, limit, offset],
-        ).fetchall()
+        """  # noqa: S608
+        params: list[object] = [query, *filter_params, limit, offset]
+        rows = conn.execute(sql, params).fetchall()
+    else:
+        # Fallback: ILIKE search with word-count scoring.
+        terms = query.strip().split()
+        if not terms:
+            return []
 
-    # Fallback: ILIKE search with word-count scoring
-    terms = query.strip().split()
-    if not terms:
-        return []
+        match_op = " AND " if require_all else " OR "
+        where_clauses = match_op.join("s.content_text ILIKE ?" for _ in terms)
+        score_expr = " + ".join(
+            "CASE WHEN s.content_text ILIKE ? THEN 1 ELSE 0 END" for _ in terms
+        )
+        like_terms = [f"%{t}%" for t in terms]
+        params = [*like_terms, *like_terms, *filter_params, limit, offset]
 
-    # WHERE: at least one term must match
-    where_clauses = " OR ".join("content_text ILIKE ?" for _ in terms)
-    # Score: count how many terms match (higher = better)
-    score_expr = " + ".join(
-        "CASE WHEN content_text ILIKE ? THEN 1 ELSE 0 END" for _ in terms
-    )
-    # Parameters: score terms first, then where terms, then limit, offset
-    params: list[str | int] = [f"%{t}%" for t in terms]
-    params.extend(f"%{t}%" for t in terms)
-    params.append(limit)
-    params.append(offset)
+        sql = f"""
+            SELECT
+                s.session_id,
+                s.timestamp,
+                s.role,
+                ls.cwd,
+                s.content_text,
+                ({score_expr}) AS score,
+            FROM search_corpus s
+            JOIN logical_sessions ls USING (session_id)
+            WHERE ({where_clauses}){filter_sql}
+            ORDER BY score DESC, s.timestamp DESC
+            LIMIT ?
+            OFFSET ?
+        """  # noqa: S608
+        rows = conn.execute(sql, params).fetchall()
 
-    return conn.execute(
-        f"""
-        SELECT
+    snippet_terms = [t for t in query.lower().split() if t]
+    return [
+        (
             session_id,
             timestamp,
             role,
-            LEFT(content_text, 200) AS snippet,
-            ({score_expr}) AS score,
-        FROM search_corpus
-        WHERE {where_clauses}
-        ORDER BY score DESC, timestamp DESC
-        LIMIT ?
-        OFFSET ?
-        """,  # noqa: S608
-        params,
-    ).fetchall()
+            cwd,
+            _windowed_snippet(content_text, snippet_terms),
+            score,
+        )
+        for session_id, timestamp, role, cwd, content_text, score in rows
+    ]

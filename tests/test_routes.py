@@ -112,6 +112,16 @@ def _write_sample_jsonl(tmp_dir: Path) -> Path:
             "2026-03-27T10:00:06.000Z",
             "<command-name>/commit</command-name>\nCommit my changes",
         ),
+        # Sidechain user message — this is the prompt the main agent passed
+        # to a subagent via the Task/Agent tool, NOT a human-typed prompt.
+        make_user_message(
+            SID,
+            "s1",
+            "a3",
+            "2026-03-27T10:00:07.000Z",
+            "Explore the database layer and report back findings.",
+            is_sidechain=True,
+        ),
     ]
     return write_jsonl(tmp_dir, SID, lines)
 
@@ -213,13 +223,15 @@ def test_stats_returns_200():
 
 
 def test_mcp_endpoint_mounted():
-    """MCP streamable-HTTP endpoint is reachable."""
+    """MCP streamable-HTTP endpoint is reachable at /mcp/, not /mcp/mcp."""
     with tempfile.TemporaryDirectory() as tmp, _patched_client(Path(tmp)) as client:
-        # The streamable-http app mounts its route at /mcp internally,
-        # so full path is /mcp/mcp. We expect a non-404 response
-        # (405 Method Not Allowed or 421 from MCP transport security).
-        response = client.get("/mcp/mcp")
-        assert response.status_code != 404
+        # Trailing slash avoids the mount's 307 redirect; MCP transport
+        # security rejects a bare GET but a non-5xx proves the sub-app
+        # is wired up at /mcp/.
+        response = client.get("/mcp/")
+        assert 400 <= response.status_code < 500
+        # Regression guard: the old double-prefixed path must not exist.
+        assert client.get("/mcp/mcp").status_code == 404
 
 
 # --- Raw page tests ---
@@ -239,8 +251,9 @@ def test_raw_filter_by_type():
         response = client.get("/raw?type=user")
         assert response.status_code == 200
         assert "Raw Data" in response.text
-        # Should show only user records (4 user messages in sample data)
-        assert "4 records" in response.text
+        # Should show only user records (5 user messages in sample data:
+        # initial prompt, 2 tool_results, slash command, subagent prompt)
+        assert "5 records" in response.text
 
 
 def test_raw_filter_by_session():
@@ -335,11 +348,81 @@ def test_session_detail_shows_user_messages():
 
 
 def test_session_detail_shows_tool_results():
-    """Session detail page displays tool results from user messages."""
+    """Session detail page surfaces tool result content folded under the tool call."""
     with tempfile.TemporaryDirectory() as tmp, _patched_client(Path(tmp)) as client:
         response = client.get(f"/sessions/{SID}")
         assert response.status_code == 200
-        assert "tool_result" in response.text
+        text = response.text
+        # Both the tool input ("echo hello") and the tool_use_result stdout
+        # ("hello") from the fixture must appear inside an agent_tool_call row.
+        assert "kind-agent_tool_call" in text
+        assert "echo hello" in text
+        # tool-section-label markers only exist when the paired result is present
+        assert "tool-section-label" in text
+
+
+def test_session_detail_classifies_message_kinds():
+    """Session detail page classifies messages into distinct visual kinds."""
+    with tempfile.TemporaryDirectory() as tmp, _patched_client(Path(tmp)) as client:
+        response = client.get(f"/sessions/{SID}")
+        assert response.status_code == 200
+        # Human prompt is visually distinct from tool results.
+        assert "kind-human_prompt" in response.text
+        assert "Hello, help me with tests" in response.text
+        # Slash command wrapping becomes a divider, not a big box.
+        assert "slash-divider" in response.text
+        # Filter strip is present with localStorage-backed toggles.
+        assert "Hide thinking" in response.text
+        assert "Hide tool calls" in response.text
+        assert "Only human turns" in response.text
+        # Global expand/collapse buttons are present.
+        assert "Expand all tools" in response.text
+        assert "tools-expand-all" in response.text
+        assert "tools-collapse-all" in response.text
+
+
+def test_session_detail_tool_call_one_liner():
+    """Tool calls render as one-liners with a tool-specific hint."""
+    with tempfile.TemporaryDirectory() as tmp, _patched_client(Path(tmp)) as client:
+        response = client.get(f"/sessions/{SID}")
+        assert response.status_code == 200
+        text = response.text
+        # The Bash tool's 'command' input is lifted into the collapsed one-liner.
+        assert "tool-call-line" in text
+        assert "tool-hint" in text
+        assert "echo hello" in text
+
+
+def test_session_detail_distinguishes_subagent_prompt_from_human():
+    """Sidechain user messages render as 'prompt to subagent', not 'you'."""
+    with tempfile.TemporaryDirectory() as tmp, _patched_client(Path(tmp)) as client:
+        response = client.get(f"/sessions/{SID}")
+        assert response.status_code == 200
+        text = response.text
+        # The subagent prompt appears with its own kind class, NOT human_prompt.
+        assert "kind-subagent_prompt" in text
+        assert "Explore the database layer" in text
+        assert "prompt to subagent" in text
+        # And it is visually distinct from the real human prompt above it.
+        human_idx = text.find("Hello, help me with tests")
+        sub_idx = text.find("Explore the database layer")
+        assert human_idx != -1
+        assert sub_idx != -1
+        # The real human prompt is NOT wrapped as a subagent_prompt.
+        assert 'class="msg-row kind-subagent_prompt' in text
+        assert (
+            text[max(0, human_idx - 300) : human_idx].count("kind-subagent_prompt") == 0
+        )
+
+
+def test_session_detail_folds_tool_results_under_calls():
+    """tool_result rows are filtered out of the rendered list (folded into calls)."""
+    with tempfile.TemporaryDirectory() as tmp, _patched_client(Path(tmp)) as client:
+        response = client.get(f"/sessions/{SID}")
+        assert response.status_code == 200
+        # There should be no standalone kind-tool_result row — tool_results are
+        # merged into the matching agent_tool_call row via the tool_calls join.
+        assert "kind-tool_result" not in response.text
 
 
 def test_search_finds_user_content():

@@ -38,15 +38,33 @@
         .truncate { max-width: 150px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; display: inline-block; vertical-align: bottom; }
         h1 { margin-bottom: 1rem; color: #1a1a2e; }
         h2 { margin-bottom: 0.75rem; color: #1a1a2e; }
-        .msg { padding: 0.75rem 1rem; margin-bottom: 0.5rem; border-radius: 8px; max-width: 85%; }
-        .msg-user { background: #e8f0fe; margin-left: auto; }
-        .msg-assistant { background: #fff; border: 1px solid #e0e0e0; }
-        .msg-role { font-size: 0.75rem; font-weight: 600; color: #666; margin-bottom: 0.25rem; text-transform: uppercase; }
-        .msg-time { font-size: 0.7rem; color: #999; }
-        .msg-tool { background: #f5f0ff; border: 1px solid #e0d8f0; font-family: monospace; font-size: 0.85rem; }
-        .msg-tool-result { background: #f0f5f0; border: 1px solid #d8e0d8; font-family: monospace; font-size: 0.85rem; }
-        .msg-thinking { background: #fffbe6; border: 1px solid #f0e8c0; font-style: italic; font-size: 0.85rem; }
-        .msg-error { background: #fff0f0; border: 1px solid #f0d0d0; }
+        /* Session detail: left-rail message kinds */
+        .msg-filters { margin-bottom: 1rem; }
+        .msg-filters > label { display: inline-flex; align-items: center; gap: 0.3rem; margin-right: 1.25rem; font-size: 0.85rem; color: #555; }
+        .msg-row { margin: 0.6rem 0; padding: 0.6rem 0.9rem; border-left: 4px solid #e0e0e0; background: #fff; border-radius: 0 6px 6px 0; box-shadow: 0 1px 2px rgba(0,0,0,0.04); }
+        .msg-row.is-sidechain { margin-left: 2rem; border-left-style: dashed; background: #fafaff; }
+        .msg-kind-label { font-size: 0.75rem; color: #666; margin-bottom: 0.35rem; display: flex; align-items: center; gap: 0.4rem; flex-wrap: wrap; }
+        .msg-time { font-size: 0.7rem; color: #999; margin-left: auto; }
+        .msg-text { white-space: pre-wrap; word-break: break-word; margin: 0; font-size: 0.88rem; }
+        .msg-text-human { font-size: 0.95rem; font-weight: 500; color: #1a1a2e; }
+        .msg-text-error { color: #a00; }
+        .kind-human_prompt { border-left-color: #3b5bdb; background: #eef2ff; padding-top: 0.85rem; padding-bottom: 0.85rem; }
+        .kind-subagent_prompt { border-left-color: #8a5ad0; background: #f6f1ff; }
+        .kind-agent_text { border-left-color: #999; }
+        .kind-agent_thinking { border-left-color: #c0a000; border-left-style: dashed; background: #fffbe6; font-size: 0.85rem; color: #766; }
+        .kind-agent_tool_call { border-left-color: #c86b1a; background: #fff7f0; font-family: ui-monospace, SFMono-Regular, Menlo, monospace; font-size: 0.85rem; padding: 0.35rem 0.9rem; }
+        .tool-call-line { display: flex; align-items: center; gap: 0.5rem; cursor: pointer; user-select: none; }
+        .tool-call-line:hover { background: rgba(200,107,26,0.06); }
+        .tool-call-line strong { color: #c86b1a; }
+        .tool-hint { color: #555; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; flex: 1; min-width: 0; }
+        .tool-chevron { color: #c86b1a; font-size: 0.9rem; }
+        .slash-divider { display: flex; align-items: center; gap: 0.5rem; color: #888; font-size: 0.78rem; font-family: ui-monospace, monospace; padding: 0.25rem 0; margin: 0.5rem 0; }
+        .slash-divider::before, .slash-divider::after { content: ''; flex: 1; height: 1px; background: #d0d0d8; }
+        .kind-slash_command { border-left: none; background: transparent; box-shadow: none; padding: 0; margin: 0; }
+        .sidechain-badge { background: #e0d8f0; color: #5a3a8a; font-size: 0.65rem; padding: 0.08rem 0.4rem; border-radius: 8px; font-weight: 600; text-transform: uppercase; letter-spacing: 0.02em; }
+        .exec-time { color: #888; font-size: 0.75rem; }
+        .tool-section-label { font-size: 0.7rem; color: #888; text-transform: uppercase; letter-spacing: 0.04em; margin-top: 0.5rem; margin-bottom: 0.2rem; }
+        .tool-call-summary { color: #666; }
         pre { white-space: pre-wrap; word-break: break-word; margin: 0; font-size: 0.85rem; }
         .filter-bar { display: flex; gap: 0.75rem; align-items: center; flex-wrap: wrap; margin-bottom: 1rem; }
         label { font-size: 0.9rem; display: flex; align-items: center; gap: 0.3rem; }

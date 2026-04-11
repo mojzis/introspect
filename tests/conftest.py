@@ -54,6 +54,7 @@ def make_user_message(
     *,
     tool_use_result=None,
     source_tool_uuid: str | None = None,
+    is_sidechain: bool = False,
 ) -> dict:
     """Build a user-type JSONL record."""
     record = {
@@ -62,7 +63,7 @@ def make_user_message(
         "sessionId": session_id,
         "uuid": uuid,
         "parentUuid": parent_uuid,
-        "isSidechain": False,
+        "isSidechain": is_sidechain,
         "cwd": "/tmp/test",
         "version": "2.1.0",
         "entrypoint": "cli",
