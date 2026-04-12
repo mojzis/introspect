@@ -32,12 +32,12 @@ SESSIONS_SORT_DEFAULT = "started_at"
 
 RAW_PER_PAGE = 20
 
-_XML_TAG_PREFIX_RE = re.compile(r"^<[^>]+>")
+_XML_TAG_RE = re.compile(r"<[^>]+>")
 
 
 def clean_title(raw: str) -> str:
-    """Strip leading XML-style tags from session titles."""
-    return _XML_TAG_PREFIX_RE.sub("", raw).strip()
+    """Strip all XML-style tags from session titles."""
+    return _XML_TAG_RE.sub("", raw).strip()
 
 
 def parent(request: Request) -> str:

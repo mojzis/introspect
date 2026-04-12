@@ -823,3 +823,23 @@ def test_search_results_link_to_session():
         response = client.get("/search?q=help+me+with+tests")
         assert response.status_code == 200
         assert f"/sessions/{SID}" in response.text
+
+
+def test_clean_title_strips_all_xml_tags():
+    """clean_title strips ALL XML tags, not just leading ones."""
+    from introspect.api.handlers._helpers import clean_title
+
+    # Leading tag only
+    assert clean_title("<foo>bar") == "bar"
+    # Wrapping tags (the original bug: command-name pattern)
+    assert clean_title("<command-name>/commit</command-name>") == "/commit"
+    # Nested / multiple tags
+    assert clean_title("<a><b>text</b></a>") == "text"
+    # No tags at all
+    assert clean_title("plain text") == "plain text"
+    # Empty string
+    assert clean_title("") == ""
+    # Tags with attributes
+    assert clean_title('<div class="x">content</div>') == "content"
+    # Mixed content
+    assert clean_title("before <tag>middle</tag> after") == "before middle after"

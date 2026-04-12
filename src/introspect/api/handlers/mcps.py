@@ -5,7 +5,7 @@ import math
 from fastapi import Request
 from fastapi.responses import HTMLResponse
 
-from ._helpers import DEFAULT_PAGE_SIZE, conn, parent, templates
+from ._helpers import DEFAULT_PAGE_SIZE, clean_title, conn, parent, templates
 
 
 async def mcps(
@@ -115,5 +115,6 @@ async def mcps(
             "stats": mcp_stats,
             "page": page,
             "total_pages": total_pages,
+            "clean_title": clean_title,
         },
     )
