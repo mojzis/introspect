@@ -388,7 +388,7 @@ async def session_detail(request: Request, session_id: str) -> HTMLResponse:
                 "exec_time": (
                     _format_exec_time(exec_secs) if exec_secs is not None else ""
                 ),
-                "tool_use_id": rec.get("tool_use_id", "") or "",
+                "tool_use_id": rec["tool_use_id"] or "",
             }
         )
 
