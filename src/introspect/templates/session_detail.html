@@ -4,52 +4,27 @@
 <h1>Session Detail</h1>
 
 {% if session %}
-<div class="card">
-    <table>
-        <tr><th>Session ID</th><td>{{ session[0] }}</td></tr>
-        <tr><th>Started</th><td>{{ (session[1]|string)[:19] }}</td></tr>
-        <tr><th>Ended</th><td>{{ (session[2]|string)[:19] }}</td></tr>
-        <tr><th>Duration</th><td>{{ session[3] or '' }}</td></tr>
-        <tr><th>User Messages</th><td>{{ session[4] or 0 }}</td></tr>
-        <tr><th>Assistant Messages</th><td>{{ session[5] or 0 }}</td></tr>
-        <tr><th>Model</th><td>{{ session[6] or '' }}</td></tr>
-        <tr><th>CWD</th><td>{{ session[7] or '' }}</td></tr>
-        <tr><th>Branch</th><td>{{ session[8] or '' }}</td></tr>
-    </table>
+<div class="card" style="padding:0.75rem 1rem;">
+    <div style="display:grid;grid-template-columns:repeat(auto-fill,minmax(220px,1fr));gap:0.4rem 1.5rem;">
+        <div><span style="color:#888;">Session</span> {{ (session[0]|string)[:12] }}</div>
+        <div><span style="color:#888;">Started</span> {{ (session[1]|string)[:19] }}</div>
+        <div><span style="color:#888;">Ended</span> {{ (session[2]|string)[:19] }}</div>
+        <div><span style="color:#888;">Duration</span> {{ session[3] or '—' }}</div>
+        <div><span style="color:#888;">Messages</span> {{ session[4] or 0 }} user / {{ session[5] or 0 }} asst</div>
+        <div><span style="color:#888;">Model</span> {{ session[6] or '—' }}</div>
+        {% if session[7] %}<div><span style="color:#888;">CWD</span> {{ session[7] }}</div>{% endif %}
+        {% if session[8] %}<div><span style="color:#888;">Branch</span> {{ session[8] }}</div>{% endif %}
+        {% if token_usage and token_usage[0] %}
+        <div><span style="color:#888;">Input Tokens</span> {{ "{:,}".format(token_usage[0] or 0) }}</div>
+        <div><span style="color:#888;">Output Tokens</span> {{ "{:,}".format(token_usage[1] or 0) }}</div>
+        {% if token_usage[2] %}<div><span style="color:#888;">Cache Write</span> {{ "{:,}".format(token_usage[2]) }}</div>{% endif %}
+        {% if token_usage[3] %}<div><span style="color:#888;">Cache Read</span> {{ "{:,}".format(token_usage[3]) }}</div>{% endif %}
+        {% endif %}
+        {% if tool_summary and tool_summary[0] > 0 %}
+        <div><span style="color:#888;">Tools</span> {{ tool_summary[0] }} tool call{{ 's' if tool_summary[0] != 1 else '' }}{% if tool_summary[1] > 0 %} ({{ tool_summary[1] }} failed){% endif %}{% if tool_summary[2] %} — {{ tool_summary[2] }}{% endif %}</div>
+        {% endif %}
+    </div>
 </div>
-
-{% if token_usage and token_usage[0] %}
-<div class="stat-grid">
-    <div class="stat-card">
-        <div class="value">{{ "{:,}".format(token_usage[0] or 0) }}</div>
-        <div class="label">Input Tokens</div>
-    </div>
-    <div class="stat-card">
-        <div class="value">{{ "{:,}".format(token_usage[1] or 0) }}</div>
-        <div class="label">Output Tokens</div>
-    </div>
-    {% if token_usage[2] %}
-    <div class="stat-card">
-        <div class="value">{{ "{:,}".format(token_usage[2]) }}</div>
-        <div class="label">Cache Write Tokens</div>
-    </div>
-    {% endif %}
-    {% if token_usage[3] %}
-    <div class="stat-card">
-        <div class="value">{{ "{:,}".format(token_usage[3]) }}</div>
-        <div class="label">Cache Read Tokens</div>
-    </div>
-    {% endif %}
-</div>
-{% endif %}
-
-{% if tool_summary and tool_summary[0] > 0 %}
-<p style="margin:0.5rem 0 1rem;color:#555;">
-    {{ tool_summary[0] }} tool call{{ 's' if tool_summary[0] != 1 else '' }}
-    {% if tool_summary[1] > 0 %} ({{ tool_summary[1] }} failed){% endif %}
-    {% if tool_summary[2] %} &mdash; most used: <strong>{{ tool_summary[2] }}</strong>{% endif %}
-</p>
-{% endif %}
 {% endif %}
 
 <h2>Messages ({{ messages|length }})</h2>
