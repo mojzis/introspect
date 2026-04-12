@@ -1031,3 +1031,109 @@ def test_session_detail_file_metrics_outside_count():
         text = response.text
         # One file (/home/user/other/config.yml) is outside /tmp/test
         assert "outside project" in text
+
+
+# --- SQL page tests ---
+
+
+def test_sql_page_returns_200():
+    """SQL page loads without error."""
+    with tempfile.TemporaryDirectory() as tmp, _patched_client(Path(tmp)) as client:
+        response = client.get("/sql")
+        assert response.status_code == 200
+        assert "SQL" in response.text
+
+
+def test_sql_page_shows_schema_sidebar():
+    """SQL page shows schema sidebar with table names."""
+    with tempfile.TemporaryDirectory() as tmp, _patched_client(Path(tmp)) as client:
+        response = client.get("/sql")
+        assert response.status_code == 200
+        assert "Schema" in response.text
+        # Should show at least one of our views
+        assert "logical_sessions" in response.text
+
+
+def test_sql_page_has_editor_mount():
+    """SQL page has the CodeMirror editor mount point."""
+    with tempfile.TemporaryDirectory() as tmp, _patched_client(Path(tmp)) as client:
+        response = client.get("/sql")
+        assert response.status_code == 200
+        assert "cm-editor-mount" in response.text
+
+
+def test_sql_page_htmx_partial():
+    """SQL page returns partial content for HTMX requests."""
+    with tempfile.TemporaryDirectory() as tmp, _patched_client(Path(tmp)) as client:
+        response = client.get("/sql", headers={"HX-Request": "true"})
+        assert response.status_code == 200
+        assert "loading-overlay" not in response.text
+
+
+def test_sql_execute_valid_query():
+    """SQL POST executes a valid SELECT and returns results."""
+    with tempfile.TemporaryDirectory() as tmp, _patched_client(Path(tmp)) as client:
+        response = client.post("/sql", data={"sql": "SELECT 1 AS val"})
+        assert response.status_code == 200
+        assert "val" in response.text
+        assert "1" in response.text
+        assert "ms" in response.text  # exec time shown
+
+
+def test_sql_execute_empty_query():
+    """SQL POST with empty query returns error."""
+    with tempfile.TemporaryDirectory() as tmp, _patched_client(Path(tmp)) as client:
+        response = client.post("/sql", data={"sql": ""})
+        assert response.status_code == 200
+        assert "No SQL provided" in response.text
+
+
+def test_sql_execute_write_rejected():
+    """SQL POST rejects write operations."""
+    with tempfile.TemporaryDirectory() as tmp, _patched_client(Path(tmp)) as client:
+        response = client.post("/sql", data={"sql": "DROP TABLE foo"})
+        assert response.status_code == 200
+        assert "Only SELECT / WITH" in response.text
+
+
+def test_sql_execute_multi_statement_rejected():
+    """SQL POST rejects multiple statements."""
+    with tempfile.TemporaryDirectory() as tmp, _patched_client(Path(tmp)) as client:
+        response = client.post("/sql", data={"sql": "SELECT 1; SELECT 2"})
+        assert response.status_code == 200
+        assert "Multiple statements" in response.text
+
+
+def test_sql_execute_invalid_sql():
+    """SQL POST returns error for invalid SQL syntax."""
+    with tempfile.TemporaryDirectory() as tmp, _patched_client(Path(tmp)) as client:
+        response = client.post("/sql", data={"sql": "SELECT FROM"})
+        assert response.status_code == 200
+        assert "SQL error" in response.text
+
+
+def test_sql_execute_query_on_views():
+    """SQL POST can query introspect views."""
+    with tempfile.TemporaryDirectory() as tmp, _patched_client(Path(tmp)) as client:
+        response = client.post(
+            "/sql",
+            data={"sql": "SELECT COUNT(*) AS cnt FROM logical_sessions"},
+        )
+        assert response.status_code == 200
+        assert "cnt" in response.text
+
+
+def test_sql_execute_null_rendering():
+    """SQL POST renders NULL values distinctly."""
+    with tempfile.TemporaryDirectory() as tmp, _patched_client(Path(tmp)) as client:
+        response = client.post("/sql", data={"sql": "SELECT NULL AS empty_val"})
+        assert response.status_code == 200
+        assert "NULL" in response.text
+
+
+def test_sql_nav_link_present():
+    """Base template includes SQL nav link."""
+    with tempfile.TemporaryDirectory() as tmp, _patched_client(Path(tmp)) as client:
+        response = client.get("/")
+        assert response.status_code == 200
+        assert 'href="/sql"' in response.text
