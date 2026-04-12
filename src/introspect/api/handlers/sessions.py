@@ -306,6 +306,30 @@ async def session_detail(request: Request, session_id: str) -> HTMLResponse:
         [session_id],
     ).fetchone()
 
+    # File metrics
+    session_cwd = session_info[7] if session_info else ""
+    file_metrics = db.execute(
+        """
+        SELECT
+            COUNT(DISTINCT CASE WHEN tc.tool_name = 'Read'
+                THEN json_extract_string(tc.tool_input, '$.file_path') END) AS files_read,
+            COUNT(DISTINCT CASE WHEN tc.tool_name IN ('Edit', 'Write', 'MultiEdit', 'NotebookEdit')
+                THEN COALESCE(
+                    json_extract_string(tc.tool_input, '$.file_path'),
+                    json_extract_string(tc.tool_input, '$.notebook_path')
+                ) END) AS files_edited,
+            COUNT(DISTINCT CASE WHEN tc.tool_name = 'Read'
+                AND NOT starts_with(
+                    COALESCE(json_extract_string(tc.tool_input, '$.file_path'), ''),
+                    ?)
+                AND json_extract_string(tc.tool_input, '$.file_path') IS NOT NULL
+                THEN json_extract_string(tc.tool_input, '$.file_path') END) AS files_outside
+        FROM tool_calls tc
+        WHERE tc.session_id = ?
+    """,
+        [session_cwd or "", session_id],
+    ).fetchone()
+
     # One row per classified content block, with paired tool results already
     # joined in from the tool_calls view (so agent_tool_call rows know their
     # result text, error flag, and execution time).
@@ -376,5 +400,6 @@ async def session_detail(request: Request, session_id: str) -> HTMLResponse:
             "messages": parsed_messages,
             "token_usage": token_usage,
             "tool_summary": tool_summary,
+            "file_metrics": file_metrics,
         },
     )

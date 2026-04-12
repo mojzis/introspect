@@ -23,6 +23,9 @@
         {% if tool_summary and tool_summary[0] > 0 %}
         <div><span class="meta-label">Tools</span> {{ tool_summary[0] }} tool call{{ 's' if tool_summary[0] != 1 else '' }}{% if tool_summary[1] > 0 %} ({{ tool_summary[1] }} failed){% endif %}{% if tool_summary[2] %} — {{ tool_summary[2] }}{% endif %}</div>
         {% endif %}
+        {% if file_metrics and (file_metrics[0] or file_metrics[1]) %}
+        <div><span class="meta-label">Files</span> {{ file_metrics[0] or 0 }} read / {{ file_metrics[1] or 0 }} edited{% if file_metrics[2] %} ({{ file_metrics[2] }} outside project){% endif %}</div>
+        {% endif %}
     </div>
 </div>
 {% endif %}

@@ -105,10 +105,107 @@ def _write_sample_jsonl(tmp_dir: Path) -> Path:
             tool_use_result={},
             source_tool_uuid="a3",
         ),
+        # Read tool call (file inside project)
+        make_assistant_message(
+            SID,
+            "a4",
+            "u3",
+            "2026-03-27T10:00:05.500Z",
+            [
+                {
+                    "type": "tool_use",
+                    "id": "toolu_read1",
+                    "name": "Read",
+                    "input": {"file_path": "/tmp/test/src/main.py"},
+                }
+            ],
+        ),
+        make_user_message(
+            SID,
+            "u3b",
+            "a4",
+            "2026-03-27T10:00:05.600Z",
+            [
+                {
+                    "type": "tool_result",
+                    "tool_use_id": "toolu_read1",
+                    "content": "file contents here",
+                    "is_error": False,
+                }
+            ],
+            tool_use_result={"content": "file contents here"},
+            source_tool_uuid="a4",
+        ),
+        # Read tool call (file OUTSIDE project)
+        make_assistant_message(
+            SID,
+            "a5",
+            "u3b",
+            "2026-03-27T10:00:05.700Z",
+            [
+                {
+                    "type": "tool_use",
+                    "id": "toolu_read2",
+                    "name": "Read",
+                    "input": {"file_path": "/home/user/other/config.yml"},
+                }
+            ],
+        ),
+        make_user_message(
+            SID,
+            "u3c",
+            "a5",
+            "2026-03-27T10:00:05.800Z",
+            [
+                {
+                    "type": "tool_result",
+                    "tool_use_id": "toolu_read2",
+                    "content": "config data",
+                    "is_error": False,
+                }
+            ],
+            tool_use_result={"content": "config data"},
+            source_tool_uuid="a5",
+        ),
+        # Edit tool call
+        make_assistant_message(
+            SID,
+            "a6",
+            "u3c",
+            "2026-03-27T10:00:05.900Z",
+            [
+                {
+                    "type": "tool_use",
+                    "id": "toolu_edit1",
+                    "name": "Edit",
+                    "input": {
+                        "file_path": "/tmp/test/src/main.py",
+                        "old_string": "old",
+                        "new_string": "new",
+                    },
+                }
+            ],
+        ),
+        make_user_message(
+            SID,
+            "u3d",
+            "a6",
+            "2026-03-27T10:00:05.950Z",
+            [
+                {
+                    "type": "tool_result",
+                    "tool_use_id": "toolu_edit1",
+                    "content": "ok",
+                    "is_error": False,
+                }
+            ],
+            tool_use_result={"content": "ok"},
+            source_tool_uuid="a6",
+        ),
         make_user_message(
             SID,
             "u4",
-            "u3",
+            "u3d",
             "2026-03-27T10:00:06.000Z",
             "<command-name>/commit</command-name>\nCommit my changes",
         ),
@@ -251,9 +348,9 @@ def test_raw_filter_by_type():
         response = client.get("/raw?type=user")
         assert response.status_code == 200
         assert "Raw Data" in response.text
-        # Should show only user records (5 user messages in sample data:
-        # initial prompt, 2 tool_results, slash command, subagent prompt)
-        assert "5 records" in response.text
+        # Should show only user records (8 user messages in sample data:
+        # initial prompt, 5 tool_results, slash command, subagent prompt)
+        assert "8 records" in response.text
 
 
 def test_raw_filter_by_session():
@@ -891,3 +988,47 @@ def test_bash_failed_filter(bash_client):
     assert response.status_code == 200
     # The test fixture's Bash call succeeded, so failed filter should show 0
     assert ">0<" in response.text.replace(" ", "")
+
+
+# --- File metrics tests ---
+
+
+def test_sessions_shows_file_metrics_columns():
+    """Sessions page has sortable Read, Edited, Outside column headers."""
+    with tempfile.TemporaryDirectory() as tmp, _patched_client(Path(tmp)) as client:
+        response = client.get("/sessions")
+        assert response.status_code == 200
+        text = response.text
+        assert "files_read" in text  # sort link param
+        assert "files_edited" in text  # sort link param
+        assert "files_outside" in text  # sort link param
+
+
+def test_sessions_sort_by_files_read():
+    """Sessions page can sort by files_read count."""
+    with tempfile.TemporaryDirectory() as tmp, _patched_client(Path(tmp)) as client:
+        response = client.get("/sessions?sort=files_read&order=desc")
+        assert response.status_code == 200
+        assert SID[:8] in response.text
+
+
+def test_session_detail_shows_file_metrics():
+    """Session detail page shows file metrics line."""
+    with tempfile.TemporaryDirectory() as tmp, _patched_client(Path(tmp)) as client:
+        response = client.get(f"/sessions/{SID}")
+        assert response.status_code == 200
+        text = response.text
+        # The test data has 2 Read calls and 1 Edit call
+        assert "Files" in text
+        assert "read" in text
+        assert "edited" in text
+
+
+def test_session_detail_file_metrics_outside_count():
+    """Session detail correctly counts files outside the project directory."""
+    with tempfile.TemporaryDirectory() as tmp, _patched_client(Path(tmp)) as client:
+        response = client.get(f"/sessions/{SID}")
+        assert response.status_code == 200
+        text = response.text
+        # One file (/home/user/other/config.yml) is outside /tmp/test
+        assert "outside project" in text
