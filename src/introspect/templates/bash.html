@@ -1,0 +1,103 @@
+{% extends parent %}
+{% block title %}Bash Commands - Introspect{% endblock %}
+
+{% macro bash_qs(prefix='', failed=filter_failed, session=filter_session, page=1) -%}
+{% if prefix %}prefix={{ prefix }}&{% endif %}{% if failed %}failed=true&{% endif %}{% if session %}session={{ session }}&{% endif %}page={{ page }}
+{%- endmacro %}
+
+{% block content %}
+<h1>Bash Commands</h1>
+
+<div class="card">
+    <div class="filter-bar" style="flex-wrap:wrap;">
+        <a href="/bash?{{ bash_qs() }}"
+           hx-get="/bash?{{ bash_qs() }}"
+           hx-target="#content" hx-push-url="true"
+           class="tool-btn{% if not filter_prefix %} tool-btn-active{% endif %}">
+            All
+        </a>
+        {% for pfx in prefixes %}
+        <a href="/bash?{{ bash_qs(prefix=pfx[0]) }}"
+           hx-get="/bash?{{ bash_qs(prefix=pfx[0]) }}"
+           hx-target="#content" hx-push-url="true"
+           class="tool-btn{% if filter_prefix == pfx[0] %} tool-btn-active{% endif %}">
+            {{ pfx[0] }} <span class="tool-btn-count">{{ pfx[1] }}</span>
+            <span class="tool-btn-count" style="background:#e0ffe0;color:#080;">{{ '%.0f'|format(pfx[2]) }}%</span>
+        </a>
+        {% endfor %}
+    </div>
+    <div class="filter-bar" style="margin-top:0.5rem;">
+        <a href="/bash?{{ bash_qs(prefix=filter_prefix, failed=not filter_failed) }}"
+           hx-get="/bash?{{ bash_qs(prefix=filter_prefix, failed=not filter_failed) }}"
+           hx-target="#content" hx-push-url="true"
+           class="tool-btn tool-btn-sm{% if filter_failed %} tool-btn-active{% endif %}">
+            {% if filter_failed %}Show all{% else %}Failed only{% endif %}
+        </a>
+        {% if filter_session %}
+        <a href="/bash?{{ bash_qs(session='') }}"
+           hx-get="/bash?{{ bash_qs(session='') }}"
+           hx-target="#content" hx-push-url="true"
+           class="tool-btn tool-btn-sm tool-btn-active"
+           title="{{ filter_session }}">
+            Session: {{ filter_session[:12] }}... &times;
+        </a>
+        {% endif %}
+    </div>
+</div>
+
+{% if stats %}
+<div class="stat-grid">
+    <div class="stat-card">
+        <div class="value">{{ stats[0] }}</div>
+        <div class="label">Matching Calls</div>
+    </div>
+    <div class="stat-card">
+        <div class="value">{{ stats[1] }}</div>
+        <div class="label">Failed</div>
+    </div>
+</div>
+{% endif %}
+
+<div class="card">
+    <table>
+        <thead>
+            <tr>
+                <th>Session</th>
+                <th>Called At</th>
+                <th>Command</th>
+                <th>Description</th>
+                <th>Status</th>
+                <th>Exec Time</th>
+            </tr>
+        </thead>
+        <tbody>
+            {% for tc in bash_calls %}
+            <tr>
+                <td><a href="/sessions/{{ tc[0] }}" hx-get="/sessions/{{ tc[0] }}" hx-target="#content" hx-push-url="true"><span class="truncate" style="max-width:250px;" title="{{ clean_title(tc[6] or '')|e }}">{{ (clean_title(tc[6] or '') or (tc[0]|string)[:12] + '...')|truncate(50) }}</span></a></td>
+                <td style="white-space:nowrap;">{{ (tc[1]|string)[:19] }}</td>
+                <td style="max-width:400px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;" title="{{ tc[2] or '' }}">{{ (tc[2] or '')[:80] }}</td>
+                <td style="max-width:250px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;">{{ tc[4] or '' }}</td>
+                <td>
+                    {% if tc[3] == 'true' %}
+                    <span class="badge badge-error">FAILED</span>
+                    {% else %}
+                    <span class="badge badge-ok">OK</span>
+                    {% endif %}
+                </td>
+                <td>{{ tc[5] or '' }}</td>
+            </tr>
+            {% endfor %}
+        </tbody>
+    </table>
+</div>
+
+<div class="pagination">
+    {% if page > 1 %}
+    <a href="/bash?{{ bash_qs(prefix=filter_prefix, page=page - 1) }}" hx-get="/bash?{{ bash_qs(prefix=filter_prefix, page=page - 1) }}" hx-target="#content" hx-push-url="true">Prev</a>
+    {% endif %}
+    <span class="current">Page {{ page }} of {{ total_pages }}</span>
+    {% if page < total_pages %}
+    <a href="/bash?{{ bash_qs(prefix=filter_prefix, page=page + 1) }}" hx-get="/bash?{{ bash_qs(prefix=filter_prefix, page=page + 1) }}" hx-target="#content" hx-push-url="true">Next</a>
+    {% endif %}
+</div>
+{% endblock %}

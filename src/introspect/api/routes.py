@@ -10,6 +10,7 @@ from introspect.api.handlers._helpers import (
     SESSIONS_PER_PAGE_DEFAULT,
     SESSIONS_SORT_DEFAULT,
 )
+from introspect.api.handlers.bash import bash as _bash
 from introspect.api.handlers.dashboard import dashboard as _dashboard
 from introspect.api.handlers.mcps import mcps as _mcps
 from introspect.api.handlers.raw import raw_data as _raw_data
@@ -98,6 +99,17 @@ async def mcps(
     page: int = Query(1, ge=1),
 ):
     return await _mcps(request, server, command, failed, page)
+
+
+@router.get("/bash", response_class=HTMLResponse)
+async def bash(
+    request: Request,
+    prefix: str = Query("", alias="prefix"),
+    session: str = Query("", alias="session"),
+    failed: bool = Query(False),
+    page: int = Query(1, ge=1),
+):
+    return await _bash(request, prefix, session, failed, page)
 
 
 @router.get("/stats", response_class=HTMLResponse)

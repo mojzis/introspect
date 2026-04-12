@@ -843,3 +843,44 @@ def test_clean_title_strips_all_xml_tags():
     assert clean_title('<div class="x">content</div>') == "content"
     # Mixed content
     assert clean_title("before <tag>middle</tag> after") == "before middle after"
+
+
+# --- Bash page tests ---
+
+
+def test_bash_returns_200():
+    """Bash page loads without error."""
+    with tempfile.TemporaryDirectory() as tmp, _patched_client(Path(tmp)) as client:
+        response = client.get("/bash")
+        assert response.status_code == 200
+        assert "Bash Commands" in response.text
+
+
+def test_bash_pagination():
+    """Bash page supports pagination."""
+    with tempfile.TemporaryDirectory() as tmp, _patched_client(Path(tmp)) as client:
+        response = client.get("/bash?page=1")
+        assert response.status_code == 200
+        assert "Page 1" in response.text
+
+
+def test_bash_filter_by_prefix():
+    """Bash page filters by command prefix."""
+    with tempfile.TemporaryDirectory() as tmp, _patched_client(Path(tmp)) as client:
+        response = client.get("/bash?prefix=echo+hello")
+        assert response.status_code == 200
+
+
+def test_bash_filter_by_session():
+    """Bash page filters by session ID."""
+    with tempfile.TemporaryDirectory() as tmp, _patched_client(Path(tmp)) as client:
+        response = client.get(f"/bash?session={SID}")
+        assert response.status_code == 200
+        assert SID[:12] in response.text
+
+
+def test_bash_failed_filter():
+    """Bash page filters by failed status."""
+    with tempfile.TemporaryDirectory() as tmp, _patched_client(Path(tmp)) as client:
+        response = client.get("/bash?failed=true")
+        assert response.status_code == 200
