@@ -235,7 +235,9 @@ def test_run_sql_happy_path(patched_mcp_db: None):
 
 def test_run_sql_with_cte(patched_mcp_db: None):
     """run_sql accepts WITH (CTE) queries in addition to plain SELECT."""
-    result = run_sql("WITH s AS (SELECT session_id FROM logical_sessions) SELECT * FROM s")
+    result = run_sql(
+        "WITH s AS (SELECT session_id FROM logical_sessions) SELECT * FROM s"
+    )
 
     assert "test-session-mcp" in result
 

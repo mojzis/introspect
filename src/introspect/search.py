@@ -179,7 +179,7 @@ def _collect_filters(
     return clauses, params
 
 
-def fts_search(
+def fts_search(  # noqa: PLR0913
     conn: duckdb.DuckDBPyConnection,
     query: str,
     limit: int = 20,

@@ -19,7 +19,7 @@ _SQL_CELL_MAX = 200
 _SQL_ROW_CAP = 500
 
 
-def search_conversations(
+def search_conversations(  # noqa: PLR0913
     query: str,
     limit: int = 10,
     offset: int = 0,
@@ -269,7 +269,7 @@ def run_sql(sql: str, limit: int = 100) -> str:
     # just by fetchmany. Safe because the inner SQL has already passed the
     # read-only validator and `capped_limit` is a clamped int.
     inner = sql.strip().rstrip(";").strip()
-    wrapped = f"SELECT * FROM ({inner}) AS _introspect_q LIMIT {capped_limit}"
+    wrapped = f"SELECT * FROM ({inner}) AS _introspect_q LIMIT {capped_limit}"  # noqa: S608
 
     try:
         try:
@@ -325,8 +325,7 @@ def describe_schema() -> str:
     lines: list[str] = []
     for table_name in ordered:
         lines.append(f"{table_name}:")
-        for col in by_table[table_name]:
-            lines.append(f"  {col}")
+        lines.extend(f"  {col}" for col in by_table[table_name])
         lines.append("")
     return "\n".join(lines).rstrip()
 

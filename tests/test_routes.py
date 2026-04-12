@@ -9,6 +9,7 @@ from unittest.mock import patch
 import pytest
 from fastapi.testclient import TestClient
 
+from introspect.api.handlers._helpers import clean_title
 from introspect.api.main import app
 
 from .conftest import (
@@ -924,8 +925,6 @@ def test_search_results_link_to_session():
 
 def test_clean_title_strips_all_xml_tags():
     """clean_title strips ALL XML tags, not just leading ones."""
-    from introspect.api.handlers._helpers import clean_title
-
     # Leading tag only
     assert clean_title("<foo>bar") == "bar"
     # Wrapping tags (the original bug: command-name pattern)

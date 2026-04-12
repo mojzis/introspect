@@ -51,12 +51,16 @@ _TOOL_HINT_KEYS: dict[str, tuple[str, ...]] = {
 }
 
 
+_SECONDS_PER_MINUTE = 60
+_MIN_SENTENCE_LEN = 20
+
+
 def _format_exec_time(seconds: float) -> str:
     if seconds < 1:
         return f"{seconds:.2f}s"
-    if seconds < 60:
+    if seconds < _SECONDS_PER_MINUTE:
         return f"{seconds:.1f}s"
-    mins, secs = divmod(int(seconds), 60)
+    mins, secs = divmod(int(seconds), _SECONDS_PER_MINUTE)
     return f"{mins}m {secs}s"
 
 
@@ -102,7 +106,7 @@ def _thinking_preview(text: str | None) -> tuple[str, bool]:
         return "", False
     stripped = text.strip()
     first_period = stripped.find(". ")
-    if 20 < first_period < _THINKING_PREVIEW_MAX:
+    if _MIN_SENTENCE_LEN < first_period < _THINKING_PREVIEW_MAX:
         preview = stripped[: first_period + 1]
     else:
         preview = stripped[:_THINKING_PREVIEW_MAX]
@@ -312,8 +316,10 @@ async def session_detail(request: Request, session_id: str) -> HTMLResponse:
         """
         SELECT
             COUNT(DISTINCT CASE WHEN tc.tool_name = 'Read'
-                THEN json_extract_string(tc.tool_input, '$.file_path') END) AS files_read,
-            COUNT(DISTINCT CASE WHEN tc.tool_name IN ('Edit', 'Write', 'MultiEdit', 'NotebookEdit')
+                THEN json_extract_string(tc.tool_input, '$.file_path')
+                END) AS files_read,
+            COUNT(DISTINCT CASE WHEN tc.tool_name
+                IN ('Edit', 'Write', 'MultiEdit', 'NotebookEdit')
                 THEN COALESCE(
                     json_extract_string(tc.tool_input, '$.file_path'),
                     json_extract_string(tc.tool_input, '$.notebook_path')
@@ -323,7 +329,8 @@ async def session_detail(request: Request, session_id: str) -> HTMLResponse:
                     COALESCE(json_extract_string(tc.tool_input, '$.file_path'), ''),
                     ?)
                 AND json_extract_string(tc.tool_input, '$.file_path') IS NOT NULL
-                THEN json_extract_string(tc.tool_input, '$.file_path') END) AS files_outside
+                THEN json_extract_string(tc.tool_input, '$.file_path')
+                END) AS files_outside
         FROM tool_calls tc
         WHERE tc.session_id = ?
     """,
@@ -376,9 +383,7 @@ async def session_detail(request: Request, session_id: str) -> HTMLResponse:
                 "thinking_preview": thinking_preview,
                 "thinking_has_more": thinking_has_more,
                 "command_label": (
-                    _slash_command_label(rec["text"])
-                    if kind == "slash_command"
-                    else ""
+                    _slash_command_label(rec["text"]) if kind == "slash_command" else ""
                 ),
                 "tool_name": rec["tool_name"] or "",
                 "tool_hint": _tool_hint(rec["tool_name"] or "", rec["tool_input"]),

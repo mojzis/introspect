@@ -68,8 +68,10 @@ FILE_METRICS_SUBQUERY = """(
     SELECT
         tc.session_id,
         COUNT(DISTINCT CASE WHEN tc.tool_name = 'Read'
-            THEN json_extract_string(tc.tool_input, '$.file_path') END) AS files_read,
-        COUNT(DISTINCT CASE WHEN tc.tool_name IN ('Edit', 'Write', 'MultiEdit', 'NotebookEdit')
+            THEN json_extract_string(tc.tool_input, '$.file_path')
+            END) AS files_read,
+        COUNT(DISTINCT CASE WHEN tc.tool_name
+            IN ('Edit', 'Write', 'MultiEdit', 'NotebookEdit')
             THEN COALESCE(
                 json_extract_string(tc.tool_input, '$.file_path'),
                 json_extract_string(tc.tool_input, '$.notebook_path')
@@ -80,7 +82,8 @@ FILE_METRICS_SUBQUERY = """(
                 COALESCE(ls.cwd, '')
             )
             AND json_extract_string(tc.tool_input, '$.file_path') IS NOT NULL
-            THEN json_extract_string(tc.tool_input, '$.file_path') END) AS files_outside
+            THEN json_extract_string(tc.tool_input, '$.file_path')
+            END) AS files_outside
     FROM tool_calls tc
     JOIN logical_sessions ls ON tc.session_id = ls.session_id
     GROUP BY tc.session_id

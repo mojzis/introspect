@@ -390,7 +390,7 @@ def _run_web_ui(
         console.print(f"[dim]Auto-reload watching {reload_dir}[/dim]")
         kwargs["reload"] = True
         kwargs["reload_dirs"] = [reload_dir]
-    uvicorn.run("introspect.api.main:app", **kwargs)  # ty: ignore[missing-argument]
+    uvicorn.run("introspect.api.main:app", **kwargs)  # ty: ignore[invalid-argument-type]
 
 
 @app.command()
