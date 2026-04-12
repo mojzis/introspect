@@ -849,11 +849,12 @@ def test_clean_title_strips_all_xml_tags():
 
 
 def test_bash_returns_200():
-    """Bash page loads without error."""
+    """Bash page loads without error and shows the test command."""
     with tempfile.TemporaryDirectory() as tmp, _patched_client(Path(tmp)) as client:
         response = client.get("/bash")
         assert response.status_code == 200
         assert "Bash Commands" in response.text
+        assert "echo hello" in response.text
 
 
 def test_bash_pagination():
@@ -865,10 +866,11 @@ def test_bash_pagination():
 
 
 def test_bash_filter_by_prefix():
-    """Bash page filters by command prefix."""
+    """Bash page filters by command prefix and shows matching command."""
     with tempfile.TemporaryDirectory() as tmp, _patched_client(Path(tmp)) as client:
         response = client.get("/bash?prefix=echo+hello")
         assert response.status_code == 200
+        assert "echo hello" in response.text
 
 
 def test_bash_filter_by_session():
@@ -877,10 +879,13 @@ def test_bash_filter_by_session():
         response = client.get(f"/bash?session={SID}")
         assert response.status_code == 200
         assert SID[:12] in response.text
+        assert "echo hello" in response.text
 
 
 def test_bash_failed_filter():
-    """Bash page filters by failed status."""
+    """Bash page failed filter excludes successful commands."""
     with tempfile.TemporaryDirectory() as tmp, _patched_client(Path(tmp)) as client:
         response = client.get("/bash?failed=true")
         assert response.status_code == 200
+        # The test fixture's Bash call succeeded, so failed filter should show 0
+        assert ">0<" in response.text.replace(" ", "")

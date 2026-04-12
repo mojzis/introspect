@@ -7,6 +7,14 @@ from fastapi.responses import HTMLResponse
 
 from ._helpers import DEFAULT_PAGE_SIZE, clean_title, conn, parent, templates
 
+_CMD = "trim(json_extract_string(tool_input, '$.command'))"
+_PREFIX_EXPR = (
+    f"CASE WHEN array_length(string_split({_CMD}, ' ')) >= 2"
+    f" THEN split_part({_CMD}, ' ', 1) || ' ' || split_part({_CMD}, ' ', 2)"
+    f" ELSE {_CMD} END"
+)
+_BASE_WHERE = ["tool_name = 'Bash'", f"{_CMD} IS NOT NULL"]
+
 
 async def bash(
     request: Request, prefix: str, session: str, failed: bool, page: int = 1
@@ -16,23 +24,12 @@ async def bash(
     session = session.strip()
     prefix = prefix.strip()
 
-    where_clauses = [
-        "tool_name = 'Bash'",
-        "json_extract_string(tool_input, '$.command') IS NOT NULL",
-    ]
+    where_clauses = list(_BASE_WHERE)
     params: list[str | int] = []
     if failed:
         where_clauses.append("is_error = 'true'")
     if prefix:
-        where_clauses.append(
-            "(CASE WHEN array_length(string_split("
-            "trim(json_extract_string(tool_input, '$.command')), ' ')) >= 2"
-            " THEN split_part(trim(json_extract_string(tool_input, '$.command')),"
-            " ' ', 1) || ' ' || split_part(trim(json_extract_string(tool_input,"
-            " '$.command')), ' ', 2)"
-            " ELSE trim(json_extract_string(tool_input, '$.command'))"
-            " END) = ?"
-        )
+        where_clauses.append(f"({_PREFIX_EXPR}) = ?")
         params.append(prefix)
     if session:
         where_clauses.append("session_id = ?")
@@ -61,7 +58,7 @@ async def bash(
         SELECT
             tc.session_id,
             tc.called_at,
-            json_extract_string(tc.tool_input, '$.command') AS command,
+            {_CMD.replace('tool_input', 'tc.tool_input')} AS command,
             tc.is_error,
             json_extract_string(tc.tool_input, '$.description') AS description,
             tc.execution_time,
@@ -76,10 +73,7 @@ async def bash(
     ).fetchall()
 
     # Prefix buttons: command grouping by first 2 words
-    pfx_where = [
-        "tool_name = 'Bash'",
-        "json_extract_string(tool_input, '$.command') IS NOT NULL",
-    ]
+    pfx_where = list(_BASE_WHERE)
     pfx_params: list[str] = []
     if session:
         pfx_where.append("session_id = ?")
@@ -88,8 +82,7 @@ async def bash(
     prefixes = db.execute(
         f"""
         WITH cmds AS (
-            SELECT trim(json_extract_string(tool_input, '$.command')) AS cmd,
-                   is_error
+            SELECT {_CMD} AS cmd, is_error
             FROM tool_calls
             WHERE {" AND ".join(pfx_where)}
         )
