@@ -7,13 +7,22 @@ from fastapi.responses import HTMLResponse
 
 from ._helpers import DEFAULT_PAGE_SIZE, clean_title, conn, parent, templates
 
-_CMD = "trim(json_extract_string(tool_input, '$.command'))"
+_MAX_PREFIXES = 40
+
+
+def _cmd_expr(alias: str = "") -> str:
+    """SQL expression extracting the trimmed command from tool_input."""
+    col = f"{alias}tool_input" if alias else "tool_input"
+    return f"trim(json_extract_string({col}, '$.command'))"
+
+
+_CMD = _cmd_expr()
 _PREFIX_EXPR = (
     f"CASE WHEN array_length(string_split({_CMD}, ' ')) >= 2"
     f" THEN split_part({_CMD}, ' ', 1) || ' ' || split_part({_CMD}, ' ', 2)"
     f" ELSE {_CMD} END"
 )
-_BASE_WHERE = ["tool_name = 'Bash'", f"{_CMD} IS NOT NULL"]
+_BASE_WHERE = ("tool_name = 'Bash'", f"{_CMD} IS NOT NULL")
 
 
 async def bash(
@@ -58,7 +67,7 @@ async def bash(
         SELECT
             tc.session_id,
             tc.called_at,
-            {_CMD.replace('tool_input', 'tc.tool_input')} AS command,
+            {_cmd_expr("tc.")} AS command,
             tc.is_error,
             json_extract_string(tc.tool_input, '$.description') AS description,
             tc.execution_time,
@@ -81,21 +90,14 @@ async def bash(
 
     prefixes = db.execute(
         f"""
-        WITH cmds AS (
-            SELECT {_CMD} AS cmd, is_error
-            FROM tool_calls
-            WHERE {" AND ".join(pfx_where)}
-        )
         SELECT
-            CASE WHEN array_length(string_split(cmd, ' ')) >= 2
-                 THEN split_part(cmd, ' ', 1) || ' ' || split_part(cmd, ' ', 2)
-                 ELSE cmd
-            END AS prefix,
+            {_PREFIX_EXPR} AS prefix,
             COUNT(*) AS cnt,
             100.0 * COUNT(*) FILTER (WHERE is_error IS DISTINCT FROM 'true')
                 / COUNT(*) AS success_rate
-        FROM cmds
-        GROUP BY prefix ORDER BY cnt DESC LIMIT 40
+        FROM tool_calls
+        WHERE {" AND ".join(pfx_where)}
+        GROUP BY prefix ORDER BY cnt DESC LIMIT {_MAX_PREFIXES}
     """,  # noqa: S608
         pfx_params,
     ).fetchall()

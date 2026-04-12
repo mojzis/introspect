@@ -848,44 +848,46 @@ def test_clean_title_strips_all_xml_tags():
 # --- Bash page tests ---
 
 
-def test_bash_returns_200():
+@pytest.fixture
+def bash_client():
+    """Provide a test client with sample data for bash route tests."""
+    with tempfile.TemporaryDirectory() as tmp, _patched_client(Path(tmp)) as client:
+        yield client
+
+
+def test_bash_returns_200(bash_client):
     """Bash page loads without error and shows the test command."""
-    with tempfile.TemporaryDirectory() as tmp, _patched_client(Path(tmp)) as client:
-        response = client.get("/bash")
-        assert response.status_code == 200
-        assert "Bash Commands" in response.text
-        assert "echo hello" in response.text
+    response = bash_client.get("/bash")
+    assert response.status_code == 200
+    assert "Bash Commands" in response.text
+    assert "echo hello" in response.text
 
 
-def test_bash_pagination():
+def test_bash_pagination(bash_client):
     """Bash page supports pagination."""
-    with tempfile.TemporaryDirectory() as tmp, _patched_client(Path(tmp)) as client:
-        response = client.get("/bash?page=1")
-        assert response.status_code == 200
-        assert "Page 1" in response.text
+    response = bash_client.get("/bash?page=1")
+    assert response.status_code == 200
+    assert "Page 1" in response.text
 
 
-def test_bash_filter_by_prefix():
+def test_bash_filter_by_prefix(bash_client):
     """Bash page filters by command prefix and shows matching command."""
-    with tempfile.TemporaryDirectory() as tmp, _patched_client(Path(tmp)) as client:
-        response = client.get("/bash?prefix=echo+hello")
-        assert response.status_code == 200
-        assert "echo hello" in response.text
+    response = bash_client.get("/bash?prefix=echo+hello")
+    assert response.status_code == 200
+    assert "echo hello" in response.text
 
 
-def test_bash_filter_by_session():
+def test_bash_filter_by_session(bash_client):
     """Bash page filters by session ID."""
-    with tempfile.TemporaryDirectory() as tmp, _patched_client(Path(tmp)) as client:
-        response = client.get(f"/bash?session={SID}")
-        assert response.status_code == 200
-        assert SID[:12] in response.text
-        assert "echo hello" in response.text
+    response = bash_client.get(f"/bash?session={SID}")
+    assert response.status_code == 200
+    assert SID[:12] in response.text
+    assert "echo hello" in response.text
 
 
-def test_bash_failed_filter():
+def test_bash_failed_filter(bash_client):
     """Bash page failed filter excludes successful commands."""
-    with tempfile.TemporaryDirectory() as tmp, _patched_client(Path(tmp)) as client:
-        response = client.get("/bash?failed=true")
-        assert response.status_code == 200
-        # The test fixture's Bash call succeeded, so failed filter should show 0
-        assert ">0<" in response.text.replace(" ", "")
+    response = bash_client.get("/bash?failed=true")
+    assert response.status_code == 200
+    # The test fixture's Bash call succeeded, so failed filter should show 0
+    assert ">0<" in response.text.replace(" ", "")
