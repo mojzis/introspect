@@ -10,8 +10,6 @@ import pytest
 
 from introspect.db import materialize_views
 from introspect.mcp.tools import (
-    _SQL_CELL_MAX,
-    _SQL_ROW_CAP,
     describe_schema,
     get_session,
     recent_sessions,
@@ -20,6 +18,7 @@ from introspect.mcp.tools import (
     tool_failures,
 )
 from introspect.search import build_search_corpus
+from introspect.sql_validation import SQL_CELL_MAX, SQL_ROW_CAP
 
 from .conftest import (
     glob_pattern,
@@ -283,18 +282,18 @@ def test_run_sql_enforces_limit(patched_mcp_db: None):
 
 
 def test_run_sql_row_cap_clamps_oversized_limit(patched_mcp_db: None):
-    """Caller limits above _SQL_ROW_CAP are clamped to the cap."""
+    """Caller limits above SQL_ROW_CAP are clamped to the cap."""
     result = run_sql(
-        f"SELECT * FROM range(0, {_SQL_ROW_CAP * 2}) AS t(n)",
-        limit=_SQL_ROW_CAP * 2,
+        f"SELECT * FROM range(0, {SQL_ROW_CAP * 2}) AS t(n)",
+        limit=SQL_ROW_CAP * 2,
     )
 
-    assert f"({_SQL_ROW_CAP} rows)" in result
+    assert f"({SQL_ROW_CAP} rows)" in result
 
 
 def test_run_sql_truncates_long_cells(patched_mcp_db: None):
-    """Cell values longer than _SQL_CELL_MAX are truncated with an ellipsis."""
-    long_value_length = _SQL_CELL_MAX + 50
+    """Cell values longer than SQL_CELL_MAX are truncated with an ellipsis."""
+    long_value_length = SQL_CELL_MAX + 50
     result = run_sql(f"SELECT repeat('x', {long_value_length}) AS big")
 
     assert "…" in result

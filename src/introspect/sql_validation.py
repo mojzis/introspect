@@ -12,6 +12,10 @@ SQL_COMMENT_LINE = re.compile(r"--[^\n]*")
 SQL_STRING_LITERAL = re.compile(r"'(?:[^']|'')*'")
 SQL_ALLOWED_FIRST_KEYWORDS = {"select", "with"}
 
+# Shared limits for SQL query results (used by web UI and MCP tools).
+SQL_ROW_CAP = 500
+SQL_CELL_MAX = 200
+
 
 def validate_read_only_sql(sql: str) -> str | None:
     """Return an error message if `sql` is not a safe read-only query.

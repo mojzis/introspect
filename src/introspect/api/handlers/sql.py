@@ -7,13 +7,9 @@ import duckdb
 from fastapi import Request
 from fastapi.responses import HTMLResponse
 
-from introspect.sql_validation import validate_read_only_sql
+from introspect.sql_validation import SQL_CELL_MAX, SQL_ROW_CAP, validate_read_only_sql
 
 from ._helpers import conn, parent, templates
-
-# Row cap and cell truncation limits
-SQL_ROW_CAP = 500
-SQL_CELL_MAX = 200
 
 
 def _get_schema(db: duckdb.DuckDBPyConnection) -> dict[str, list[dict[str, str]]]:
@@ -44,6 +40,22 @@ async def sql_page(request: Request) -> HTMLResponse:
     )
 
 
+def _error_response(request: Request, error: str, exec_time: float = 0) -> HTMLResponse:
+    """Return an error-only sql_results.html fragment."""
+    return templates.TemplateResponse(
+        request,
+        "sql_results.html",
+        {
+            "error": error,
+            "columns": [],
+            "rows": [],
+            "row_count": 0,
+            "truncated": False,
+            "exec_time": exec_time,
+        },
+    )
+
+
 async def sql_execute(request: Request) -> HTMLResponse:
     """POST /sql — execute a SQL query and return results fragment."""
     db = conn(request)
@@ -51,33 +63,11 @@ async def sql_execute(request: Request) -> HTMLResponse:
     sql = str(form.get("sql", "")).strip()
 
     if not sql:
-        return templates.TemplateResponse(
-            request,
-            "sql_results.html",
-            {
-                "error": "No SQL provided.",
-                "columns": [],
-                "rows": [],
-                "row_count": 0,
-                "truncated": False,
-                "exec_time": 0,
-            },
-        )
+        return _error_response(request, "No SQL provided.")
 
     error = validate_read_only_sql(sql)
     if error:
-        return templates.TemplateResponse(
-            request,
-            "sql_results.html",
-            {
-                "error": error,
-                "columns": [],
-                "rows": [],
-                "row_count": 0,
-                "truncated": False,
-                "exec_time": 0,
-            },
-        )
+        return _error_response(request, error)
 
     inner = sql.rstrip(";").strip()
     wrapped = f"SELECT * FROM ({inner}) AS _q LIMIT {SQL_ROW_CAP + 1}"  # noqa: S608
@@ -87,17 +77,10 @@ async def sql_execute(request: Request) -> HTMLResponse:
         cursor = db.execute(wrapped)
     except duckdb.Error as exc:
         elapsed = time.monotonic() - start
-        return templates.TemplateResponse(
+        return _error_response(
             request,
-            "sql_results.html",
-            {
-                "error": f"SQL error ({type(exc).__name__}): {exc}",
-                "columns": [],
-                "rows": [],
-                "row_count": 0,
-                "truncated": False,
-                "exec_time": round(elapsed * 1000, 1),
-            },
+            f"SQL error ({type(exc).__name__}): {exc}",
+            exec_time=round(elapsed * 1000, 1),
         )
 
     columns = [d[0] for d in (cursor.description or [])]

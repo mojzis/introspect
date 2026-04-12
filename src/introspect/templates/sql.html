@@ -128,7 +128,12 @@ function sqlEditor() {
                 });
                 resultsDiv.innerHTML = await resp.text();
             } catch (err) {
-                resultsDiv.innerHTML = '<div class="card" style="color:#c00;">Network error: ' + err.message + '</div>';
+                resultsDiv.textContent = '';
+                const errDiv = document.createElement('div');
+                errDiv.className = 'card';
+                errDiv.style.color = '#c00';
+                errDiv.textContent = 'Network error: ' + err.message;
+                resultsDiv.appendChild(errDiv);
             }
         }
     };
