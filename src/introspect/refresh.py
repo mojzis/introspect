@@ -59,35 +59,15 @@ def _swap_in(
     app: FastAPI,
     db_path: Path,
     sidecar: Path,
-    grace_seconds: float = 2.0,
 ) -> None:
     """Atomically rename ``sidecar`` over ``db_path`` and swap the read conn.
 
-    Note on ordering: DuckDB maintains a process-wide cache of database
-    instances keyed by path. Calling ``duckdb.connect(path)`` while another
-    connection on the same path is still open returns a reference to the
-    *existing* in-memory instance — the new inode produced by ``os.replace``
-    is not observed. This defeats the "soft-swap with grace period" shape
-    described in the plan: we can't keep the old connection alive while
-    opening a new one that sees the refreshed file. So the order is:
-
-    1. ``os.replace`` the sidecar over ``db_path`` (atomic on one filesystem).
-    2. Close the old connection so DuckDB releases its cached instance.
-    3. Open a fresh read-only connection on ``db_path`` — this now sees the
-       new inode.
-    4. Publish it via ``app.state.read_conn``.
-
-    The tradeoff is that any in-flight cursor holding the old connection will
-    observe a closed connection. In practice this is extremely rare for this
-    app (interactive log browsing, low concurrency) and any such request will
-    just fail the usual way — the next click retries against the fresh conn.
-    ``grace_seconds`` is kept in the signature for compatibility but is
-    unused.
+    DuckDB caches instances by path, so we must close the old connection
+    before opening a new one to see the replaced inode.
     """
-    _ = grace_seconds  # signature parity with plan; see docstring
     os.replace(str(sidecar), str(db_path))  # noqa: PTH105
     old_conn = app.state.read_conn
-    with contextlib.suppress(Exception):
+    with contextlib.suppress(duckdb.ConnectionException, RuntimeError):
         if old_conn is not None:
             old_conn.close()
     app.state.read_conn = duckdb.connect(str(db_path), read_only=True)
@@ -110,18 +90,18 @@ async def refresh_loop(  # noqa: PLR0913
             current = newest_mtime(jsonl_glob)
             if current <= last_mtime:
                 continue
-            log.info("introspect: JSONL changed; rebuilding materialized DB")
+            log.info("JSONL changed; rebuilding materialized DB")
             await asyncio.to_thread(
                 _rebuild_sidecar, sidecar, jsonl_glob, days, resolve_projects
             )
-            _swap_in(app, db_path, sidecar)
+            await asyncio.to_thread(_swap_in, app, db_path, sidecar)
             last_mtime = current
-            log.info("introspect: refresh complete")
+            log.info("refresh complete")
         except asyncio.CancelledError:
             raise
         except Exception:
             log.warning(
-                "introspect: refresh failed; will retry next tick",
+                "refresh failed; will retry next tick",
                 exc_info=True,
             )
             continue
