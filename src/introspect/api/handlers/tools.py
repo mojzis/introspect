@@ -48,12 +48,14 @@ async def tools(
         f"""
         SELECT
             tc.session_id,
-            tc.called_at,
+            strftime(tc.called_at, '%b %d %H:%M') AS called_at_fmt,
             tc.tool_name,
             tc.is_error,
+            json_extract_string(tc.tool_input, '$.description') AS description,
             LEFT(tc.tool_input, 200) AS input_preview,
             tc.execution_time,
-            fp.first_prompt
+            fp.first_prompt,
+            tc.tool_use_id
         FROM tool_calls tc
         LEFT JOIN session_titles fp USING (session_id)
         {where}

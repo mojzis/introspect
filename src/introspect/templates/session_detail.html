@@ -92,7 +92,7 @@
             {% endif %}
 
         {% elif msg.kind == 'agent_tool_call' %}
-            <div x-data="{ open: false }"
+            <div id="tc-{{ msg.tool_use_id }}" x-data="{ open: false }"
                  @tools-expand-all.window="open = true"
                  @tools-collapse-all.window="open = false">
                 <div class="tool-call-line" @click="open = !open">

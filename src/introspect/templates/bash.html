@@ -73,8 +73,8 @@
         <tbody>
             {% for tc in bash_calls %}
             <tr>
-                <td><a href="/sessions/{{ tc[0] }}" hx-get="/sessions/{{ tc[0] }}" hx-target="#content" hx-push-url="true"><span class="truncate" style="max-width:250px;" title="{{ clean_title(tc[6] or '')|e }}">{{ (clean_title(tc[6] or '') or (tc[0]|string)[:12] + '...')|truncate(50) }}</span></a></td>
-                <td style="white-space:nowrap;">{{ (tc[1]|string)[:19] }}</td>
+                <td><a href="/sessions/{{ tc[0] }}#tc-{{ tc[7] }}" hx-get="/sessions/{{ tc[0] }}" hx-target="#content" hx-push-url="/sessions/{{ tc[0] }}#tc-{{ tc[7] }}"><span class="truncate" style="max-width:250px;" title="{{ clean_title(tc[6] or '')|e }}">{{ (clean_title(tc[6] or '') or (tc[0]|string)[:12] + '...')|truncate(50) }}</span></a></td>
+                <td style="white-space:nowrap;">{{ tc[1] }}</td>
                 <td style="max-width:400px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;" title="{{ tc[2] or '' }}">{{ (tc[2] or '')[:80] }}</td>
                 <td style="max-width:250px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;">{{ tc[4] or '' }}</td>
                 <td>

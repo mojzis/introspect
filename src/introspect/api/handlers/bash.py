@@ -66,12 +66,13 @@ async def bash(
         f"""
         SELECT
             tc.session_id,
-            tc.called_at,
+            strftime(tc.called_at, '%b %d %H:%M') AS called_at_fmt,
             {_cmd_expr("tc.")} AS command,
             tc.is_error,
             json_extract_string(tc.tool_input, '$.description') AS description,
             tc.execution_time,
-            fp.first_prompt
+            fp.first_prompt,
+            tc.tool_use_id
         FROM tool_calls tc
         LEFT JOIN session_titles fp USING (session_id)
         {where}

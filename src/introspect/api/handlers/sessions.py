@@ -343,6 +343,7 @@ async def session_detail(request: Request, session_id: str) -> HTMLResponse:
             e.thinking_text,
             e.tool_name,
             e.tool_input,
+            e.tool_use_id,
             tc.tool_use_result,
             tc.is_error,
             tc.execution_time,
@@ -387,6 +388,7 @@ async def session_detail(request: Request, session_id: str) -> HTMLResponse:
                 "exec_time": (
                     _format_exec_time(exec_secs) if exec_secs is not None else ""
                 ),
+                "tool_use_id": rec.get("tool_use_id", "") or "",
             }
         )
 

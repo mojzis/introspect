@@ -108,6 +108,12 @@
         document.addEventListener('htmx:historyRestore', function() {
             document.getElementById('loading-overlay').classList.remove('active');
         });
+        document.addEventListener('htmx:afterSettle', function() {
+            if (location.hash) {
+                var el = document.getElementById(location.hash.substring(1));
+                if (el) el.scrollIntoView({ behavior: 'smooth' });
+            }
+        });
     </script>
 </body>
 </html>
