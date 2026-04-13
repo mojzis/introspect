@@ -94,6 +94,8 @@ def materialize_views(
         "session_titles",
         "conversation_turns",
         "session_messages_enriched",
+        "file_reads",
+        "file_writes",
         "tool_calls",
         "logical_sessions",
         "project_map",
@@ -484,4 +486,37 @@ def _create_derived_views(conn: duckdb.DuckDBPyConnection) -> None:
                unnest(cmds) AS command
         FROM msg_text
         WHERE len(cmds) > 0
+    """)
+
+    # File reads: one row per Read tool call with extracted file_path.
+    conn.execute("""
+        CREATE OR REPLACE VIEW file_reads AS
+        SELECT
+            tc.session_id,
+            tc.tool_use_id,
+            tc.called_at,
+            json_extract_string(tc.tool_input, '$.file_path') AS file_path
+        FROM tool_calls tc
+        WHERE tc.tool_name = 'Read'
+          AND json_extract_string(tc.tool_input, '$.file_path') IS NOT NULL
+    """)
+
+    # File writes: one row per write tool call with extracted file_path.
+    conn.execute("""
+        CREATE OR REPLACE VIEW file_writes AS
+        SELECT
+            tc.session_id,
+            tc.tool_use_id,
+            tc.called_at,
+            tc.tool_name,
+            COALESCE(
+                json_extract_string(tc.tool_input, '$.file_path'),
+                json_extract_string(tc.tool_input, '$.notebook_path')
+            ) AS file_path
+        FROM tool_calls tc
+        WHERE tc.tool_name IN ('Edit', 'Write', 'MultiEdit', 'NotebookEdit')
+          AND COALESCE(
+              json_extract_string(tc.tool_input, '$.file_path'),
+              json_extract_string(tc.tool_input, '$.notebook_path')
+          ) IS NOT NULL
     """)

@@ -310,31 +310,26 @@ async def session_detail(request: Request, session_id: str) -> HTMLResponse:
         [session_id],
     ).fetchone()
 
-    # File metrics
+    # File metrics (from file_reads / file_writes views)
     session_cwd = session_info[7] if session_info else ""
     file_metrics = db.execute(
         """
+        WITH sr AS (
+            SELECT DISTINCT file_path FROM file_reads
+            WHERE session_id = ?
+        ), sw AS (
+            SELECT DISTINCT file_path FROM file_writes
+            WHERE session_id = ?
+        )
         SELECT
-            COUNT(DISTINCT CASE WHEN tc.tool_name = 'Read'
-                THEN json_extract_string(tc.tool_input, '$.file_path')
-                END) AS files_read,
-            COUNT(DISTINCT CASE WHEN tc.tool_name
-                IN ('Edit', 'Write', 'MultiEdit', 'NotebookEdit')
-                THEN COALESCE(
-                    json_extract_string(tc.tool_input, '$.file_path'),
-                    json_extract_string(tc.tool_input, '$.notebook_path')
-                ) END) AS files_edited,
-            COUNT(DISTINCT CASE WHEN tc.tool_name = 'Read'
-                AND NOT starts_with(
-                    COALESCE(json_extract_string(tc.tool_input, '$.file_path'), ''),
-                    ?)
-                AND json_extract_string(tc.tool_input, '$.file_path') IS NOT NULL
-                THEN json_extract_string(tc.tool_input, '$.file_path')
-                END) AS files_outside
-        FROM tool_calls tc
-        WHERE tc.session_id = ?
+            (SELECT COUNT(*) FROM sr),
+            (SELECT COUNT(*) FROM sw),
+            (SELECT COUNT(*) FROM sr
+             WHERE file_path NOT IN (SELECT file_path FROM sw)),
+            (SELECT COUNT(*) FROM sr
+             WHERE NOT starts_with(file_path, ?))
     """,
-        [session_cwd or "", session_id],
+        [session_id, session_id, session_cwd or ""],
     ).fetchone()
 
     # One row per classified content block, with paired tool results already
@@ -407,6 +402,13 @@ async def session_detail(request: Request, session_id: str) -> HTMLResponse:
             "messages": parsed_messages,
             "token_usage": token_usage,
             "tool_summary": tool_summary,
-            "file_metrics": file_metrics,
+            "file_metrics": {
+                "files_read": file_metrics[0] or 0,
+                "files_edited": file_metrics[1] or 0,
+                "files_read_only": file_metrics[2] or 0,
+                "files_outside": file_metrics[3] or 0,
+            }
+            if file_metrics
+            else None,
         },
     )
