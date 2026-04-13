@@ -70,14 +70,16 @@ async def search(
 
 
 @router.get("/tools", response_class=HTMLResponse)
-async def tools(
+async def tools(  # noqa: PLR0913
     request: Request,
     failed: bool = Query(False),
     name: str = Query("", alias="name"),
     session: str = Query("", alias="session"),
+    project: str = Query("", alias="project"),
+    q: str = Query("", alias="q"),
     page: int = Query(1, ge=1),
 ):
-    return await _tools(request, failed, name, session, page)
+    return await _tools(request, failed, name, session, project, q, page)
 
 
 @router.get("/raw", response_class=HTMLResponse)
@@ -102,14 +104,16 @@ async def mcps(
 
 
 @router.get("/bash", response_class=HTMLResponse)
-async def bash(
+async def bash(  # noqa: PLR0913
     request: Request,
     prefix: str = Query("", alias="prefix"),
     session: str = Query("", alias="session"),
+    project: str = Query("", alias="project"),
+    q: str = Query("", alias="q"),
     failed: bool = Query(False),
     page: int = Query(1, ge=1),
 ):
-    return await _bash(request, prefix, session, failed, page)
+    return await _bash(request, prefix, session, project, q, failed, page)
 
 
 @router.get("/stats", response_class=HTMLResponse)

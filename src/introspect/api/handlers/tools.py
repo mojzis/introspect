@@ -5,37 +5,69 @@ import math
 from fastapi import Request
 from fastapi.responses import HTMLResponse
 
-from ._helpers import DEFAULT_PAGE_SIZE, clean_title, conn, parent, templates
+from ._helpers import (
+    DEFAULT_PAGE_SIZE,
+    clean_title,
+    conn,
+    escape_ilike,
+    fetch_distinct_projects,
+    parent,
+    templates,
+)
 
 
-async def tools(
-    request: Request, failed: bool, name: str, session: str, page: int = 1
+async def tools(  # noqa: PLR0913
+    request: Request,
+    failed: bool,
+    name: str,
+    session: str,
+    project: str,
+    q: str,
+    page: int = 1,
 ) -> HTMLResponse:
     """Tool call stats with filtering (non-MCP tools only)."""
     db = conn(request)
     session = session.strip()
+    project = project.strip()
+    q = q.strip()
 
     # Base filter: exclude MCP tools (they have their own page)
-    where_clauses = ["tool_name NOT LIKE 'mcp__%'"]
+    where_clauses = ["tc.tool_name NOT LIKE 'mcp__%'"]
     params: list[str | int] = []
     if failed:
-        where_clauses.append("is_error = 'true'")
+        where_clauses.append("tc.is_error = 'true'")
     if name.strip():
-        where_clauses.append("tool_name = ?")
+        where_clauses.append("tc.tool_name = ?")
         params.append(name.strip())
     if session:
-        where_clauses.append("session_id = ?")
+        where_clauses.append("tc.session_id = ?")
         params.append(session)
+    if project:
+        where_clauses.append("ls.project = ?")
+        params.append(project)
+    if q:
+        escaped = f"%{escape_ilike(q)}%"
+        where_clauses.append(
+            "(json_extract_string(tc.tool_input, '$.description')"
+            " ILIKE ? OR tc.tool_input ILIKE ?)"
+        )
+        params.extend([escaped, escaped])
 
     where = "WHERE " + " AND ".join(where_clauses)
+    joins = (
+        "LEFT JOIN session_titles fp USING (session_id)"
+        " LEFT JOIN logical_sessions ls"
+        " ON tc.session_id = ls.session_id"
+    )
 
     # Stats summary (also gives total count for pagination)
     stats = db.execute(
         f"""
         SELECT
             COUNT(*) AS total,
-            COUNT(*) FILTER (WHERE is_error = 'true') AS failed_total
-        FROM tool_calls
+            COUNT(*) FILTER (WHERE tc.is_error = 'true') AS failed_total
+        FROM tool_calls tc
+        {joins}
         {where}
     """,  # noqa: S608
         params,
@@ -55,9 +87,10 @@ async def tools(
             LEFT(tc.tool_input, 200) AS input_preview,
             tc.execution_time,
             fp.first_prompt,
-            tc.tool_use_id
+            tc.tool_use_id,
+            ls.project
         FROM tool_calls tc
-        LEFT JOIN session_titles fp USING (session_id)
+        {joins}
         {where}
         ORDER BY tc.called_at DESC
         LIMIT ? OFFSET ?
@@ -96,6 +129,9 @@ async def tools(
             "filter_failed": failed,
             "filter_name": name,
             "filter_session": session,
+            "filter_project": project,
+            "filter_q": q,
+            "projects": fetch_distinct_projects(db),
             "stats": stats,
             "page": page,
             "total_pages": total_pages,
