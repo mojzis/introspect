@@ -993,13 +993,14 @@ def test_bash_failed_filter(bash_client):
 
 
 def test_sessions_shows_file_metrics_columns():
-    """Sessions page has sortable Read, Edited, Outside column headers."""
+    """Sessions page has sortable Read, Edited, Read Only, Outside column headers."""
     with tempfile.TemporaryDirectory() as tmp, _patched_client(Path(tmp)) as client:
         response = client.get("/sessions")
         assert response.status_code == 200
         text = response.text
         assert "files_read" in text  # sort link param
         assert "files_edited" in text  # sort link param
+        assert "files_read_only" in text  # sort link param
         assert "files_outside" in text  # sort link param
 
 
@@ -1007,6 +1008,14 @@ def test_sessions_sort_by_files_read():
     """Sessions page can sort by files_read count."""
     with tempfile.TemporaryDirectory() as tmp, _patched_client(Path(tmp)) as client:
         response = client.get("/sessions?sort=files_read&order=desc")
+        assert response.status_code == 200
+        assert SID[:8] in response.text
+
+
+def test_sessions_sort_by_files_read_only():
+    """Sessions page can sort by files_read_only count."""
+    with tempfile.TemporaryDirectory() as tmp, _patched_client(Path(tmp)) as client:
+        response = client.get("/sessions?sort=files_read_only&order=desc")
         assert response.status_code == 200
         assert SID[:8] in response.text
 
@@ -1021,6 +1030,16 @@ def test_session_detail_shows_file_metrics():
         assert "Files" in text
         assert "read" in text
         assert "edited" in text
+
+
+def test_session_detail_shows_read_only_count():
+    """Session detail shows read-only file count (read but never written)."""
+    with tempfile.TemporaryDirectory() as tmp, _patched_client(Path(tmp)) as client:
+        response = client.get(f"/sessions/{SID}")
+        assert response.status_code == 200
+        text = response.text
+        # /home/user/other/config.yml is read but never edited → 1 read-only
+        assert "1 read-only" in text
 
 
 def test_session_detail_file_metrics_outside_count():

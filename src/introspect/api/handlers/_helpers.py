@@ -27,9 +27,10 @@ SESSIONS_SORT_COLS = {
     "project": "ls.project",
     "branch": "ls.git_branch",
     "title": "fp.first_prompt",
-    "files_read": "fm.files_read",
-    "files_edited": "fm.files_edited",
-    "files_outside": "fm.files_outside",
+    "files_read": "fr_agg.files_read",
+    "files_edited": "fw_agg.files_edited",
+    "files_read_only": "fr_agg.files_read_only",
+    "files_outside": "fr_agg.files_outside",
 }
 SESSIONS_SORT_DEFAULT = "started_at"
 
@@ -63,31 +64,30 @@ TOOL_COUNTS_SUBQUERY = """(
     FROM tool_calls GROUP BY session_id
 ) tc"""
 
-# Reusable SQL fragment for per-session file metrics.
-FILE_METRICS_SUBQUERY = """(
+# Reusable SQL fragments for per-session file metrics
+# (backed by file_reads / file_writes views).
+FILE_READS_SUBQUERY = """(
     SELECT
-        tc.session_id,
-        COUNT(DISTINCT CASE WHEN tc.tool_name = 'Read'
-            THEN json_extract_string(tc.tool_input, '$.file_path')
-            END) AS files_read,
-        COUNT(DISTINCT CASE WHEN tc.tool_name
-            IN ('Edit', 'Write', 'MultiEdit', 'NotebookEdit')
-            THEN COALESCE(
-                json_extract_string(tc.tool_input, '$.file_path'),
-                json_extract_string(tc.tool_input, '$.notebook_path')
-            ) END) AS files_edited,
-        COUNT(DISTINCT CASE WHEN tc.tool_name = 'Read'
-            AND NOT starts_with(
-                COALESCE(json_extract_string(tc.tool_input, '$.file_path'), ''),
-                COALESCE(ls.cwd, '')
+        fr.session_id,
+        COUNT(DISTINCT fr.file_path) AS files_read,
+        COUNT(DISTINCT fr.file_path) FILTER (
+            WHERE fr.file_path NOT IN (
+                SELECT DISTINCT fw.file_path FROM file_writes fw
+                WHERE fw.session_id = fr.session_id
             )
-            AND json_extract_string(tc.tool_input, '$.file_path') IS NOT NULL
-            THEN json_extract_string(tc.tool_input, '$.file_path')
-            END) AS files_outside
-    FROM tool_calls tc
-    JOIN logical_sessions ls ON tc.session_id = ls.session_id
-    GROUP BY tc.session_id
-) fm"""
+        ) AS files_read_only,
+        COUNT(DISTINCT fr.file_path) FILTER (
+            WHERE NOT starts_with(fr.file_path, COALESCE(ls.cwd, ''))
+        ) AS files_outside
+    FROM file_reads fr
+    JOIN logical_sessions ls ON fr.session_id = ls.session_id
+    GROUP BY fr.session_id
+) fr_agg"""
+
+FILE_WRITES_SUBQUERY = """(
+    SELECT session_id, COUNT(DISTINCT file_path) AS files_edited
+    FROM file_writes GROUP BY session_id
+) fw_agg"""
 
 # Built-in / meta commands that don't reflect real work — hidden from the UI.
 OBVIOUS_COMMANDS: frozenset[str] = frozenset(
@@ -149,16 +149,18 @@ SESSION_INFO_SELECT = """
     ls.git_branch,
     fp.first_prompt,
     COALESCE(tc.tool_count, 0) AS tool_count,
-    COALESCE(fm.files_read, 0) AS files_read,
-    COALESCE(fm.files_edited, 0) AS files_edited,
-    COALESCE(fm.files_outside, 0) AS files_outside,
+    COALESCE(fr_agg.files_read, 0) AS files_read,
+    COALESCE(fw_agg.files_edited, 0) AS files_edited,
+    COALESCE(fr_agg.files_read_only, 0) AS files_read_only,
+    COALESCE(fr_agg.files_outside, 0) AS files_outside,
     cmd.commands
 """
 
 SESSION_INFO_JOINS = f"""
     LEFT JOIN session_titles fp ON ls.session_id = fp.session_id
     LEFT JOIN {TOOL_COUNTS_SUBQUERY} ON ls.session_id = tc.session_id
-    LEFT JOIN {FILE_METRICS_SUBQUERY} ON ls.session_id = fm.session_id
+    LEFT JOIN {FILE_READS_SUBQUERY} ON ls.session_id = fr_agg.session_id
+    LEFT JOIN {FILE_WRITES_SUBQUERY} ON ls.session_id = fw_agg.session_id
     LEFT JOIN {COMMAND_LIST_SUBQUERY} ON ls.session_id = cmd.session_id
 """
 
@@ -176,6 +178,7 @@ _EMPTY_SESSION_INFO: dict[str, object] = {
     "tool_count": 0,
     "files_read": 0,
     "files_edited": 0,
+    "files_read_only": 0,
     "files_outside": 0,
     "commands": "",
 }
@@ -197,6 +200,7 @@ def session_row_to_dict(row: tuple) -> dict:
         tool_count,
         files_read,
         files_edited,
+        files_read_only,
         files_outside,
         commands,
     ) = row
@@ -216,6 +220,7 @@ def session_row_to_dict(row: tuple) -> dict:
         "tool_count": tool_count or 0,
         "files_read": files_read or 0,
         "files_edited": files_edited or 0,
+        "files_read_only": files_read_only or 0,
         "files_outside": files_outside or 0,
         "commands": commands or "",
     }
