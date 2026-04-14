@@ -226,6 +226,24 @@ def session_row_to_dict(row: tuple) -> dict:
     }
 
 
+def escape_ilike(s: str) -> str:
+    """Escape ILIKE special characters so they match literally."""
+    return s.replace("\\", "\\\\").replace("%", "\\%").replace("_", "\\_")
+
+
+def fetch_distinct_projects(
+    db: duckdb.DuckDBPyConnection,
+) -> list[str]:
+    """Return sorted list of distinct project names."""
+    rows = db.execute("""
+        SELECT DISTINCT project
+        FROM logical_sessions
+        WHERE project IS NOT NULL
+        ORDER BY project
+    """).fetchall()
+    return [r[0] for r in rows]
+
+
 def fetch_token_usage(
     db: duckdb.DuckDBPyConnection,
     *,

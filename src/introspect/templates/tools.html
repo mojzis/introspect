@@ -1,8 +1,8 @@
 {% extends parent %}
 {% block title %}Tools - Introspect{% endblock %}
 
-{% macro tool_qs(name='', failed=filter_failed, session=filter_session, page=1) -%}
-{% if name %}name={{ name }}&{% endif %}{% if failed %}failed=true&{% endif %}{% if session %}session={{ session }}&{% endif %}page={{ page }}
+{% macro tool_qs(name='', failed=filter_failed, session=filter_session, project=filter_project, q=filter_q, page=1) -%}
+{% if name %}name={{ name }}&{% endif %}{% if failed %}failed=true&{% endif %}{% if session %}session={{ session }}&{% endif %}{% if project %}project={{ project }}&{% endif %}{% if q %}q={{ q }}&{% endif %}page={{ page }}
 {%- endmacro %}
 
 {% block content %}
@@ -27,6 +27,20 @@
         {% endfor %}
     </div>
     <div class="filter-bar" style="margin-top:0.5rem;">
+        <form action="/tools" method="get" style="display:inline-flex;gap:0.3rem;margin-right:0.5rem;">
+            {% if filter_name %}<input type="hidden" name="name" value="{{ filter_name }}" />{% endif %}
+            {% if filter_failed %}<input type="hidden" name="failed" value="true" />{% endif %}
+            {% if filter_session %}<input type="hidden" name="session" value="{{ filter_session }}" />{% endif %}
+            {% if filter_project %}<input type="hidden" name="project" value="{{ filter_project }}" />{% endif %}
+            <input type="search" name="q" value="{{ filter_q }}" placeholder="Search description / input..." style="padding:0.4rem 0.6rem;border:1px solid #ccc;border-radius:4px;font-size:0.85rem;width:200px;" />
+            <button type="submit" style="padding:0.4rem 0.6rem;font-size:0.85rem;">Search</button>
+        </form>
+        <select onchange="window.location='/tools?{{ tool_qs(page=1) }}'.replace('project={{ filter_project }}', 'project='+encodeURIComponent(this.value))" style="padding:0.4rem 0.6rem;border:1px solid #ccc;border-radius:4px;font-size:0.85rem;">
+            <option value="">All projects</option>
+            {% for p in projects %}
+            <option value="{{ p }}" {{ 'selected' if p == filter_project else '' }}>{{ p }}</option>
+            {% endfor %}
+        </select>
         <a href="/tools?{{ tool_qs(name=filter_name, failed=not filter_failed) }}"
            hx-get="/tools?{{ tool_qs(name=filter_name, failed=not filter_failed) }}"
            hx-target="#content" hx-push-url="true"
@@ -40,6 +54,14 @@
            class="tool-btn tool-btn-sm tool-btn-active"
            title="{{ filter_session }}">
             Session: {{ filter_session[:12] }}... &times;
+        </a>
+        {% endif %}
+        {% if filter_q %}
+        <a href="/tools?{{ tool_qs(q='') }}"
+           hx-get="/tools?{{ tool_qs(q='') }}"
+           hx-target="#content" hx-push-url="true"
+           class="tool-btn tool-btn-sm tool-btn-active">
+            Search: {{ filter_q[:20] }}{% if filter_q|length > 20 %}...{% endif %} &times;
         </a>
         {% endif %}
     </div>
@@ -63,6 +85,7 @@
         <thead>
             <tr>
                 <th>Session</th>
+                <th>Project</th>
                 <th>Called At</th>
                 <th>Tool</th>
                 <th>Status</th>
@@ -75,6 +98,7 @@
             {% for tc in tool_calls %}
             <tr>
                 <td><a href="/sessions/{{ tc[0] }}#tc-{{ tc[8] }}" hx-get="/sessions/{{ tc[0] }}" hx-target="#content" hx-push-url="/sessions/{{ tc[0] }}#tc-{{ tc[8] }}"><span class="truncate" style="max-width:250px;" title="{{ clean_title(tc[7] or '')|e }}">{{ (clean_title(tc[7] or '') or (tc[0]|string)[:12] + '...')|truncate(50) }}</span></a></td>
+                <td>{{ tc[9] or '' }}</td>
                 <td style="white-space:nowrap;">{{ tc[1] }}</td>
                 <td>{{ tc[2] or '' }}</td>
                 <td>
