@@ -37,11 +37,21 @@ SESSIONS_SORT_DEFAULT = "started_at"
 RAW_PER_PAGE = 20
 
 _XML_TAG_RE = re.compile(r"<[^>]+>")
+# <command-message> duplicates the <command-name> for slash-command / skill
+# invocations (e.g. "<command-name>marimo-pair</command-name>"
+# "<command-message>/marimo-pair</command-message>"), so drop it entirely
+# instead of leaving the repeated name in the title.
+_COMMAND_MESSAGE_RE = re.compile(r"<command-message>.*?</command-message>", re.DOTALL)
 
 
 def clean_title(raw: str) -> str:
     """Strip all XML-style tags from session titles."""
-    return _XML_TAG_RE.sub("", raw).strip()
+    without_msg = _COMMAND_MESSAGE_RE.sub("", raw)
+    # Replace tags with a space so adjacent block contents don't run together
+    # (e.g. "<command-name>commit</command-name><command-args>fix</command-args>"
+    # becomes "commit fix", not "commitfix"); then collapse whitespace runs.
+    detagged = _XML_TAG_RE.sub(" ", without_msg)
+    return " ".join(detagged.split())
 
 
 def parent(request: Request) -> str:

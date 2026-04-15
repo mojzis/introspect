@@ -941,6 +941,24 @@ def test_clean_title_strips_all_xml_tags():
     assert clean_title("before <tag>middle</tag> after") == "before middle after"
 
 
+def test_clean_title_drops_command_message_that_mirrors_command_name():
+    """<command-message> duplicates <command-name>, so it's dropped entirely."""
+    # Skill invocation: command-name and command-message carry the same label.
+    raw = (
+        "<command-name>marimo-pair</command-name>\n"
+        "<command-message>/marimo-pair</command-message>\n"
+        "<command-args></command-args>"
+    )
+    assert clean_title(raw) == "marimo-pair"
+    # With real args attached — tag boundaries become word separators.
+    raw_with_args = (
+        "<command-name>commit</command-name>"
+        "<command-message>/commit</command-message>"
+        "<command-args>fix typo</command-args>"
+    )
+    assert clean_title(raw_with_args) == "commit fix typo"
+
+
 # --- Bash page tests ---
 
 
