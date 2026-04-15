@@ -13,6 +13,13 @@ Explore and search your Claude Code conversation logs using SQL, full-text searc
 uv sync
 ```
 
+Activate the project's virtual environment before running the `introspect`
+commands below (or prefix each one with `uv run`):
+
+```bash
+source .venv/bin/activate
+```
+
 ## Usage
 
 ### CLI
@@ -54,6 +61,21 @@ introspect mcp
 ```
 
 This starts an MCP server over stdio for integration with Claude Code.
+
+Alternatively, the web server exposes the same MCP tools over HTTP at
+`http://127.0.0.1:8000/mcp`. To launch a Claude Code session wired up to it:
+
+```bash
+# In one terminal
+introspect serve
+
+# In another
+uv run poe claude
+```
+
+The `claude` poe task runs `claude --mcp-config .claude/mcp.json`, so the MCP
+server is only registered for that session — no changes to your global Claude
+Code config.
 
 ## Development
 
