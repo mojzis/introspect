@@ -10,6 +10,34 @@ from introspect.projects import resolve_project_map
 DEFAULT_DB_PATH = Path.home() / ".introspect" / "introspect.duckdb"
 DEFAULT_JSONL_GLOB = str(Path.home() / ".claude" / "projects" / "**" / "*.jsonl")
 
+
+class DatabaseLockedError(duckdb.IOException):
+    """Raised when the DuckDB database is locked by another process.
+
+    Inherits from ``duckdb.IOException`` so existing ``except duckdb.IOException``
+    handlers continue to catch it.
+    """
+
+    def __init__(self, db_path: Path):
+        self.db_path = db_path
+        super().__init__(
+            f"Another Introspect process is using the database at {db_path}."
+        )
+
+
+# DuckDB's Python bindings do not expose a lock-specific exception class,
+# so we classify by the error message. Both markers have been stable across
+# DuckDB 0.9 through 1.x; if DuckDB renames them we'll fall back to the raw
+# ``IOException`` (ugly but correct).
+_LOCK_ERROR_MARKERS = ("Conflicting lock", "Could not set lock")
+
+
+def _is_lock_error(exc: duckdb.IOException) -> bool:
+    """Return True if a DuckDB IOException indicates a lock conflict."""
+    msg = str(exc)
+    return any(marker in msg for marker in _LOCK_ERROR_MARKERS)
+
+
 _READ_JSON_OPTS = (
     "filename=true, format='newline_delimited', union_by_name=true, ignore_errors=true"
 )
@@ -57,11 +85,29 @@ def get_connection(
     db_path: Path = DEFAULT_DB_PATH,
     jsonl_glob: str = DEFAULT_JSONL_GLOB,
 ) -> duckdb.DuckDBPyConnection:
-    """Get a DuckDB connection with views created."""
+    """Get a DuckDB connection with views created.
+
+    Raises:
+        DatabaseLockedError: if another process holds a write lock on the DB.
+    """
     db_path.parent.mkdir(parents=True, exist_ok=True)
-    conn = duckdb.connect(str(db_path))
+    conn = connect_writable(db_path)
     _create_views(conn, jsonl_glob)
     return conn
+
+
+def connect_writable(db_path: Path) -> duckdb.DuckDBPyConnection:
+    """Open a writable DuckDB connection, translating lock conflicts.
+
+    Raises:
+        DatabaseLockedError: if another process holds a write lock on the DB.
+    """
+    try:
+        return duckdb.connect(str(db_path))
+    except duckdb.IOException as e:
+        if _is_lock_error(e):
+            raise DatabaseLockedError(db_path) from e
+        raise
 
 
 def materialize_views(
