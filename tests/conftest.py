@@ -6,6 +6,22 @@ from pathlib import Path
 import duckdb
 import pytest
 
+LOCK_ERROR_MESSAGE = (
+    'IO Error: Could not set lock on file "/tmp/fake.duckdb": '
+    "Conflicting lock is held in /tmp/other_proc."
+)
+
+
+@pytest.fixture
+def mock_locked_db(monkeypatch):
+    """Patch duckdb.connect to simulate a 'DB locked by another process' error."""
+
+    def _raise_lock(*args, **kwargs):
+        raise duckdb.IOException(LOCK_ERROR_MESSAGE)
+
+    monkeypatch.setattr("introspect.db.duckdb.connect", _raise_lock)
+    return _raise_lock
+
 
 @pytest.fixture(scope="session", autouse=True)
 def _prewarm_fts_cache():

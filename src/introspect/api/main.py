@@ -12,7 +12,12 @@ from fastapi import FastAPI, Request
 from fastapi.responses import HTMLResponse, JSONResponse
 
 from introspect.api.routes import router
-from introspect.db import DEFAULT_DB_PATH, DEFAULT_JSONL_GLOB, materialize_views
+from introspect.db import (
+    DEFAULT_DB_PATH,
+    DEFAULT_JSONL_GLOB,
+    connect_writable,
+    materialize_views,
+)
 from introspect.mcp.server import create_mcp_server
 from introspect.refresh import refresh_loop
 from introspect.search import build_search_corpus
@@ -26,7 +31,7 @@ async def lifespan(app: FastAPI):
     days = int(os.environ.get("INTROSPECT_DAYS", "10"))
     interval = float(os.environ.get("INTROSPECT_REFRESH_INTERVAL_SECONDS", "30"))
     db_path.parent.mkdir(parents=True, exist_ok=True)
-    conn = duckdb.connect(str(db_path))
+    conn = connect_writable(db_path)
     resolve_projects = os.environ.get("INTROSPECT_RESOLVE_PROJECTS", "1") != "0"
     try:
         materialize_views(conn, jsonl_glob, days, resolve_projects=resolve_projects)

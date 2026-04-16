@@ -9,6 +9,8 @@ from rich.table import Table
 from introspect.db import (
     DEFAULT_DB_PATH,
     DEFAULT_JSONL_GLOB,
+    DatabaseLockedError,
+    connect_writable,
     get_read_connection,
     materialize_views,
 )
@@ -27,6 +29,16 @@ def _truncate_sid(val) -> str:
 
 def _db(db_path: Path = DEFAULT_DB_PATH, jsonl_glob: str = DEFAULT_JSONL_GLOB):
     return get_read_connection(db_path, jsonl_glob)
+
+
+def _print_lock_error(db_path: Path) -> None:
+    """Print the user-facing 'another process has the DB' message."""
+    console.print(
+        "[red]Error:[/red] Another Introspect process is already using the "
+        f"database at [cyan]{db_path}[/cyan].\n"
+        "It looks like a server (or other writer) is running elsewhere — "
+        "stop that instance before starting a new one."
+    )
 
 
 @app.command()
@@ -333,12 +345,14 @@ def materialize(
     ),
 ):
     """Materialize data into DuckDB for fast CLI and MCP queries."""
-    import duckdb  # noqa: PLC0415
-
     db_path = DEFAULT_DB_PATH
     jsonl_glob = DEFAULT_JSONL_GLOB
     db_path.parent.mkdir(parents=True, exist_ok=True)
-    conn = duckdb.connect(str(db_path))
+    try:
+        conn = connect_writable(db_path)
+    except DatabaseLockedError as e:
+        _print_lock_error(e.db_path)
+        raise typer.Exit(code=1) from None
     try:
         if days > 0:
             console.print(f"[dim]Materializing last {days} days of data...[/dim]")
@@ -367,6 +381,18 @@ def _run_web_ui(
     from pathlib import Path  # noqa: PLC0415
 
     import uvicorn  # noqa: PLC0415
+
+    # Preflight: detect "server already running" before handing off to uvicorn,
+    # since a DatabaseLockedError raised from inside the lifespan is surfaced as
+    # an ugly uvicorn startup traceback. Small TOCTOU window here is harmless —
+    # if the first server exits between probe and lifespan, the new one starts.
+    db_path = Path(os.environ.get("INTROSPECT_DB_PATH", str(DEFAULT_DB_PATH)))
+    db_path.parent.mkdir(parents=True, exist_ok=True)
+    try:
+        connect_writable(db_path).close()
+    except DatabaseLockedError as e:
+        _print_lock_error(e.db_path)
+        raise typer.Exit(code=1) from None
 
     os.environ["INTROSPECT_DAYS"] = str(days)
     if no_resolve_projects:

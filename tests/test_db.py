@@ -1,11 +1,20 @@
 """Tests for introspect database views."""
 
+import subprocess
+import sys
 import tempfile
 from pathlib import Path
 
 import duckdb
+import pytest
 
-from introspect.db import get_connection, get_read_connection, materialize_views
+from introspect.db import (
+    DatabaseLockedError,
+    connect_writable,
+    get_connection,
+    get_read_connection,
+    materialize_views,
+)
 
 from .conftest import (
     glob_pattern,
@@ -305,3 +314,92 @@ def test_materialize_views_drops_existing_tables():
         assert "raw_data" in table_names
         assert "raw_messages" in table_names
         conn.close()
+
+
+_DISK_FULL_MSG = "IO Error: Disk is full"
+
+
+def _raise_disk_full(*args, **kwargs):
+    raise duckdb.IOException(_DISK_FULL_MSG)
+
+
+def test_connect_writable_raises_when_locked(mock_locked_db):
+    """connect_writable raises DatabaseLockedError when the DB is locked elsewhere."""
+    db_path = Path("/tmp/fake.duckdb")
+
+    with pytest.raises(DatabaseLockedError) as exc_info:
+        connect_writable(db_path)
+    assert exc_info.value.db_path == db_path
+    assert str(db_path) in str(exc_info.value)
+    # DatabaseLockedError subclasses duckdb.IOException for natural handling
+    assert isinstance(exc_info.value, duckdb.IOException)
+
+
+def test_connect_writable_passes_through_other_io_errors(monkeypatch):
+    """connect_writable re-raises IOExceptions unrelated to lock conflicts."""
+    monkeypatch.setattr("introspect.db.duckdb.connect", _raise_disk_full)
+
+    with pytest.raises(duckdb.IOException) as exc_info:
+        connect_writable(Path("/tmp/fake.duckdb"))
+    assert not isinstance(exc_info.value, DatabaseLockedError)
+
+
+def test_connect_writable_succeeds_when_unlocked():
+    """connect_writable returns a live connection when no writer holds the lock."""
+    with tempfile.TemporaryDirectory() as tmp:
+        db_path = Path(tmp) / "test.duckdb"
+
+        conn = connect_writable(db_path)
+        try:
+            row = conn.execute("SELECT 1").fetchone()
+            assert row == (1,)
+        finally:
+            conn.close()
+
+
+def test_connect_writable_detects_real_cross_process_lock():
+    """Integration test: spawn a subprocess holding the DB, verify we detect it.
+
+    DuckDB enforces its write lock across processes (not within a single
+    process). This test catches the real failure mode that triggered the bug
+    without relying on string-matched mocks.
+    """
+    with tempfile.TemporaryDirectory() as tmp:
+        db_path = Path(tmp) / "test.duckdb"
+        # Spawn a subprocess that opens and holds the DB
+        holder = subprocess.Popen(
+            [
+                sys.executable,
+                "-c",
+                (
+                    "import duckdb, sys, time;"
+                    f"c = duckdb.connect({str(db_path)!r});"
+                    "sys.stdout.write('ready\\n'); sys.stdout.flush();"
+                    "time.sleep(30)"
+                ),
+            ],
+            stdout=subprocess.PIPE,
+            text=True,
+        )
+        try:
+            # Wait for the subprocess to acquire the lock
+            assert holder.stdout is not None
+            ready = holder.stdout.readline()
+            assert ready.strip() == "ready"
+
+            with pytest.raises(DatabaseLockedError) as exc_info:
+                connect_writable(db_path)
+            assert exc_info.value.db_path == db_path
+        finally:
+            holder.terminate()
+            try:
+                holder.wait(timeout=5)
+            except subprocess.TimeoutExpired:
+                holder.kill()
+                holder.wait()
+
+
+def test_get_connection_raises_when_locked(mock_locked_db):
+    """get_connection propagates DatabaseLockedError when the DB is locked."""
+    with pytest.raises(DatabaseLockedError):
+        get_connection(Path("/tmp/fake.duckdb"), "/tmp/*.jsonl")
