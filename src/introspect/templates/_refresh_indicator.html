@@ -22,20 +22,17 @@
 <span id="refresh-state" class="refresh-indicator">
     {% if _disabled %}
         <span class="refresh-muted">auto-refresh off</span>
-    {% elif _in_progress %}
-        <span class="refresh-muted">refreshing&hellip;</span>
+    {% else %}
+        {% if _in_progress %}
+            <span class="refresh-muted">refreshing&hellip;</span>
+        {% else %}
+            <span class="refresh-muted">Last refreshed {{ _relative }}</span>
+        {% endif %}
         <button class="refresh-btn"
                 hx-post="/refresh"
                 hx-target="#refresh-state"
                 hx-swap="outerHTML"
                 hx-disabled-elt="this"
-                disabled>Refresh now</button>
-    {% else %}
-        <span class="refresh-muted">Last refreshed {{ _relative }}</span>
-        <button class="refresh-btn"
-                hx-post="/refresh"
-                hx-target="#refresh-state"
-                hx-swap="outerHTML"
-                hx-disabled-elt="this">Refresh now</button>
+                {% if _in_progress %}disabled{% endif %}>Refresh now</button>
     {% endif %}
 </span>

@@ -79,6 +79,9 @@ def _render(
 async def refresh_now(request: Request) -> HTMLResponse:
     """POST /refresh — wake the background loop and re-render the indicator."""
     state = request.app.state
+    # ``refresh_trigger`` is the only legitimately-optional attribute:
+    # ``lifespan`` omits it when ``INTROSPECT_REFRESH_INTERVAL_SECONDS <= 0``.
+    # ``refresh_in_progress`` and ``last_refreshed_at`` are always initialized.
     trigger: asyncio.Event | None = getattr(state, "refresh_trigger", None)
     if trigger is None:
         return _render(
@@ -93,17 +96,17 @@ async def refresh_now(request: Request) -> HTMLResponse:
     # Wait briefly for the loop to pick up the trigger and flip the flag.
     waited = 0.0
     while waited < _WAIT_FOR_START_SECONDS:
-        if getattr(state, "refresh_in_progress", False):
+        if state.refresh_in_progress:
             break
         await asyncio.sleep(_WAIT_FOR_START_STEP)
         waited += _WAIT_FOR_START_STEP
 
     # If it started, wait for it to finish (short ceiling so the HTTP response
     # stays snappy; indicator may show "refreshing…" if we give up early).
-    if getattr(state, "refresh_in_progress", False):
+    if state.refresh_in_progress:
         waited = 0.0
         while waited < _WAIT_FOR_FINISH_SECONDS:
-            if not getattr(state, "refresh_in_progress", False):
+            if not state.refresh_in_progress:
                 break
             await asyncio.sleep(_WAIT_FOR_FINISH_STEP)
             waited += _WAIT_FOR_FINISH_STEP
@@ -111,6 +114,6 @@ async def refresh_now(request: Request) -> HTMLResponse:
     return _render(
         request,
         disabled=False,
-        in_progress=bool(getattr(state, "refresh_in_progress", False)),
-        last_refreshed_at=getattr(state, "last_refreshed_at", None),
+        in_progress=bool(state.refresh_in_progress),
+        last_refreshed_at=state.last_refreshed_at,
     )
