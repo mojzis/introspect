@@ -1454,7 +1454,13 @@ def _subagent_jsonl(tmp_dir: Path, session_id: str) -> Path:
 
 
 def test_session_cost_subagent_attribution():
-    """Sidechain assistant messages with cc tokens should appear as 'subagent'."""
+    """Sidechain rows feed the Subagent column orthogonally to category.
+
+    The fixture's sidechain assistant message has no preceding tool_use_id,
+    so it classifies as Conversation/human input — but lands under the
+    Subagent agent column rather than collapsing into a flat "Subagent"
+    category. That's the orthogonality contract.
+    """
     sid = "subagent-session-0000-0000-000000000001"
     with tempfile.TemporaryDirectory() as tmp_str:
         tmp = Path(tmp_str)
@@ -1474,7 +1480,12 @@ def test_session_cost_subagent_attribution():
             response = client.get(f"/sessions/{sid}?tab=cost")
             assert response.status_code == 200
             text = response.text
-            assert "subagent" in text.lower()
+            # Subagent appears as a column header AND in the agent column.
+            assert "Subagent" in text
+            # The orthogonal categories are still present (no flat "Subagent" cat).
+            assert "Read" in text
+            assert "Created" in text
+            assert "Conversation" in text
 
 
 def test_fetch_token_usage_dedup():

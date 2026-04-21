@@ -349,8 +349,11 @@ _CUMULATIVE_MAX_BUCKETS = 120
 _CUMULATIVE_RAW_THRESHOLD = 200
 _BLOAT_TOP_N = 20
 _BLOAT_BASH_FIRST_WORD_MAX = 32
-# Buckets for the "Read vs Created vs Conversation vs Subagent" headline roll-up.
-_BLOAT_CATEGORIES = ("Read", "Created", "Conversation", "Subagent")
+# Categories describe what the new context tokens *are* (orthogonal to the
+# main-vs-subagent split, which is tracked separately — subagents do reads,
+# writes, and conversation too).
+_BLOAT_CATEGORIES = ("Read", "Created", "Conversation")
+_BLOAT_AGENTS = ("Main", "Subagent")
 
 
 def _basename(path: str | None) -> str:
@@ -380,16 +383,17 @@ _BLOAT_BASH_DISPATCHERS = frozenset(
 )
 
 
-def _classify_bloat(  # noqa: PLR0911
+def _classify_bucket(  # noqa: PLR0911
     *,
-    is_sidechain: bool,
     tool_name: str | None,
     tool_input_raw: str | None,
     user_block_type: str | None,
 ) -> tuple[str, str]:
-    """Return (bucket, category) for one assistant message's bloat row."""
-    if is_sidechain:
-        return ("subagent", "Subagent")
+    """Return (bucket_label, category) for one bloat row.
+
+    Independent of main-vs-subagent: subagents do reads, writes, and
+    conversation too. The agent dimension is added by the caller.
+    """
     if tool_name:
         if tool_name == "Read":
             d = _safe_json(tool_input_raw)
@@ -474,10 +478,16 @@ def _aggregate_per_model(rows: list[tuple]) -> tuple[list[dict], list[tuple], fl
 
 
 def _aggregate_bloat(rows: list[tuple]) -> tuple[dict, dict]:
-    """Aggregate bloat rows into bucket_totals and category_totals dicts."""
-    bucket_totals: dict[str, dict] = {}
-    category_totals: dict[str, dict] = {
-        c: {"category": c, "tokens": 0, "cost_usd": 0.0} for c in _BLOAT_CATEGORIES
+    """Aggregate bloat rows into bucket_totals and category_totals dicts.
+
+    Both dicts are keyed by (label, agent) so the main vs. subagent split is
+    preserved as an orthogonal dimension, not collapsed into one category.
+    """
+    bucket_totals: dict[tuple[str, str], dict] = {}
+    category_totals: dict[tuple[str, str], dict] = {
+        (c, a): {"category": c, "agent": a, "tokens": 0, "cost_usd": 0.0}
+        for c in _BLOAT_CATEGORIES
+        for a in _BLOAT_AGENTS
     }
     for bloat_row in rows:
         (
@@ -503,18 +513,24 @@ def _aggregate_bloat(rows: list[tuple]) -> tuple[dict, dict]:
             cache_creation_5m=eff_5m,
             cache_creation_1h=eff_1h,
         )
-        bucket, category = _classify_bloat(
-            is_sidechain=bool(is_side),
+        bucket, category = _classify_bucket(
             tool_name=tool_name,
             tool_input_raw=tool_input_raw,
             user_block_type=user_block_type,
         )
-        cat_entry = category_totals[category]
+        agent = "Subagent" if is_side else "Main"
+        cat_entry = category_totals[(category, agent)]
         cat_entry["tokens"] += cc_total
         cat_entry["cost_usd"] += cost
         bucket_entry = bucket_totals.setdefault(
-            bucket,
-            {"bucket": bucket, "category": category, "tokens": 0, "cost_usd": 0.0},
+            (bucket, agent),
+            {
+                "bucket": bucket,
+                "category": category,
+                "agent": agent,
+                "tokens": 0,
+                "cost_usd": 0.0,
+            },
         )
         bucket_entry["tokens"] += cc_total
         bucket_entry["cost_usd"] += cost
@@ -612,16 +628,62 @@ def _build_cost_context(db, session_id: str) -> dict:
     total_bloat_tokens = raw_tokens or 1
     total_bloat_cost = sum(c["cost_usd"] for c in category_totals.values())
 
-    rollup = [
-        {
-            "category": c,
-            "tokens": category_totals[c]["tokens"],
-            "cost_usd": category_totals[c]["cost_usd"],
-            "cost": format_cost(category_totals[c]["cost_usd"]),
-            "pct": 100.0 * category_totals[c]["tokens"] / total_bloat_tokens,
+    def _cell(category: str, agent: str) -> dict:
+        entry = category_totals[(category, agent)]
+        return {
+            "tokens": entry["tokens"],
+            "cost_usd": entry["cost_usd"],
+            "cost": format_cost(entry["cost_usd"]),
+            "pct": 100.0 * entry["tokens"] / total_bloat_tokens,
         }
-        for c in _BLOAT_CATEGORIES
-    ]
+
+    rollup = []
+    for category in _BLOAT_CATEGORIES:
+        main = _cell(category, "Main")
+        sub = _cell(category, "Subagent")
+        total_tokens = main["tokens"] + sub["tokens"]
+        total_cost_cat = main["cost_usd"] + sub["cost_usd"]
+        rollup.append(
+            {
+                "category": category,
+                "main": main,
+                "subagent": sub,
+                "total": {
+                    "tokens": total_tokens,
+                    "cost_usd": total_cost_cat,
+                    "cost": format_cost(total_cost_cat),
+                    "pct": 100.0 * total_tokens / total_bloat_tokens,
+                },
+            }
+        )
+
+    agent_totals = {
+        agent: {
+            "tokens": sum(
+                category_totals[(c, agent)]["tokens"] for c in _BLOAT_CATEGORIES
+            ),
+            "cost_usd": sum(
+                category_totals[(c, agent)]["cost_usd"] for c in _BLOAT_CATEGORIES
+            ),
+        }
+        for agent in _BLOAT_AGENTS
+    }
+    rollup_totals = {
+        "main": {
+            "tokens": agent_totals["Main"]["tokens"],
+            "cost": format_cost(agent_totals["Main"]["cost_usd"]),
+            "pct": 100.0 * agent_totals["Main"]["tokens"] / total_bloat_tokens,
+        },
+        "subagent": {
+            "tokens": agent_totals["Subagent"]["tokens"],
+            "cost": format_cost(agent_totals["Subagent"]["cost_usd"]),
+            "pct": 100.0 * agent_totals["Subagent"]["tokens"] / total_bloat_tokens,
+        },
+        "total": {
+            "tokens": raw_tokens,
+            "cost": format_cost(total_bloat_cost),
+        },
+    }
 
     sorted_buckets = sorted(
         bucket_totals.values(), key=lambda d: d["tokens"], reverse=True
@@ -631,6 +693,7 @@ def _build_cost_context(db, session_id: str) -> dict:
         {
             "bucket": bucket["bucket"],
             "category": bucket["category"],
+            "agent": bucket["agent"],
             "tokens": bucket["tokens"],
             "cost_usd": bucket["cost_usd"],
             "cost": format_cost(bucket["cost_usd"]),
@@ -645,6 +708,7 @@ def _build_cost_context(db, session_id: str) -> dict:
         "total_cost": format_cost(total_cost),
         "sparkline": sparkline,
         "bloat_rollup": rollup,
+        "bloat_rollup_totals": rollup_totals,
         "bloat_top_buckets": top_buckets_view,
         "bloat_extra_count": extra_count,
         "bloat_total_tokens": raw_tokens,

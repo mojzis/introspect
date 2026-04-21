@@ -51,27 +51,50 @@
     {% endif %}
 </div>
 
-<h2>Bloat attribution — Read vs Created</h2>
+<h2>Bloat attribution — what added context</h2>
 <div class="card">
-    <p style="color:#888;margin:0 0 0.6rem;">Where new context tokens (cache writes) came from. Cost shown is the cache-write portion only — see the per-model table above for the full session cost. Total accounted: {{ "{:,}".format(cost_ctx.bloat_total_tokens) }} tokens / {{ cost_ctx.bloat_total_cost }} of cache writes.</p>
+    <p style="color:#888;margin:0 0 0.6rem;">Where new context tokens (cache writes) came from. Categories describe <em>what</em> was added; the Main/Subagent split shows <em>which agent</em> caused it (subagents do reads, writes, and conversation too). Cost is the cache-write portion only — see the per-model table above for the full session cost. Total accounted: {{ "{:,}".format(cost_ctx.bloat_total_tokens) }} tokens / {{ cost_ctx.bloat_total_cost }} of cache writes.</p>
     <table>
         <thead>
             <tr>
-                <th>Category</th>
-                <th style="text-align:right;">Tokens added</th>
-                <th style="text-align:right;">Cache write cost</th>
-                <th style="text-align:right;">% of cache writes</th>
+                <th rowspan="2">Category</th>
+                <th colspan="2" style="text-align:center;border-left:1px solid #ddd;">Main agent</th>
+                <th colspan="2" style="text-align:center;border-left:1px solid #ddd;">Subagent</th>
+                <th colspan="3" style="text-align:center;border-left:1px solid #ddd;">Total</th>
+            </tr>
+            <tr>
+                <th style="text-align:right;border-left:1px solid #ddd;">Tokens</th>
+                <th style="text-align:right;">Cost</th>
+                <th style="text-align:right;border-left:1px solid #ddd;">Tokens</th>
+                <th style="text-align:right;">Cost</th>
+                <th style="text-align:right;border-left:1px solid #ddd;">Tokens</th>
+                <th style="text-align:right;">Cost</th>
+                <th style="text-align:right;">%</th>
             </tr>
         </thead>
         <tbody>
             {% for r in cost_ctx.bloat_rollup %}
             <tr>
                 <td><strong>{{ r.category }}</strong></td>
-                <td style="text-align:right;">{{ "{:,}".format(r.tokens) }}</td>
-                <td style="text-align:right;">{{ r.cost }}</td>
-                <td style="text-align:right;">{{ "%.1f"|format(r.pct) }}%</td>
+                <td style="text-align:right;border-left:1px solid #ddd;">{{ "{:,}".format(r.main.tokens) }}</td>
+                <td style="text-align:right;">{{ r.main.cost }}</td>
+                <td style="text-align:right;border-left:1px solid #ddd;">{{ "{:,}".format(r.subagent.tokens) }}</td>
+                <td style="text-align:right;">{{ r.subagent.cost }}</td>
+                <td style="text-align:right;border-left:1px solid #ddd;">{{ "{:,}".format(r.total.tokens) }}</td>
+                <td style="text-align:right;">{{ r.total.cost }}</td>
+                <td style="text-align:right;">{{ "%.1f"|format(r.total.pct) }}%</td>
             </tr>
             {% endfor %}
+            <tr style="border-top:2px solid #ccc;font-weight:600;">
+                <td>Total</td>
+                <td style="text-align:right;border-left:1px solid #ddd;">{{ "{:,}".format(cost_ctx.bloat_rollup_totals.main.tokens) }}</td>
+                <td style="text-align:right;">{{ cost_ctx.bloat_rollup_totals.main.cost }}</td>
+                <td style="text-align:right;border-left:1px solid #ddd;">{{ "{:,}".format(cost_ctx.bloat_rollup_totals.subagent.tokens) }}</td>
+                <td style="text-align:right;">{{ cost_ctx.bloat_rollup_totals.subagent.cost }}</td>
+                <td style="text-align:right;border-left:1px solid #ddd;">{{ "{:,}".format(cost_ctx.bloat_rollup_totals.total.tokens) }}</td>
+                <td style="text-align:right;">{{ cost_ctx.bloat_rollup_totals.total.cost }}</td>
+                <td style="text-align:right;">100.0%</td>
+            </tr>
         </tbody>
     </table>
 </div>
@@ -84,6 +107,7 @@
             <tr>
                 <th>Bucket</th>
                 <th>Category</th>
+                <th>Agent</th>
                 <th style="text-align:right;">Tokens</th>
                 <th style="text-align:right;">Cache write cost</th>
                 <th style="text-align:right;">% of cache writes</th>
@@ -94,6 +118,7 @@
             <tr>
                 <td>{{ b.bucket }}</td>
                 <td>{{ b.category }}</td>
+                <td>{{ b.agent }}</td>
                 <td style="text-align:right;">{{ "{:,}".format(b.tokens) }}</td>
                 <td style="text-align:right;">{{ b.cost }}</td>
                 <td style="text-align:right;">{{ "%.1f"|format(b.pct) }}%</td>
