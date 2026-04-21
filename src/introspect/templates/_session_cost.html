@@ -51,6 +51,11 @@
             <button type="button" class="tool-btn tool-btn-sm"
                     :class="view === 'agent' ? 'tool-btn-active' : ''"
                     @click="view = 'agent'">By agent</button>
+            {% if cost_ctx.chart.has_subagents %}
+            <button type="button" class="tool-btn tool-btn-sm"
+                    :class="view === 'invocations' ? 'tool-btn-active' : ''"
+                    @click="view = 'invocations'">By invocation</button>
+            {% endif %}
             <button type="button" class="tool-btn tool-btn-sm"
                     :class="view === 'category' ? 'tool-btn-active' : ''"
                     @click="view = 'category'">By category</button>
@@ -61,33 +66,63 @@
              style="width:100%;height:160px;display:block;">
             <g x-show="view === 'total'" style="display:none;">
                 <polyline fill="none" stroke="#3b5bdb" stroke-width="1.5"
+                          vector-effect="non-scaling-stroke"
                           points="{{ cost_ctx.chart.polylines.total }}" />
             </g>
             <g x-show="view === 'agent'" style="display:none;">
                 <polyline fill="none" stroke="#3b5bdb" stroke-width="1.5"
+                          vector-effect="non-scaling-stroke"
                           points="{{ cost_ctx.chart.polylines.main }}" />
                 <polyline fill="none" stroke="#8a5ad0" stroke-width="1.5"
+                          vector-effect="non-scaling-stroke"
                           points="{{ cost_ctx.chart.polylines.sub }}" />
             </g>
+            {% if cost_ctx.chart.has_subagents %}
+            <g x-show="view === 'invocations'" style="display:none;">
+                {% for s in cost_ctx.chart.invocation_series %}
+                <polyline fill="none" stroke="{{ s.color }}" stroke-width="1.5"
+                          vector-effect="non-scaling-stroke"
+                          points="{{ cost_ctx.chart.polylines[s.key] }}" />
+                {% endfor %}
+            </g>
+            {% endif %}
             <g x-show="view === 'category'" style="display:none;">
                 <polyline fill="none" stroke="#c86b1a" stroke-width="1.5"
+                          vector-effect="non-scaling-stroke"
                           points="{{ cost_ctx.chart.polylines.read }}" />
                 <polyline fill="none" stroke="#2e8b57" stroke-width="1.5"
+                          vector-effect="non-scaling-stroke"
                           points="{{ cost_ctx.chart.polylines.created }}" />
                 <polyline fill="none" stroke="#5a6e9a" stroke-width="1.5"
+                          vector-effect="non-scaling-stroke"
                           points="{{ cost_ctx.chart.polylines.conversation }}" />
             </g>
-            <g>
+            {# Markers: one <g> per view so each tick lands on the owning series' line. #}
+            {# Vertical ticks (not circles) — preserveAspectRatio="none" stretches the #}
+            {# x-axis, which would deform circles into ellipses. Ticks plus              #}
+            {# vector-effect=non-scaling-stroke render at a consistent pixel weight.    #}
+            {% set tick_half = 7 %}
+            {% macro marker_group(view_name, y_key) -%}
+            <g x-show="view === '{{ view_name }}'" style="display:none;">
                 {% for mk in cost_ctx.chart.markers %}
                 <a href="/sessions/{{ session_id }}?tab=messages#msg-{{ mk.uuid }}">
-                    <circle cx="{{ mk.x }}" cy="{{ mk.y }}" r="4" fill="#fff"
-                            stroke="{% if mk.kind == 'spike' %}#c62828{% else %}#c0a000{% endif %}"
-                            stroke-width="2">
+                    <line x1="{{ mk.x }}" x2="{{ mk.x }}"
+                          y1="{{ mk[y_key] - tick_half }}" y2="{{ mk[y_key] + tick_half }}"
+                          stroke="{% if mk.kind == 'spike' %}#c62828{% else %}#c0a000{% endif %}"
+                          stroke-width="2.5" stroke-linecap="round"
+                          vector-effect="non-scaling-stroke">
                         <title>{{ mk.kind }} · inc {{ mk.inc_cost }} · cum {{ mk.cum_cost }}</title>
-                    </circle>
+                    </line>
                 </a>
                 {% endfor %}
             </g>
+            {%- endmacro %}
+            {{ marker_group('total', 'y_total') }}
+            {{ marker_group('agent', 'y_agent') }}
+            {% if cost_ctx.chart.has_subagents %}
+            {{ marker_group('invocations', 'y_invocation') }}
+            {% endif %}
+            {{ marker_group('category', 'y_category') }}
         </svg>
         <div style="margin:0.4rem 0 0;font-size:0.85rem;color:#555;display:flex;gap:1rem;flex-wrap:wrap;">
             <span x-show="view === 'total'" style="display:none;"><span style="display:inline-block;width:10px;height:10px;background:#3b5bdb;margin-right:0.25rem;"></span>Total</span>
@@ -95,6 +130,13 @@
                 <span><span style="display:inline-block;width:10px;height:10px;background:#3b5bdb;margin-right:0.25rem;"></span>Main</span>
                 <span style="margin-left:1rem;"><span style="display:inline-block;width:10px;height:10px;background:#8a5ad0;margin-right:0.25rem;"></span>Subagent</span>
             </span>
+            {% if cost_ctx.chart.has_subagents %}
+            <span x-show="view === 'invocations'" style="display:none;flex-wrap:wrap;">
+                {% for s in cost_ctx.chart.invocation_series %}
+                <span style="margin-right:1rem;"><span style="display:inline-block;width:10px;height:10px;background:{{ s.color }};margin-right:0.25rem;"></span>{{ s.name }} · {{ s.cost }}</span>
+                {% endfor %}
+            </span>
+            {% endif %}
             <span x-show="view === 'category'" style="display:none;gap:1rem;">
                 <span><span style="display:inline-block;width:10px;height:10px;background:#c86b1a;margin-right:0.25rem;"></span>Read</span>
                 <span style="margin-left:1rem;"><span style="display:inline-block;width:10px;height:10px;background:#2e8b57;margin-right:0.25rem;"></span>Created</span>
@@ -107,6 +149,41 @@
     <p>No cost data to chart.</p>
     {% endif %}
 </div>
+
+{% if cost_ctx.chart.invocation_summary %}
+<h2>Subagent invocations by cost</h2>
+<div class="card">
+    <p style="color:#888;margin:0 0 0.6rem;">One row per Task/Agent call, ranked by cost. The top {{ cost_ctx.chart.invocation_summary | length if cost_ctx.chart.invocation_summary | length < 12 else 12 }} also appear as individual lines in the chart's <em>By invocation</em> view — outliers here are the "bad apples" to investigate.</p>
+    <table>
+        <thead>
+            <tr>
+                <th style="text-align:right;">#</th>
+                <th></th>
+                <th>Subagent type</th>
+                <th style="text-align:right;">Messages</th>
+                <th style="text-align:right;">Cost</th>
+            </tr>
+        </thead>
+        <tbody>
+            {% for inv in cost_ctx.chart.invocation_summary %}
+            <tr>
+                <td style="text-align:right;">{{ inv.rank }}</td>
+                <td><span style="display:inline-block;width:10px;height:10px;background:{{ inv.color }};"></span></td>
+                <td>
+                    {% if inv.first_uuid %}
+                    <a href="/sessions/{{ session_id }}?tab=messages#msg-{{ inv.first_uuid }}">{{ inv.subagent_type }}</a>
+                    {% else %}
+                    {{ inv.subagent_type }}
+                    {% endif %}
+                </td>
+                <td style="text-align:right;">{{ "{:,}".format(inv.messages) }}</td>
+                <td style="text-align:right;">{{ inv.cost }}</td>
+            </tr>
+            {% endfor %}
+        </tbody>
+    </table>
+</div>
+{% endif %}
 
 <h2>Bloat attribution — what added context</h2>
 <div class="card">
