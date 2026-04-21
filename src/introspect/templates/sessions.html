@@ -104,7 +104,7 @@ page={{ page }}&page_size={{ page_size }}&sort={{ sort }}&order={{ order }}&mode
                 <td>{{ s.files_read_only }}</td>
                 <td>{{ s.files_outside }}</td>
                 <td>{% if s.commands %}{% for c in s.commands.split(', ') %}<span class="tool-btn tool-btn-sm" style="font-size:0.75rem;padding:0.1rem 0.4rem;margin:0.1rem;">{{ c }}</span>{% endfor %}{% endif %}</td>
-                <td style="white-space:nowrap;text-align:right;">{{ s.cost or '—' }}</td>
+                <td style="white-space:nowrap;text-align:right;">{% if s.cost %}<a href="/sessions/{{ s.id }}?tab=cost" hx-get="/sessions/{{ s.id }}?tab=cost" hx-target="#content" hx-push-url="true">{{ s.cost }}</a>{% else %}—{% endif %}</td>
                 <td>{{ s.model }}</td>
             </tr>
             {% endfor %}

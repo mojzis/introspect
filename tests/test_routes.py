@@ -1209,6 +1209,14 @@ def test_sessions_shows_cost_column():
         assert "$" in response.text
 
 
+def test_sessions_cost_links_to_cost_tab():
+    """Cost cell wraps the value in a link to the session detail Cost tab."""
+    with tempfile.TemporaryDirectory() as tmp, _patched_client(Path(tmp)) as client:
+        response = client.get("/sessions")
+        assert response.status_code == 200
+        assert f'href="/sessions/{SID}?tab=cost"' in response.text
+
+
 def test_sessions_sort_by_cost():
     """Sessions list accepts ?sort=cost without erroring."""
     with tempfile.TemporaryDirectory() as tmp, _patched_client(Path(tmp)) as client:
