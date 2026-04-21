@@ -828,15 +828,17 @@ def test_session_detail_assistant_token_badge():
             assert response.status_code == 200
             text = response.text
             assert "token-badge" in text
-            # Compact form: omit zero components, use arrow + ⚡ glyphs.
+            # Compact form: omit zero components, use arrow + ⚡/✎ glyphs.
             assert "↓" in text
             assert "↑" in text
             assert "⚡" in text
+            assert "✎" in text
             # Detailed tooltip includes raw counts.
             assert "Input:" in text
             assert "Output:" in text
             assert "2,134" in text
             assert "180" in text
+            assert "5,120" in text
 
 
 # --- Stats enrichment tests ---

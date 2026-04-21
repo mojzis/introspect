@@ -167,6 +167,32 @@ def _format_tokens_compact(count: int) -> str:
     )
 
 
+def _token_badge_strings(
+    tokens_in: int, tokens_out: int, cache_read: int, cache_create: int
+) -> tuple[str, str]:
+    """Return ``(compact_summary, detailed_title)`` for the per-turn token badge.
+
+    ``compact_summary`` is empty when all counts are zero. Zero components are
+    omitted from the compact form; the tooltip always lists the full breakdown.
+    """
+    if not (tokens_in or tokens_out or cache_read or cache_create):
+        return "", ""
+    parts: list[str] = []
+    if tokens_in:
+        parts.append(f"↓{_format_tokens_compact(tokens_in)}")
+    if tokens_out:
+        parts.append(f"↑{_format_tokens_compact(tokens_out)}")
+    if cache_read:
+        parts.append(f"⚡{_format_tokens_compact(cache_read)}")
+    if cache_create:
+        parts.append(f"✎{_format_tokens_compact(cache_create)}")
+    title = (
+        f"Input: {tokens_in:,} · Output: {tokens_out:,} "
+        f"· Cache read: {cache_read:,} · Cache create: {cache_create:,}"
+    )
+    return " ".join(parts), title
+
+
 def _collapse_info(
     text: object,
     *,
@@ -392,34 +418,16 @@ def _build_messages_context(db, session_id: str) -> list[dict]:
             _collapse_info(capped_tool_result)
         )
 
-        tokens_in = int(rec["input_tokens"] or 0)
-        tokens_out = int(rec["output_tokens"] or 0)
-        cache_read = int(rec["cache_read_tokens"] or 0)
-        cache_create = int(rec["cache_creation_tokens"] or 0)
-
         is_assistant_entry = kind in ("agent_text", "agent_thinking")
-        show_tokens = (
-            is_first
-            and is_assistant_entry
-            and (tokens_in or tokens_out or cache_read or cache_create)
-        )
-        if show_tokens:
-            parts: list[str] = []
-            if tokens_in:
-                parts.append(f"↓{_format_tokens_compact(tokens_in)}")
-            if tokens_out:
-                parts.append(f"↑{_format_tokens_compact(tokens_out)}")
-            if cache_read:
-                parts.append(f"⚡{_format_tokens_compact(cache_read)}")
-            tokens_summary = " ".join(parts)
-            tokens_title = (
-                f"Input: {tokens_in:,} · Output: {tokens_out:,} "
-                f"· Cache read: {cache_read:,} "
-                f"· Cache create: {cache_create:,}"
+        if is_first and is_assistant_entry:
+            tokens_summary, tokens_title = _token_badge_strings(
+                int(rec["input_tokens"] or 0),
+                int(rec["output_tokens"] or 0),
+                int(rec["cache_read_tokens"] or 0),
+                int(rec["cache_creation_tokens"] or 0),
             )
         else:
-            tokens_summary = ""
-            tokens_title = ""
+            tokens_summary, tokens_title = "", ""
 
         ts = rec["timestamp"]
         if ts is not None and hasattr(ts, "strftime"):
