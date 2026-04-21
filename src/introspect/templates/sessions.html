@@ -82,6 +82,7 @@ page={{ page }}&page_size={{ page_size }}&sort={{ sort }}&order={{ order }}&mode
                 {{ sort_header('Read Only', 'files_read_only') }}
                 {{ sort_header('Outside', 'files_outside') }}
                 <th>Commands</th>
+                {{ sort_header('Cost', 'cost') }}
                 {{ sort_header('Model', 'model') }}
             </tr>
         </thead>
@@ -103,6 +104,7 @@ page={{ page }}&page_size={{ page_size }}&sort={{ sort }}&order={{ order }}&mode
                 <td>{{ s.files_read_only }}</td>
                 <td>{{ s.files_outside }}</td>
                 <td>{% if s.commands %}{% for c in s.commands.split(', ') %}<span class="tool-btn tool-btn-sm" style="font-size:0.75rem;padding:0.1rem 0.4rem;margin:0.1rem;">{{ c }}</span>{% endfor %}{% endif %}</td>
+                <td style="white-space:nowrap;text-align:right;">{{ s.cost or '—' }}</td>
                 <td>{{ s.model }}</td>
             </tr>
             {% endfor %}

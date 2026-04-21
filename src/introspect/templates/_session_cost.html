@@ -1,0 +1,112 @@
+{% if not cost_ctx.has_data %}
+<div class="card"><p>No assistant messages yet — nothing to cost.</p></div>
+{% else %}
+
+<div class="card">
+    <h2>Estimated cost: {{ cost_ctx.total_cost }}</h2>
+    <p style="color:#888;margin:0;">Prices are 2026-04-21 list rates per Anthropic's pricing page. Synthetic / unknown models bill as $0.</p>
+</div>
+
+<h2>Per-model breakdown</h2>
+<div class="card">
+    <table>
+        <thead>
+            <tr>
+                <th>Model</th>
+                <th style="text-align:right;">Messages</th>
+                <th style="text-align:right;">Input</th>
+                <th style="text-align:right;">Output</th>
+                <th style="text-align:right;">Cache read</th>
+                <th style="text-align:right;">Cache write 5m</th>
+                <th style="text-align:right;">Cache write 1h</th>
+                <th style="text-align:right;">Cost</th>
+            </tr>
+        </thead>
+        <tbody>
+            {% for m in cost_ctx.per_model %}
+            <tr>
+                <td>{{ m.model }}</td>
+                <td style="text-align:right;">{{ "{:,}".format(m.messages) }}</td>
+                <td style="text-align:right;">{{ "{:,}".format(m.input) }}</td>
+                <td style="text-align:right;">{{ "{:,}".format(m.output) }}</td>
+                <td style="text-align:right;">{{ "{:,}".format(m.cache_read) }}</td>
+                <td style="text-align:right;">{{ "{:,}".format(m.cache_creation_5m) }}</td>
+                <td style="text-align:right;">{{ "{:,}".format(m.cache_creation_1h) }}</td>
+                <td style="text-align:right;">{{ m.cost }}</td>
+            </tr>
+            {% endfor %}
+        </tbody>
+    </table>
+</div>
+
+<h2>Cumulative cost over time</h2>
+<div class="card">
+    {% if cost_ctx.sparkline.polyline %}
+    <svg viewBox="0 0 {{ cost_ctx.sparkline.width }} {{ cost_ctx.sparkline.height }}" width="100%" preserveAspectRatio="none" style="height:120px;display:block;">
+        <polyline fill="none" stroke="#3b5bdb" stroke-width="1.5" points="{{ cost_ctx.sparkline.polyline }}" />
+    </svg>
+    <p style="color:#888;margin:0.4rem 0 0;font-size:0.85rem;">{{ cost_ctx.sparkline.messages }} messages{% if cost_ctx.sparkline.points != cost_ctx.sparkline.messages %} (bucketed to {{ cost_ctx.sparkline.points }} points){% endif %} — peak {{ cost_ctx.total_cost }}</p>
+    {% else %}
+    <p>No cost data to chart.</p>
+    {% endif %}
+</div>
+
+<h2>Bloat attribution — Read vs Created</h2>
+<div class="card">
+    <p style="color:#888;margin:0 0 0.6rem;">Where new context tokens came from. Total accounted: {{ "{:,}".format(cost_ctx.bloat_total_tokens) }} tokens / {{ cost_ctx.bloat_total_cost }}.</p>
+    <table>
+        <thead>
+            <tr>
+                <th>Category</th>
+                <th style="text-align:right;">Tokens added</th>
+                <th style="text-align:right;">Cost</th>
+                <th style="text-align:right;">% of session</th>
+            </tr>
+        </thead>
+        <tbody>
+            {% for r in cost_ctx.bloat_rollup %}
+            <tr>
+                <td><strong>{{ r.category }}</strong></td>
+                <td style="text-align:right;">{{ "{:,}".format(r.tokens) }}</td>
+                <td style="text-align:right;">{{ r.cost }}</td>
+                <td style="text-align:right;">{{ "%.1f"|format(r.pct) }}%</td>
+            </tr>
+            {% endfor %}
+        </tbody>
+    </table>
+</div>
+
+<h2>Top contributors</h2>
+<div class="card">
+    {% if cost_ctx.bloat_top_buckets %}
+    <table>
+        <thead>
+            <tr>
+                <th>Bucket</th>
+                <th>Category</th>
+                <th style="text-align:right;">Tokens</th>
+                <th style="text-align:right;">Cost</th>
+                <th style="text-align:right;">% of session</th>
+            </tr>
+        </thead>
+        <tbody>
+            {% for b in cost_ctx.bloat_top_buckets %}
+            <tr>
+                <td>{{ b.bucket }}</td>
+                <td>{{ b.category }}</td>
+                <td style="text-align:right;">{{ "{:,}".format(b.tokens) }}</td>
+                <td style="text-align:right;">{{ b.cost }}</td>
+                <td style="text-align:right;">{{ "%.1f"|format(b.pct) }}%</td>
+            </tr>
+            {% endfor %}
+        </tbody>
+    </table>
+    {% if cost_ctx.bloat_extra_count %}
+    <p style="color:#888;margin:0.5rem 0 0;">…and {{ cost_ctx.bloat_extra_count }} more buckets not shown.</p>
+    {% endif %}
+    {% else %}
+    <p>No bloat data — this session has no cache-creation tokens.</p>
+    {% endif %}
+</div>
+
+{% endif %}

@@ -236,10 +236,11 @@ async def stats(request: Request) -> HTMLResponse:
     """).fetchall()
 
     token_usage = fetch_token_usage(db)
-
-    # Fetch with cache columns: (input, output, cache_creation, cache_read)
-    cache_usage = fetch_token_usage(db, include_cache=True)
-    cache_tokens = (cache_usage[2], cache_usage[3]) if cache_usage else None
+    # Cache write/read tokens come from the same deduped fetch — no second call.
+    cache_tokens = (token_usage["cache_creation"], token_usage["cache_read"])
+    avg_cost_str = (
+        f"${token_usage['cost_usd'] / total_sessions:.2f}" if total_sessions else ""
+    )
 
     # Per-model breakdown
     model_breakdown = db.execute(f"""
@@ -295,6 +296,7 @@ async def stats(request: Request) -> HTMLResponse:
             "sessions_per_day": sessions_per_day,
             "token_usage": token_usage,
             "cache_tokens": cache_tokens,
+            "avg_cost": avg_cost_str,
             "model_breakdown": model_breakdown,
             "avg_duration": avg_duration_str,
             "avg_tool_calls": avg_tool_calls,

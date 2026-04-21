@@ -56,8 +56,12 @@ async def sessions(  # noqa: PLR0913
 
 
 @router.get("/sessions/{session_id}", response_class=HTMLResponse)
-async def session_detail(request: Request, session_id: str):
-    return await _session_detail(request, session_id)
+async def session_detail(
+    request: Request,
+    session_id: str,
+    tab: str = Query("messages"),
+):
+    return await _session_detail(request, session_id, tab)
 
 
 @router.get("/search", response_class=HTMLResponse)

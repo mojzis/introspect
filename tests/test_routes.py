@@ -598,6 +598,7 @@ def test_sessions_all_empty_params_returns_200():
         "model",
         "project",
         "branch",
+        "cost",
     ],
 )
 def test_sessions_sort_column(col):
@@ -1194,3 +1195,296 @@ def test_session_detail_file_metrics_outside_count():
         text = response.text
         # One file (/home/user/other/config.yml) is outside /tmp/test
         assert "outside project" in text
+
+
+# --- Cost feature tests (sessions list + cost tab + dedup) ---
+
+
+def test_sessions_shows_cost_column():
+    """Sessions list has a Cost column rendering a $ value."""
+    with tempfile.TemporaryDirectory() as tmp, _patched_client(Path(tmp)) as client:
+        response = client.get("/sessions")
+        assert response.status_code == 200
+        assert "Cost" in response.text
+        assert "$" in response.text
+
+
+def test_sessions_sort_by_cost():
+    """Sessions list accepts ?sort=cost without erroring."""
+    with tempfile.TemporaryDirectory() as tmp, _patched_client(Path(tmp)) as client:
+        response = client.get("/sessions?sort=cost&order=desc")
+        assert response.status_code == 200
+
+
+def test_session_detail_has_tab_strip():
+    """Session detail renders both tab links; messages is the default."""
+    with tempfile.TemporaryDirectory() as tmp, _patched_client(Path(tmp)) as client:
+        response = client.get(f"/sessions/{SID}")
+        assert response.status_code == 200
+        text = response.text
+        assert f"/sessions/{SID}?tab=messages" in text
+        assert f"/sessions/{SID}?tab=cost" in text
+        # Default tab highlights "Messages" via the bold border style.
+        assert "tab-strip" in text
+
+
+def test_session_detail_cost_tab_renders():
+    """Cost tab returns 200 and contains $, model, Read+Created, and SVG chart."""
+    with tempfile.TemporaryDirectory() as tmp, _patched_client(Path(tmp)) as client:
+        response = client.get(f"/sessions/{SID}?tab=cost")
+        assert response.status_code == 200
+        text = response.text
+        assert "$" in text
+        assert "claude-opus-4-6" in text
+        assert "Read" in text
+        assert "Created" in text
+        assert "<svg" in text
+
+
+def _dup_jsonl(tmp_dir: Path, session_id: str) -> Path:
+    """Build a JSONL with two assistant records sharing one message.id."""
+    usage = {
+        "input_tokens": 1_000_000,
+        "output_tokens": 1_000_000,
+        "cache_read_input_tokens": 0,
+        "cache_creation_input_tokens": 0,
+    }
+    lines = [
+        # Carry a tool_use_result on the seed user message so union_by_name
+        # picks the column up when materialising views.
+        make_user_message(
+            session_id,
+            "u1",
+            None,
+            "2026-04-21T10:00:00.000Z",
+            "hi",
+            tool_use_result={"content": "seed"},
+        ),
+        make_assistant_message(
+            session_id,
+            "a1",
+            "u1",
+            "2026-04-21T10:00:01.000Z",
+            [{"type": "text", "text": "ok"}],
+            model="claude-opus-4-7",
+            msg_id="msg-dedup-1",
+            usage=usage,
+        ),
+        # Duplicate: same message.id, different uuid, slightly later timestamp
+        make_assistant_message(
+            session_id,
+            "a1-dup",
+            "u1",
+            "2026-04-21T10:00:02.000Z",
+            [{"type": "text", "text": "ok"}],
+            model="claude-opus-4-7",
+            msg_id="msg-dedup-1",
+            usage=usage,
+        ),
+    ]
+    return write_jsonl(tmp_dir, session_id, lines)
+
+
+def test_session_cost_dedup():
+    """Duplicated message.id rows must collapse to one cost-bearing row."""
+    sid = "dedup-session-id-0000-0000-000000000001"
+    with tempfile.TemporaryDirectory() as tmp_str:
+        tmp = Path(tmp_str)
+        _dup_jsonl(tmp, sid)
+        db_path = tmp / "test.duckdb"
+        with (
+            patch.dict(
+                os.environ,
+                {
+                    "INTROSPECT_DB_PATH": str(db_path),
+                    "INTROSPECT_JSONL_GLOB": glob_pattern(tmp),
+                    "INTROSPECT_DAYS": "0",
+                },
+            ),
+            TestClient(app) as client,
+        ):
+            response = client.get(f"/sessions/{sid}?tab=cost")
+            assert response.status_code == 200
+            text = response.text
+            # 1M input * $5/M + 1M output * $25/M = $30.00 (single message,
+            # not $60 from the duplicated copy).
+            assert "$30.00" in text
+
+
+def _bloat_jsonl(tmp_dir: Path, session_id: str) -> Path:
+    """Build a JSONL where a Read-tool result is followed by a big cache-write."""
+    lines = [
+        make_user_message(
+            session_id, "u1", None, "2026-04-21T10:00:00.000Z", "please review"
+        ),
+        # First assistant message just initialises context (small usage)
+        make_assistant_message(
+            session_id,
+            "a1",
+            "u1",
+            "2026-04-21T10:00:01.000Z",
+            [
+                {
+                    "type": "tool_use",
+                    "id": "tu-read",
+                    "name": "Read",
+                    "input": {"file_path": "/repo/src/big_file.py"},
+                }
+            ],
+            model="claude-opus-4-7",
+            msg_id="msg-bloat-1",
+            usage={"input_tokens": 100, "output_tokens": 5},
+        ),
+        make_user_message(
+            session_id,
+            "u2",
+            "a1",
+            "2026-04-21T10:00:02.000Z",
+            [
+                {
+                    "type": "tool_result",
+                    "tool_use_id": "tu-read",
+                    "content": "x" * 1000,
+                    "is_error": False,
+                }
+            ],
+            tool_use_result={"content": "x" * 1000},
+            source_tool_uuid="a1",
+        ),
+        # Second assistant message: parent_uuid points at the user tool_result;
+        # the cache-creation tokens are attributed to the preceding Read.
+        make_assistant_message(
+            session_id,
+            "a2",
+            "u2",
+            "2026-04-21T10:00:03.000Z",
+            [{"type": "text", "text": "done"}],
+            model="claude-opus-4-7",
+            msg_id="msg-bloat-2",
+            usage={
+                "input_tokens": 100,
+                "output_tokens": 10,
+                "cache_creation_input_tokens": 200_000,
+                "cache_creation": {
+                    "ephemeral_5m_input_tokens": 200_000,
+                    "ephemeral_1h_input_tokens": 0,
+                },
+            },
+        ),
+    ]
+    return write_jsonl(tmp_dir, session_id, lines)
+
+
+def test_session_cost_bloat_attribution():
+    """Bloat table should attribute cache creation to the preceding Read tool."""
+    sid = "bloat-session-id-0000-0000-000000000001"
+    with tempfile.TemporaryDirectory() as tmp_str:
+        tmp = Path(tmp_str)
+        _bloat_jsonl(tmp, sid)
+        db_path = tmp / "test.duckdb"
+        with (
+            patch.dict(
+                os.environ,
+                {
+                    "INTROSPECT_DB_PATH": str(db_path),
+                    "INTROSPECT_JSONL_GLOB": glob_pattern(tmp),
+                    "INTROSPECT_DAYS": "0",
+                },
+            ),
+            TestClient(app) as client,
+        ):
+            response = client.get(f"/sessions/{sid}?tab=cost")
+            assert response.status_code == 200
+            text = response.text
+            assert "file read" in text
+            # basename of the read file should appear in the bloat bucket label
+            assert "big_file.py" in text
+
+
+def _subagent_jsonl(tmp_dir: Path, session_id: str) -> Path:
+    """Build a JSONL where a sidechain assistant message has cache_creation."""
+    lines = [
+        make_user_message(
+            session_id,
+            "u1",
+            None,
+            "2026-04-21T10:00:00.000Z",
+            "go",
+            tool_use_result={"content": "seed"},
+        ),
+        # Sidechain user prompt (simulating Task subagent dispatch)
+        make_user_message(
+            session_id,
+            "su1",
+            "u1",
+            "2026-04-21T10:00:01.000Z",
+            "subagent: do this",
+            is_sidechain=True,
+        ),
+        # Sidechain assistant response with significant cache_creation
+        make_assistant_message(
+            session_id,
+            "sa1",
+            "su1",
+            "2026-04-21T10:00:02.000Z",
+            [{"type": "text", "text": "done"}],
+            model="claude-opus-4-7",
+            msg_id="msg-side-1",
+            usage={
+                "input_tokens": 50,
+                "output_tokens": 10,
+                "cache_creation_input_tokens": 500_000,
+                "cache_creation": {
+                    "ephemeral_5m_input_tokens": 500_000,
+                    "ephemeral_1h_input_tokens": 0,
+                },
+            },
+            is_sidechain=True,
+        ),
+    ]
+    return write_jsonl(tmp_dir, session_id, lines)
+
+
+def test_session_cost_subagent_attribution():
+    """Sidechain assistant messages with cc tokens should appear as 'subagent'."""
+    sid = "subagent-session-0000-0000-000000000001"
+    with tempfile.TemporaryDirectory() as tmp_str:
+        tmp = Path(tmp_str)
+        _subagent_jsonl(tmp, sid)
+        db_path = tmp / "test.duckdb"
+        with (
+            patch.dict(
+                os.environ,
+                {
+                    "INTROSPECT_DB_PATH": str(db_path),
+                    "INTROSPECT_JSONL_GLOB": glob_pattern(tmp),
+                    "INTROSPECT_DAYS": "0",
+                },
+            ),
+            TestClient(app) as client,
+        ):
+            response = client.get(f"/sessions/{sid}?tab=cost")
+            assert response.status_code == 200
+            text = response.text
+            assert "subagent" in text.lower()
+
+
+def test_fetch_token_usage_dedup():
+    """Direct unit test: deduped totals should equal a single message's usage."""
+    from introspect.api.handlers._helpers import fetch_token_usage  # noqa: PLC0415
+    from introspect.db import get_connection, materialize_views  # noqa: PLC0415
+
+    sid = "ftu-dedup-session-0000-0000-000000000001"
+    with tempfile.TemporaryDirectory() as tmp_str:
+        tmp = Path(tmp_str)
+        _dup_jsonl(tmp, sid)
+        db_path = tmp / "test.duckdb"
+        conn = get_connection(db_path, glob_pattern(tmp))
+        materialize_views(conn, glob_pattern(tmp), 0, resolve_projects=False)
+        usage = fetch_token_usage(conn, session_id=sid)
+        conn.close()
+        assert usage is not None
+        # 1M input tokens for ONE message — the duplicate must not double it
+        assert usage["input"] == 1_000_000
+        assert usage["output"] == 1_000_000
+        assert usage["cost_usd"] == pytest.approx(30.0)

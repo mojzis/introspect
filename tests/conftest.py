@@ -103,6 +103,7 @@ def make_assistant_message(
     model: str = "claude-opus-4-6",
     msg_id: str = "msg1",
     usage: dict | None = None,
+    is_sidechain: bool = False,
 ) -> dict:
     """Build an assistant-type JSONL record."""
     message: dict = {
@@ -119,7 +120,7 @@ def make_assistant_message(
         "sessionId": session_id,
         "uuid": uuid,
         "parentUuid": parent_uuid,
-        "isSidechain": False,
+        "isSidechain": is_sidechain,
         "cwd": "/tmp/test",
         "version": "2.1.0",
         "entrypoint": "cli",
