@@ -1927,6 +1927,7 @@ def test_cost_overview_subagent_split():
     """Subagent-presence split: with-row counts only sidechain sessions."""
     from introspect.api.handlers.cost_overview import (  # noqa: PLC0415
         _build_subagent_split,
+        _fetch_cost_rows,
     )
 
     sid_with = "sess-side-01-aaaa-aaaa-aaaaaaaaaaaa"
@@ -1939,7 +1940,10 @@ def test_cost_overview_subagent_split():
         tmp = Path(tmp_str)
         _cost_overview_setup(tmp, specs)
 
-        split = _materialize_and_run(tmp, _build_subagent_split)
+        split = _materialize_and_run(
+            tmp,
+            lambda c: _build_subagent_split(c, _fetch_cost_rows(c)),
+        )
 
         assert split["with"]["sessions"] == 1
         assert split["without"]["sessions"] == 1
@@ -2026,6 +2030,7 @@ def test_cost_overview_huge_reads_split():
     """
     from introspect.api.handlers.cost_overview import (  # noqa: PLC0415
         _build_huge_reads_split,
+        _fetch_cost_rows,
     )
 
     sid_with = "sess-huge-01-aaaa-aaaa-aaaaaaaaaaaa"
@@ -2038,11 +2043,24 @@ def test_cost_overview_huge_reads_split():
         tmp = Path(tmp_str)
         _cost_overview_setup(tmp, specs)
 
-        split = _materialize_and_run(tmp, _build_huge_reads_split)
+        split = _materialize_and_run(
+            tmp,
+            lambda c: _build_huge_reads_split(c, _fetch_cost_rows(c)),
+        )
 
         # Only the huge-reads session classifies "with".
         assert split["with"]["sessions"] == 1
         assert split["without"]["sessions"] == 1
+        # Pin the "without" side to the known baseline ($5.00 = 1M * $5/M).
+        # A threshold inversion would route the huge-reads session into
+        # "without" and push its cost above $5, so pinning this side
+        # exactly catches a with/without swap.
+        assert split["without"]["cost_usd"] == pytest.approx(5.0)
+        # The "with" side gets the session whose ~$1.25 cost is dominated
+        # by 200k cache-creation tokens — the ratio (not the absolute) is
+        # what clears the 10% guard. Confirm the with-side cost matches
+        # the huge-reads session, not the baseline.
+        assert split["with"]["cost_usd"] < split["without"]["cost_usd"]
 
 
 def _skill_session_command_tag(session_id: str) -> list[dict]:
@@ -2105,6 +2123,7 @@ def test_cost_overview_skill_split():
     """
     from introspect.api.handlers.cost_overview import (  # noqa: PLC0415
         _build_skill_split,
+        _fetch_cost_rows,
     )
 
     sid1 = "sess-skill-01-aaaa-aaaa-aaaaaaaaaaaa"
@@ -2119,7 +2138,10 @@ def test_cost_overview_skill_split():
         tmp = Path(tmp_str)
         _cost_overview_setup(tmp, specs)
 
-        split = _materialize_and_run(tmp, _build_skill_split)
+        split = _materialize_and_run(
+            tmp,
+            lambda c: _build_skill_split(c, _fetch_cost_rows(c)),
+        )
 
         # Only session 1 is "with skills"; sessions 2 and 3 are not.
         assert split["with"]["sessions"] == 1

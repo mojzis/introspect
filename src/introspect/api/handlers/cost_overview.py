@@ -48,10 +48,14 @@ HUGE_READS_MIN_TOKENS = 100_000
 async def cost_overview(request: Request) -> HTMLResponse:
     """Render the /cost-overview page."""
     db = conn(request)
+    # One shared pull of (session_id, cost_usd) feeds every split helper so
+    # the SESSION_COST_SUBQUERY aggregation only runs once per page load and
+    # the three binary splits all see the same totals.
+    cost_rows = _fetch_cost_rows(db)
     pareto = _build_pareto(db)
-    subagent_split = _build_subagent_split(db)
-    huge_reads_split = _build_huge_reads_split(db)
-    skill_split = _build_skill_split(db)
+    subagent_split = _build_subagent_split(db, cost_rows)
+    huge_reads_split = _build_huge_reads_split(db, cost_rows)
+    skill_split = _build_skill_split(db, cost_rows)
 
     return templates.TemplateResponse(
         request,
@@ -64,6 +68,19 @@ async def cost_overview(request: Request) -> HTMLResponse:
             "skill_split": skill_split,
         },
     )
+
+
+def _fetch_cost_rows(db: duckdb.DuckDBPyConnection) -> list[tuple]:
+    """Return ``[(session_id, cost_usd), ...]`` for every positive-cost session.
+
+    Shared denominator for all three binary splits — guarantees they agree
+    on totals and the :data:`SESSION_COST_SUBQUERY` aggregation only runs
+    once per page load rather than once per split.
+    """
+    return db.execute(
+        f"SELECT session_id, cost_usd FROM {SESSION_COST_SUBQUERY} "  # noqa: S608
+        "WHERE cost_usd IS NOT NULL AND cost_usd > 0"
+    ).fetchall()
 
 
 def _build_pareto(db: duckdb.DuckDBPyConnection) -> dict[str, Any]:
@@ -83,9 +100,11 @@ def _build_pareto(db: duckdb.DuckDBPyConnection) -> dict[str, Any]:
             "pareto_cost": str,
         }
     """
+    # SESSION_COST_SUBQUERY carries its own ``sc`` alias; the outer CTE below
+    # uses a distinct ``session_costs`` name to avoid shadowing it.
     rows = db.execute(
         f"""
-        WITH sc AS (
+        WITH session_costs AS (
             SELECT session_id, cost_usd FROM {SESSION_COST_SUBQUERY}
         ),
         ranked AS (
@@ -97,7 +116,7 @@ def _build_pareto(db: duckdb.DuckDBPyConnection) -> dict[str, Any]:
                     ORDER BY cost_usd DESC, session_id
                     ROWS BETWEEN UNBOUNDED PRECEDING AND CURRENT ROW
                 ) AS cumulative
-            FROM sc
+            FROM session_costs
             WHERE cost_usd IS NOT NULL AND cost_usd > 0
         )
         SELECT
@@ -233,7 +252,10 @@ def _split_from_flagged_rows(
     }
 
 
-def _build_subagent_split(db: duckdb.DuckDBPyConnection) -> dict[str, Any]:
+def _build_subagent_split(
+    db: duckdb.DuckDBPyConnection,
+    cost_rows: list[tuple],
+) -> dict[str, Any]:
     """Subagent-presence split: sidechain messages OR Task/Agent tool calls."""
     flag_rows = db.execute(
         """
@@ -247,14 +269,13 @@ def _build_subagent_split(db: duckdb.DuckDBPyConnection) -> dict[str, Any]:
         ) sub
         """
     ).fetchall()
-    cost_rows = db.execute(
-        f"SELECT session_id, cost_usd FROM {SESSION_COST_SUBQUERY} "  # noqa: S608
-        "WHERE cost_usd IS NOT NULL AND cost_usd > 0"
-    ).fetchall()
     return _split_from_flagged_rows(flag_rows, cost_rows)
 
 
-def _build_huge_reads_split(db: duckdb.DuckDBPyConnection) -> dict[str, Any]:
+def _build_huge_reads_split(
+    db: duckdb.DuckDBPyConnection,
+    cost_rows: list[tuple],
+) -> dict[str, Any]:
     """Huge-reads split.
 
     A session counts as "with huge reads" when its Read-category cache
@@ -265,6 +286,13 @@ def _build_huge_reads_split(db: duckdb.DuckDBPyConnection) -> dict[str, Any]:
     The Read classifier is the shared ``chosen_block`` CTE in
     ``build_cost_attribution_sql`` — the same classifier the session-detail
     Cost tab calls Read, so the two views can't drift.
+
+    ``cost_rows`` is the shared ``[(session_id, cost_usd), ...]`` pull from
+    :data:`SESSION_COST_SUBQUERY`. We use its totals as the denominator for
+    the ≥10% threshold so the fraction and the reported "Total $" in the
+    with/without table are measured against the same source — keeping the
+    headline claim ("totals match the sessions-list page exactly") true for
+    the threshold itself, not just the report.
     """
     # Import inside the function to avoid a circular import with sessions.py
     # (sessions imports from _helpers; _helpers must not import from
@@ -272,11 +300,16 @@ def _build_huge_reads_split(db: duckdb.DuckDBPyConnection) -> dict[str, Any]:
     from introspect.api.handlers.sessions import _classify_bucket  # noqa: PLC0415
     from introspect.pricing import compute_cost_usd  # noqa: PLC0415
 
-    # One big scan for every session.
+    # Use SESSION_COST_SUBQUERY totals as the denominator — single source of
+    # truth with the sessions-list cost column and the Pareto table.
+    session_totals = {s: float(c or 0.0) for s, c in cost_rows}
+
+    # One big scan for every session. We only need session_id, model,
+    # cc_total, cc_5m, cc_1h and the classifier inputs; the rest of the
+    # attribution row is ignored here.
     attrib_rows = db.execute(build_cost_attribution_sql("")).fetchall()
 
-    # Per-session aggregates: total cost (from all messages) and
-    # Read-category cache-creation tokens + cost.
+    # Per-session Read-category cache-creation tokens + cost.
     per_session: dict[str, dict[str, float]] = {}
     for row in attrib_rows:
         (
@@ -285,9 +318,9 @@ def _build_huge_reads_split(db: duckdb.DuckDBPyConnection) -> dict[str, Any]:
             _timestamp,
             _is_side,
             model,
-            in_tok,
-            out_tok,
-            cr_tok,
+            _in_tok,
+            _out_tok,
+            _cr_tok,
             cc_total,
             cc_5m,
             cc_1h,
@@ -295,61 +328,51 @@ def _build_huge_reads_split(db: duckdb.DuckDBPyConnection) -> dict[str, Any]:
             tool_name,
             tool_input_raw,
         ) = row
-        in_tok_i = int(in_tok or 0)
-        out_tok_i = int(out_tok or 0)
-        cr_tok_i = int(cr_tok or 0)
         cc_total_i = int(cc_total or 0)
         cc_5m_i = int(cc_5m or 0)
         cc_1h_i = int(cc_1h or 0)
-        eff_5m = (
-            cc_total_i
-            if (cc_5m_i == 0 and cc_1h_i == 0 and cc_total_i > 0)
-            else cc_5m_i
-        )
-        full_cost = compute_cost_usd(
-            model=model,
-            input_tokens=in_tok_i,
-            output_tokens=out_tok_i,
-            cache_read_tokens=cr_tok_i,
-            cache_creation_5m=eff_5m,
-            cache_creation_1h=cc_1h_i,
-        )
+        if cc_total_i == 0:
+            continue
         _bucket, category = _classify_bucket(
             tool_name=tool_name,
             tool_input_raw=tool_input_raw,
             user_block_type=user_block_type,
         )
+        if category != "Read":
+            continue
+        eff_5m = (
+            cc_total_i
+            if (cc_5m_i == 0 and cc_1h_i == 0 and cc_total_i > 0)
+            else cc_5m_i
+        )
+        read_cc_cost = compute_cost_usd(
+            model=model,
+            cache_creation_5m=eff_5m,
+            cache_creation_1h=cc_1h_i,
+        )
         entry = per_session.setdefault(
             session_id,
-            {"total_cost": 0.0, "read_cc_cost": 0.0, "read_cc_tokens": 0.0},
+            {"read_cc_cost": 0.0, "read_cc_tokens": 0.0},
         )
-        entry["total_cost"] += full_cost
-        if category == "Read" and cc_total_i > 0:
-            read_cc_cost = compute_cost_usd(
-                model=model,
-                cache_creation_5m=eff_5m if (cc_5m_i or cc_1h_i) else cc_total_i,
-                cache_creation_1h=cc_1h_i,
-            )
-            entry["read_cc_cost"] += read_cc_cost
-            entry["read_cc_tokens"] += cc_total_i
+        entry["read_cc_cost"] += read_cc_cost
+        entry["read_cc_tokens"] += cc_total_i
 
     flag_rows: list[tuple] = []
     for session_id, agg in per_session.items():
         tokens = agg["read_cc_tokens"]
-        total_cost = agg["total_cost"]
+        total_cost = session_totals.get(session_id, 0.0)
         read_cost = agg["read_cc_cost"]
         frac = read_cost / total_cost if total_cost else 0.0
         flagged = tokens >= HUGE_READS_MIN_TOKENS and frac >= HUGE_READS_COST_FRACTION
         flag_rows.append((session_id, flagged))
 
-    cost_rows = db.execute(
-        f"SELECT session_id, cost_usd FROM {SESSION_COST_SUBQUERY} "  # noqa: S608
-        "WHERE cost_usd IS NOT NULL AND cost_usd > 0"
-    ).fetchall()
     return _split_from_flagged_rows(flag_rows, cost_rows)
 
 
-def _build_skill_split(db: duckdb.DuckDBPyConnection) -> dict[str, Any]:
+def _build_skill_split(
+    db: duckdb.DuckDBPyConnection,
+    cost_rows: list[tuple],
+) -> dict[str, Any]:
     """Skill / slash-command split.
 
     A session counts as "with skills" when at least one ``<command-name>``
@@ -364,9 +387,5 @@ def _build_skill_split(db: duckdb.DuckDBPyConnection) -> dict[str, Any]:
         FROM message_commands
         WHERE command NOT IN {OBVIOUS_COMMANDS_SQL}
         """  # noqa: S608
-    ).fetchall()
-    cost_rows = db.execute(
-        f"SELECT session_id, cost_usd FROM {SESSION_COST_SUBQUERY} "  # noqa: S608
-        "WHERE cost_usd IS NOT NULL AND cost_usd > 0"
     ).fetchall()
     return _split_from_flagged_rows(flag_rows, cost_rows)
