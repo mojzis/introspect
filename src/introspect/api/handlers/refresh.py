@@ -1,0 +1,116 @@
+"""Manual refresh endpoint — pokes the background loop's ``asyncio.Event``.
+
+The handler returns the ``_refresh_indicator.html`` fragment (HTMX swaps it
+into ``#refresh-state``). If auto-refresh is disabled (no trigger on
+``app.state``), the fragment renders a muted "auto-refresh off" label. The
+rebuild still only happens when mtimes changed — the trigger just wakes the
+loop early.
+"""
+
+from __future__ import annotations
+
+import asyncio
+from datetime import UTC, datetime
+
+from fastapi import Request
+from fastapi.responses import HTMLResponse
+
+from introspect.api.handlers._helpers import templates
+
+# Poll budgets for observing the background loop after setting the trigger.
+_WAIT_FOR_START_SECONDS = 0.5
+_WAIT_FOR_START_STEP = 0.05
+_WAIT_FOR_FINISH_SECONDS = 3.0
+_WAIT_FOR_FINISH_STEP = 0.1
+
+# Relative-time thresholds for :func:`format_relative`.
+_JUST_NOW_SECONDS = 30
+_MINUTE_SECONDS = 60
+_HOUR_SECONDS = 3600
+_DAY_SECONDS = 86400
+
+
+def format_relative(dt: datetime | None) -> str:
+    """Format ``dt`` relative to ``now()`` for the top-bar indicator.
+
+    * ``None`` -> ``"never"``
+    * < 30 s  -> ``"just now"``
+    * < 1 h   -> ``"Nm ago"``
+    * < 24 h  -> ``"Nh ago"``
+    * else    -> ``"YYYY-MM-DD HH:MM"``
+    """
+    if dt is None:
+        return "never"
+    now = datetime.now(UTC)
+    if dt.tzinfo is None:
+        dt = dt.replace(tzinfo=UTC)
+    delta = (now - dt).total_seconds()
+    if delta < 0:
+        # Clock skew / future timestamp — treat as "just now".
+        return "just now"
+    if delta < _JUST_NOW_SECONDS:
+        return "just now"
+    if delta < _HOUR_SECONDS:
+        return f"{int(delta // _MINUTE_SECONDS)}m ago"
+    if delta < _DAY_SECONDS:
+        return f"{int(delta // _HOUR_SECONDS)}h ago"
+    return dt.strftime("%Y-%m-%d %H:%M")
+
+
+def _render(
+    request: Request,
+    *,
+    disabled: bool,
+    in_progress: bool,
+    last_refreshed_at: datetime | None,
+) -> HTMLResponse:
+    return templates.TemplateResponse(
+        request,
+        "_refresh_indicator.html",
+        {
+            "disabled": disabled,
+            "in_progress": in_progress,
+            "last_refreshed_at": last_refreshed_at,
+            "relative": format_relative(last_refreshed_at),
+        },
+    )
+
+
+async def refresh_now(request: Request) -> HTMLResponse:
+    """POST /refresh — wake the background loop and re-render the indicator."""
+    state = request.app.state
+    trigger: asyncio.Event | None = getattr(state, "refresh_trigger", None)
+    if trigger is None:
+        return _render(
+            request,
+            disabled=True,
+            in_progress=False,
+            last_refreshed_at=None,
+        )
+
+    trigger.set()
+
+    # Wait briefly for the loop to pick up the trigger and flip the flag.
+    waited = 0.0
+    while waited < _WAIT_FOR_START_SECONDS:
+        if getattr(state, "refresh_in_progress", False):
+            break
+        await asyncio.sleep(_WAIT_FOR_START_STEP)
+        waited += _WAIT_FOR_START_STEP
+
+    # If it started, wait for it to finish (short ceiling so the HTTP response
+    # stays snappy; indicator may show "refreshing…" if we give up early).
+    if getattr(state, "refresh_in_progress", False):
+        waited = 0.0
+        while waited < _WAIT_FOR_FINISH_SECONDS:
+            if not getattr(state, "refresh_in_progress", False):
+                break
+            await asyncio.sleep(_WAIT_FOR_FINISH_STEP)
+            waited += _WAIT_FOR_FINISH_STEP
+
+    return _render(
+        request,
+        disabled=False,
+        in_progress=bool(getattr(state, "refresh_in_progress", False)),
+        last_refreshed_at=getattr(state, "last_refreshed_at", None),
+    )

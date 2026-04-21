@@ -5,6 +5,7 @@ import contextlib
 import os
 import uuid
 from contextlib import asynccontextmanager
+from datetime import UTC, datetime
 from pathlib import Path
 
 import duckdb
@@ -29,7 +30,7 @@ async def lifespan(app: FastAPI):
     db_path = Path(os.environ.get("INTROSPECT_DB_PATH", str(DEFAULT_DB_PATH)))
     jsonl_glob = os.environ.get("INTROSPECT_JSONL_GLOB", DEFAULT_JSONL_GLOB)
     days = int(os.environ.get("INTROSPECT_DAYS", "10"))
-    interval = float(os.environ.get("INTROSPECT_REFRESH_INTERVAL_SECONDS", "30"))
+    interval = float(os.environ.get("INTROSPECT_REFRESH_INTERVAL_SECONDS", "600"))
     db_path.parent.mkdir(parents=True, exist_ok=True)
     conn = connect_writable(db_path)
     resolve_projects = os.environ.get("INTROSPECT_RESOLVE_PROJECTS", "1") != "0"
@@ -41,11 +42,22 @@ async def lifespan(app: FastAPI):
 
     # Open a shared read-only connection for request handling
     app.state.read_conn = duckdb.connect(str(db_path), read_only=True)
+    app.state.last_refreshed_at = datetime.now(UTC)
+    app.state.refresh_in_progress = False
 
     refresh_task: asyncio.Task[None] | None = None
     if interval > 0:
+        app.state.refresh_trigger = asyncio.Event()
         refresh_task = asyncio.create_task(
-            refresh_loop(app, db_path, jsonl_glob, days, resolve_projects, interval)
+            refresh_loop(
+                app,
+                db_path,
+                jsonl_glob,
+                days,
+                resolve_projects,
+                interval,
+                trigger=app.state.refresh_trigger,
+            )
         )
 
     # Create a fresh MCP server and replace the placeholder mount

@@ -1,8 +1,10 @@
 """Tests for introspect web UI routes."""
 
+import asyncio
 import os
 import tempfile
 from contextlib import contextmanager
+from datetime import UTC, datetime
 from pathlib import Path
 from unittest.mock import patch
 
@@ -2502,3 +2504,42 @@ def test_fetch_token_usage_dedup():
         assert usage["input"] == 1_000_000
         assert usage["output"] == 1_000_000
         assert usage["cost_usd"] == pytest.approx(30.0)
+
+
+def test_post_refresh_sets_trigger_and_renders_fragment():
+    """POST /refresh should set the event and return the indicator fragment."""
+    with tempfile.TemporaryDirectory() as tmp, _patched_client(Path(tmp)) as client:
+        trigger = asyncio.Event()
+        app.state.refresh_trigger = trigger
+        app.state.refresh_in_progress = False
+        app.state.last_refreshed_at = datetime.now(UTC)
+        try:
+            response = client.post("/refresh")
+            assert response.status_code == 200
+            assert 'id="refresh-state"' in response.text
+            assert "Refresh now" in response.text
+            assert trigger.is_set()
+        finally:
+            # Clean up to avoid bleed into other tests that share ``app``.
+            for attr in ("refresh_trigger", "refresh_in_progress", "last_refreshed_at"):
+                if hasattr(app.state, attr):
+                    delattr(app.state, attr)
+
+
+def test_post_refresh_disabled_when_interval_zero():
+    """With no trigger on app.state, POST /refresh renders the disabled label."""
+    with tempfile.TemporaryDirectory() as tmp, _patched_client(Path(tmp)) as client:
+        # Make sure no trigger is installed.
+        if hasattr(app.state, "refresh_trigger"):
+            delattr(app.state, "refresh_trigger")
+        response = client.post("/refresh")
+        assert response.status_code == 200
+        assert "auto-refresh off" in response.text
+
+
+def test_base_html_shows_refresh_indicator():
+    """The nav-embedded indicator should appear on a normal GET."""
+    with tempfile.TemporaryDirectory() as tmp, _patched_client(Path(tmp)) as client:
+        response = client.get("/")
+        assert response.status_code == 200
+        assert 'id="refresh-state"' in response.text

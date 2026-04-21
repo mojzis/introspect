@@ -15,6 +15,7 @@ from introspect.api.handlers.cost_overview import cost_overview as _cost_overvie
 from introspect.api.handlers.dashboard import dashboard as _dashboard
 from introspect.api.handlers.mcps import mcps as _mcps
 from introspect.api.handlers.raw import raw_data as _raw_data
+from introspect.api.handlers.refresh import refresh_now as _refresh_now
 from introspect.api.handlers.search import search as _search
 from introspect.api.handlers.sessions import session_detail as _session_detail
 from introspect.api.handlers.sessions import sessions as _sessions
@@ -129,3 +130,8 @@ async def stats(request: Request):
 @router.get("/cost-overview", response_class=HTMLResponse)
 async def cost_overview(request: Request):
     return await _cost_overview(request)
+
+
+@router.post("/refresh", response_class=HTMLResponse)
+async def refresh(request: Request):
+    return await _refresh_now(request)
