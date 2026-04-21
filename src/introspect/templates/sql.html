@@ -1,0 +1,142 @@
+{% extends parent %}
+{% block title %}SQL — Introspect{% endblock %}
+{% block content %}
+<style>
+    .sql-layout { display: flex; gap: 1rem; min-height: 70vh; }
+    .sql-sidebar { width: 240px; flex-shrink: 0; background: #fff; border-radius: 8px; padding: 1rem; box-shadow: 0 1px 3px rgba(0,0,0,0.08); overflow-y: auto; max-height: 80vh; font-size: 0.85rem; }
+    .sql-sidebar h3 { font-size: 0.9rem; color: #1a1a2e; margin-bottom: 0.75rem; }
+    .sql-sidebar details { margin-bottom: 0.25rem; }
+    .sql-sidebar summary { cursor: pointer; font-weight: 600; color: #3b5bdb; padding: 0.2rem 0; font-size: 0.85rem; }
+    .sql-sidebar summary:hover { color: #1a1a2e; }
+    .sql-sidebar .col-list { padding-left: 1rem; margin: 0.2rem 0 0.4rem; }
+    .sql-sidebar .col-item { display: flex; justify-content: space-between; gap: 0.5rem; padding: 0.1rem 0; color: #333; font-size: 0.8rem; font-family: ui-monospace, SFMono-Regular, Menlo, monospace; }
+    .sql-sidebar .col-type { color: #888; font-size: 0.75rem; }
+    .sql-main { flex: 1; display: flex; flex-direction: column; gap: 1rem; min-width: 0; }
+    .sql-editor-wrap { background: #fff; border-radius: 8px; box-shadow: 0 1px 3px rgba(0,0,0,0.08); overflow: hidden; }
+    .sql-editor-wrap .cm-editor { min-height: 150px; max-height: 400px; font-size: 0.9rem; }
+    .sql-editor-wrap .cm-editor .cm-scroller { overflow: auto; }
+    .sql-toolbar { display: flex; align-items: center; gap: 0.75rem; padding: 0.5rem 0.75rem; background: #f8f8fc; border-top: 1px solid #eee; }
+    .sql-toolbar button { font-size: 0.85rem; padding: 0.4rem 1rem; }
+    .sql-toolbar .hint { font-size: 0.8rem; color: #888; }
+    #sql-results { min-height: 50px; }
+</style>
+
+<h1>SQL</h1>
+<div class="sql-layout">
+    <div class="sql-sidebar">
+        <h3>Schema</h3>
+        {% for table_name, columns in schema.items() %}
+        <details>
+            <summary>{{ table_name }}</summary>
+            <div class="col-list">
+                {% for col in columns %}
+                <div class="col-item">
+                    <span>{{ col.name }}</span>
+                    <span class="col-type">{{ col.type }}</span>
+                </div>
+                {% endfor %}
+            </div>
+        </details>
+        {% endfor %}
+    </div>
+    <div class="sql-main">
+        <div class="sql-editor-wrap" x-data="sqlEditor()" x-init="init()">
+            <div id="cm-editor-mount"></div>
+            <div class="sql-toolbar">
+                <button @click="runQuery()" class="btn">Run</button>
+                <span class="hint">Ctrl+Enter to execute</span>
+            </div>
+        </div>
+        <div id="sql-results"></div>
+    </div>
+</div>
+
+<script>
+function sqlEditor() {
+    return {
+        view: null,
+        async init() {
+            const mount = document.getElementById('cm-editor-mount');
+            if (!mount) return;
+
+            const [
+                {EditorView, keymap, lineNumbers, highlightActiveLine, highlightActiveLineGutter},
+                {EditorState},
+                {sql, PostgreSQL},
+                {defaultHighlightStyle, syntaxHighlighting},
+                {autocompletion},
+                {defaultKeymap, history, historyKeymap}
+            ] = await Promise.all([
+                import('https://esm.sh/@codemirror/view@6.35.3'),
+                import('https://esm.sh/@codemirror/state@6.5.2'),
+                import('https://esm.sh/@codemirror/lang-sql@6.8.0'),
+                import('https://esm.sh/@codemirror/language@6.10.8'),
+                import('https://esm.sh/@codemirror/autocomplete@6.18.6'),
+                import('https://esm.sh/@codemirror/commands@6.8.0'),
+            ]);
+
+            // Build schema for autocompletion
+            const schema = {};
+            {% for table_name, columns in schema.items() %}
+            schema["{{ table_name }}"] = [{% for col in columns %}"{{ col.name }}"{% if not loop.last %}, {% endif %}{% endfor %}];
+            {% endfor %}
+
+            const self = this;
+
+            const runKeymap = keymap.of([{
+                key: "Ctrl-Enter",
+                run: () => { self.runQuery(); return true; },
+            }]);
+
+            this.view = new EditorView({
+                state: EditorState.create({
+                    doc: "SELECT * FROM logical_sessions LIMIT 10",
+                    extensions: [
+                        lineNumbers(),
+                        highlightActiveLine(),
+                        highlightActiveLineGutter(),
+                        syntaxHighlighting(defaultHighlightStyle),
+                        history(),
+                        keymap.of([...defaultKeymap, ...historyKeymap]),
+                        sql({dialect: PostgreSQL, schema: schema}),
+                        autocompletion(),
+                        runKeymap,
+                        EditorView.theme({
+                            "&": { fontSize: "0.9rem" },
+                            ".cm-content": { padding: "0.75rem 0" },
+                        }),
+                    ],
+                }),
+                parent: mount,
+            });
+        },
+        async runQuery() {
+            if (!this.view) return;
+            const query = this.view.state.doc.toString().trim();
+            if (!query) return;
+
+            const resultsDiv = document.getElementById('sql-results');
+            resultsDiv.innerHTML = '<div class="card" style="text-align:center;color:#888;">Running...</div>';
+
+            const form = new FormData();
+            form.append('sql', query);
+
+            try {
+                const resp = await fetch('/sql', {
+                    method: 'POST',
+                    body: form,
+                });
+                resultsDiv.innerHTML = await resp.text();
+            } catch (err) {
+                resultsDiv.textContent = '';
+                const errDiv = document.createElement('div');
+                errDiv.className = 'card';
+                errDiv.style.color = '#c00';
+                errDiv.textContent = 'Network error: ' + err.message;
+                resultsDiv.appendChild(errDiv);
+            }
+        }
+    };
+}
+</script>
+{% endblock %}

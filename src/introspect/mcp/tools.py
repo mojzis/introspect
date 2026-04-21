@@ -2,21 +2,15 @@
 
 from __future__ import annotations
 
-import re
 from datetime import datetime
 
 import duckdb
 
 from introspect.db import DEFAULT_DB_PATH, get_read_connection
 from introspect.search import ensure_search_corpus, fts_search
+from introspect.sql_validation import SQL_CELL_MAX, SQL_ROW_CAP, validate_read_only_sql
 
 _VALID_ROLES = {"user", "assistant"}
-
-# Max characters per cell in run_sql output; long values (e.g. tool_input JSON
-# blobs) are truncated so one wide row doesn't blow up the response.
-_SQL_CELL_MAX = 200
-# Hard cap on run_sql rows regardless of caller's `limit` argument.
-_SQL_ROW_CAP = 500
 
 
 def search_conversations(  # noqa: PLR0913
@@ -172,41 +166,6 @@ def recent_sessions(n: int = 10) -> str:
         conn.close()
 
 
-_SQL_COMMENT_BLOCK = re.compile(r"/\*.*?\*/", re.DOTALL)
-_SQL_COMMENT_LINE = re.compile(r"--[^\n]*")
-# Only single-quoted strings are SQL literals; double-quoted tokens are
-# identifiers and must not be rewritten by the validator.
-_SQL_STRING_LITERAL = re.compile(r"'(?:[^']|'')*'")
-_SQL_ALLOWED_FIRST_KEYWORDS = {"select", "with"}
-
-
-def _validate_read_only_sql(sql: str) -> str | None:
-    """Return an error message if `sql` is not a safe read-only query.
-
-    This is the PRIMARY guard — do not weaken it assuming the connection is
-    read-only. ``run_sql`` opens a fresh ``read_only=True`` connection as a
-    defense-in-depth backstop, but even that permits some side-effecting
-    statements (e.g. ``COPY ... TO '/file'`` can write outside the DB).
-    The "first keyword must be SELECT or WITH" check blocks ATTACH, INSTALL,
-    LOAD, PRAGMA, COPY, INSERT, UPDATE, DELETE, DROP, CREATE, CALL, etc.
-    """
-    stripped = _SQL_COMMENT_BLOCK.sub(" ", sql)
-    stripped = _SQL_COMMENT_LINE.sub(" ", stripped)
-    # Replace string-literal contents before scanning so a `;` or keyword
-    # inside a literal doesn't trip the multi-statement / first-keyword
-    # checks. Double-quoted identifiers are intentionally preserved.
-    scan = _SQL_STRING_LITERAL.sub("''", stripped)
-    scan = scan.strip().rstrip(";").strip()
-    if not scan:
-        return "SQL is empty."
-    if ";" in scan:
-        return "Multiple statements are not allowed."
-    first_word = scan.split(None, 1)[0].lower()
-    if first_word not in _SQL_ALLOWED_FIRST_KEYWORDS:
-        return f"Only SELECT / WITH queries are allowed (got: {first_word!r})."
-    return None
-
-
 def _format_rows(columns: list[str], rows: list[tuple]) -> str:
     """Format a result set as an aligned text table with truncated cells."""
     if not rows:
@@ -215,8 +174,8 @@ def _format_rows(columns: list[str], rows: list[tuple]) -> str:
     def cell(value: object) -> str:
         text = "NULL" if value is None else str(value)
         text = text.replace("\n", " ").replace("\r", " ")
-        if len(text) > _SQL_CELL_MAX:
-            text = text[: _SQL_CELL_MAX - 1] + "…"
+        if len(text) > SQL_CELL_MAX:
+            text = text[: SQL_CELL_MAX - 1] + "…"
         return text
 
     str_rows = [[cell(v) for v in row] for row in rows]
@@ -246,11 +205,11 @@ def run_sql(sql: str, limit: int = 100) -> str:
     than the cap before the tool fetches rows. Long cell values are
     truncated. Returns an aligned text table.
     """
-    error = _validate_read_only_sql(sql)
+    error = validate_read_only_sql(sql)
     if error:
         return f"Error: {error}"
 
-    capped_limit = max(1, min(limit, _SQL_ROW_CAP))
+    capped_limit = max(1, min(limit, SQL_ROW_CAP))
 
     # Fresh strict read-only connection — do NOT route through
     # get_read_connection(), which silently falls back to a writable

@@ -17,6 +17,8 @@ from introspect.api.handlers.raw import raw_data as _raw_data
 from introspect.api.handlers.search import search as _search
 from introspect.api.handlers.sessions import session_detail as _session_detail
 from introspect.api.handlers.sessions import sessions as _sessions
+from introspect.api.handlers.sql import sql_execute as _sql_execute
+from introspect.api.handlers.sql import sql_page as _sql_page
 from introspect.api.handlers.stats import stats as _stats
 from introspect.api.handlers.tools import tools as _tools
 
@@ -114,6 +116,16 @@ async def bash(  # noqa: PLR0913
     page: int = Query(1, ge=1),
 ):
     return await _bash(request, prefix, session, project, q, failed, page)
+
+
+@router.get("/sql", response_class=HTMLResponse)
+async def sql_page(request: Request):
+    return await _sql_page(request)
+
+
+@router.post("/sql", response_class=HTMLResponse)
+async def sql_execute(request: Request):
+    return await _sql_execute(request)
 
 
 @router.get("/stats", response_class=HTMLResponse)
