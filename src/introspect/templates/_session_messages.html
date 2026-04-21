@@ -1,0 +1,107 @@
+{# Render a potentially long text body with an Alpine-driven collapse wrapper.
+   When ``needs_collapse`` is false the body renders as a plain <pre>; when
+   true, a single <pre> toggles the ``msg-text-clamp`` class and a meta/banner
+   line exposes line + char counts. ``extra_class`` appends modifiers like
+   ``msg-text-human`` / ``msg-text-error``. Inner Alpine scope uses
+   ``expanded`` (not ``open``) to avoid shadowing the outer tool-call scope. #}
+{% macro clamp_body(text, needs_collapse, line_count, char_count, extra_class='') %}
+    {% if needs_collapse %}
+    <div x-data="{ expanded: false }">
+        <pre class="msg-text {{ extra_class }}"
+             :class="{ 'msg-text-clamp': !expanded }"
+             @click="expanded = !expanded">{{ text }}</pre>
+        <div class="msg-text-meta" x-show="!expanded" @click="expanded = true">{{ line_count }} lines · {{ char_count }} chars — click to expand</div>
+        <button class="tool-btn tool-btn-sm" x-show="expanded" style="display:none;" @click="expanded = false">Collapse</button>
+    </div>
+    {% else %}
+    <pre class="msg-text {{ extra_class }}">{{ text }}</pre>
+    {% endif %}
+{% endmacro %}
+
+<h2>Messages ({{ messages|length }})</h2>
+
+<div x-data="{
+        hideThinking: localStorage.getItem('introspect.hideThinking') === '1',
+        hideTools: localStorage.getItem('introspect.hideTools') === '1',
+        onlyHuman: localStorage.getItem('introspect.onlyHuman') === '1',
+        save() {
+            localStorage.setItem('introspect.hideThinking', this.hideThinking ? '1' : '0');
+            localStorage.setItem('introspect.hideTools', this.hideTools ? '1' : '0');
+            localStorage.setItem('introspect.onlyHuman', this.onlyHuman ? '1' : '0');
+        }
+     }"
+     x-init="$watch('hideThinking', save); $watch('hideTools', save); $watch('onlyHuman', save)">
+<div class="msg-filters">
+    <label><input type="checkbox" x-model="hideThinking"> Hide thinking</label>
+    <label><input type="checkbox" x-model="hideTools"> Hide tool calls</label>
+    <label><input type="checkbox" x-model="onlyHuman"> Only human turns</label>
+    <button type="button" class="tool-btn tool-btn-sm"
+            @click="$dispatch('tools-expand-all')">Expand all tools</button>
+    <button type="button" class="tool-btn tool-btn-sm"
+            @click="$dispatch('tools-collapse-all')">Collapse all</button>
+</div>
+
+    {% for msg in messages %}
+    {%- set show_class = 'kind-' ~ msg.kind -%}
+    <div {% if msg.is_first_block and msg.uuid %}id="msg-{{ msg.uuid }}"{% endif %} class="msg-row {{ show_class }}{% if msg.is_sidechain %} is-sidechain{% endif %}"
+         {% if msg.kind == 'agent_thinking' %}x-show="!hideThinking && !onlyHuman"{% endif %}
+         {% if msg.kind == 'agent_tool_call' %}x-show="!hideTools && !onlyHuman"{% endif %}
+         {% if msg.kind == 'agent_text' %}x-show="!onlyHuman"{% endif %}
+         {% if msg.kind == 'slash_command' %}x-show="!onlyHuman"{% endif %}
+         {% if msg.kind == 'subagent_prompt' %}x-show="!onlyHuman"{% endif %}>
+
+        {% if msg.kind == 'human_prompt' %}
+            <div class="msg-kind-label">you <span class="msg-time" title="{{ msg.timestamp_full }}">{{ msg.timestamp }}</span></div>
+            {{ clamp_body(msg.text, msg.text_needs_collapse, msg.text_line_count, msg.text_char_count, 'msg-text-human') }}
+
+        {% elif msg.kind == 'subagent_prompt' %}
+            <div class="msg-kind-label">prompt to subagent <span class="sidechain-badge">subagent</span> <span class="msg-time" title="{{ msg.timestamp_full }}">{{ msg.timestamp }}</span></div>
+            {{ clamp_body(msg.text, msg.text_needs_collapse, msg.text_line_count, msg.text_char_count) }}
+
+        {% elif msg.kind == 'slash_command' %}
+            <div class="slash-divider">
+                <span>{{ msg.command_label }}</span>
+            </div>
+
+        {% elif msg.kind == 'agent_text' %}
+            <div class="msg-kind-label">assistant{% if msg.is_sidechain %} <span class="sidechain-badge">subagent</span>{% endif %}{% if msg.tokens_summary %} <span class="token-badge" title="{{ msg.tokens_title }}">{{ msg.tokens_summary }}</span>{% endif %} <span class="msg-time" title="{{ msg.timestamp_full }}">{{ msg.timestamp }}</span></div>
+            {{ clamp_body(msg.text, msg.text_needs_collapse, msg.text_line_count, msg.text_char_count) }}
+
+        {% elif msg.kind == 'agent_thinking' %}
+            <div class="msg-kind-label">thinking{% if msg.is_sidechain %} <span class="sidechain-badge">subagent</span>{% endif %}{% if msg.tokens_summary %} <span class="token-badge" title="{{ msg.tokens_title }}">{{ msg.tokens_summary }}</span>{% endif %} <span class="msg-time" title="{{ msg.timestamp_full }}">{{ msg.timestamp }}</span></div>
+            {% if msg.thinking_has_more %}
+            <div x-data="{ open: false }">
+                <pre class="msg-text" x-show="!open">{{ msg.thinking_preview }}</pre>
+                <pre class="msg-text" x-show="open" style="display:none;">{{ msg.thinking_text }}</pre>
+                <button @click="open = !open" class="tool-btn tool-btn-sm" x-text="open ? 'Collapse' : 'Expand'"></button>
+            </div>
+            {% else %}
+            <pre class="msg-text">{{ msg.thinking_text }}</pre>
+            {% endif %}
+
+        {% elif msg.kind == 'agent_tool_call' %}
+            <div id="tc-{{ msg.tool_use_id }}" x-data="{ open: false }"
+                 @tools-expand-all.window="open = true"
+                 @tools-collapse-all.window="open = false">
+                <div class="tool-call-line" @click="open = !open">
+                    <strong>{{ msg.tool_name }}</strong>
+                    {% if msg.tool_hint %}<span class="tool-hint">{{ msg.tool_hint }}</span>{% endif %}
+                    {% if msg.is_error %}<span class="badge badge-error">error</span>{% endif %}
+                    {% if msg.exec_time %}<span class="exec-time">{{ msg.exec_time }}</span>{% endif %}
+                    {% if msg.is_sidechain %}<span class="sidechain-badge">subagent</span>{% endif %}
+                    <span class="msg-time" title="{{ msg.timestamp_full }}">{{ msg.timestamp }}</span>
+                    <span class="tool-chevron" x-text="open ? '▾' : '▸'"></span>
+                </div>
+                <div x-show="open" style="display:none;">
+                    <div class="tool-section-label">input</div>
+                    {{ clamp_body(msg.tool_input, msg.tool_input_needs_collapse, msg.tool_input_line_count, msg.tool_input_char_count) }}
+                    {% if msg.tool_result %}
+                    <div class="tool-section-label">result{% if msg.is_error %} (error){% endif %}</div>
+                    {{ clamp_body(msg.tool_result, msg.tool_result_needs_collapse, msg.tool_result_line_count, msg.tool_result_char_count, 'msg-text-error' if msg.is_error else '') }}
+                    {% endif %}
+                </div>
+            </div>
+        {% endif %}
+    </div>
+    {% endfor %}
+</div>

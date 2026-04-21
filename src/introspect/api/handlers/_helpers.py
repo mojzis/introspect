@@ -8,6 +8,15 @@ import duckdb
 from fastapi import Request
 from fastapi.templating import Jinja2Templates
 
+from introspect.pricing import (
+    PRICING_CACHE_READ_RATE_SQL,
+    PRICING_CACHE_WRITE_1H_RATE_SQL,
+    PRICING_CACHE_WRITE_5M_RATE_SQL,
+    PRICING_INPUT_RATE_SQL,
+    PRICING_OUTPUT_RATE_SQL,
+    compute_cost_usd,
+)
+
 log = logging.getLogger(__name__)
 
 TEMPLATE_DIR = Path(__file__).resolve().parent.parent.parent / "templates"
@@ -31,6 +40,7 @@ SESSIONS_SORT_COLS = {
     "files_edited": "fw_agg.files_edited",
     "files_read_only": "fr_agg.files_read_only",
     "files_outside": "fr_agg.files_outside",
+    "cost": "sc.cost_usd",
 }
 SESSIONS_SORT_DEFAULT = "started_at"
 
@@ -73,6 +83,135 @@ TOOL_COUNTS_SUBQUERY = """(
     SELECT session_id, COUNT(*) AS tool_count
     FROM tool_calls GROUP BY session_id
 ) tc"""
+
+
+def _build_session_cost_subquery() -> str:
+    """Assemble the per-session $ cost subquery, plumbing in the rate CASE strings.
+
+    Reads from the deduped ``assistant_message_costs`` view and computes cost
+    per row (so mixed-model sessions roll up correctly) — done in DuckDB
+    rather than Python so the sessions list can ``ORDER BY cost_usd`` without
+    materializing every assistant message.
+
+    The ``cc_fallback`` term covers the legacy schema where
+    ``usage.cache_creation_input_tokens`` is set but the
+    ``cache_creation.{ephemeral_5m,ephemeral_1h}_input_tokens`` sub-fields
+    are zero — bill those tokens at the 5m write rate (Anthropic's older
+    default).  Mirrors the Python fallback in ``fetch_token_usage``.
+    """
+    cc_fallback = (
+        "(CASE WHEN cache_creation_5m = 0 AND cache_creation_1h = 0 "
+        "THEN cache_creation_tokens ELSE 0 END)"
+    )
+    cost_expr = (
+        f"input_tokens * ({PRICING_INPUT_RATE_SQL})"
+        f" + output_tokens * ({PRICING_OUTPUT_RATE_SQL})"
+        f" + cache_read_tokens * ({PRICING_CACHE_READ_RATE_SQL})"
+        f" + cache_creation_5m * ({PRICING_CACHE_WRITE_5M_RATE_SQL})"
+        f" + cache_creation_1h * ({PRICING_CACHE_WRITE_1H_RATE_SQL})"
+        f" + {cc_fallback} * ({PRICING_CACHE_WRITE_5M_RATE_SQL})"
+    )
+    sql = (
+        f"(SELECT session_id, SUM(({cost_expr}) / 1000000.0) AS cost_usd "  # noqa: S608
+        "FROM assistant_message_costs GROUP BY session_id) sc"
+    )
+    return sql
+
+
+SESSION_COST_SUBQUERY = _build_session_cost_subquery()
+
+
+def build_cost_attribution_sql(amc_filter: str = "") -> str:
+    """Build the full cost-attribution query used by both cost views.
+
+    The result query yields one row per deduped assistant message with the
+    bloat classifier inputs attached (``user_block_type``, ``tool_name``,
+    ``tool_input``). Two consumers share this query:
+
+    * ``_build_cost_context`` (session-detail Cost tab) — scopes to one
+      session via ``WHERE session_id = ?``.
+    * ``_build_huge_reads_split`` (Cost Overview) — runs unscoped across
+      every session.
+
+    Keeping the classifier CTE in one place means the two paths can't drift
+    — "huge reads" on the overview must agree with what the session-detail
+    Cost tab calls Read-category cache creation.
+
+    Args:
+        amc_filter: a SQL ``WHERE`` clause (including the keyword) to scope
+            the inner ``assistant_message_costs`` read, e.g.
+            ``"WHERE session_id = ?"``. Empty string means "all sessions".
+
+    The returned SQL yields columns:
+        session_id, uuid, timestamp, is_sidechain, model,
+        input_tokens, output_tokens, cache_read_tokens, cc_total,
+        cache_creation_5m, cache_creation_1h,
+        user_block_type, tool_name, tool_input
+    """
+    # amc_filter is a trusted module-local literal ("" or "WHERE session_id = ?"
+    # — never user input), so splicing it into the query is safe.
+    amc_cte = f"WITH amc AS (SELECT * FROM assistant_message_costs {amc_filter})"  # noqa: S608
+    return amc_cte + _COST_ATTRIBUTION_STATIC_TAIL
+
+
+# Static tail of the cost-attribution SQL — the only variable part is the
+# ``amc`` CTE's WHERE clause (handled by :func:`build_cost_attribution_sql`),
+# so the rest lives in one place as a module constant.
+_COST_ATTRIBUTION_STATIC_TAIL = """,
+        parent_blocks AS (
+            SELECT
+                amc.uuid AS amc_uuid,
+                json_extract_string(
+                    u.message, '$.content[' || i.idx || '].type'
+                ) AS block_type,
+                json_extract_string(
+                    u.message, '$.content[' || i.idx || '].tool_use_id'
+                ) AS block_tool_use_id,
+                i.idx AS block_idx
+            FROM amc
+            JOIN raw_messages u
+              ON u.uuid = amc.parent_uuid AND u.type = 'user'
+              AND json_array_length(json_extract(u.message, '$.content')) > 0,
+              generate_series(
+                  0,
+                  CAST(json_array_length(
+                      json_extract(u.message, '$.content')
+                  ) - 1 AS BIGINT)
+              ) AS i(idx)
+        ),
+        chosen_block AS (
+            -- Prefer a tool_result block (any index) over a text block.
+            SELECT amc_uuid,
+                   FIRST(block_type ORDER BY
+                         CASE WHEN block_type = 'tool_result' THEN 0 ELSE 1 END,
+                         block_idx) AS user_block_type,
+                   FIRST(block_tool_use_id ORDER BY
+                         CASE WHEN block_type = 'tool_result' THEN 0 ELSE 1 END,
+                         block_idx) AS tool_use_id
+            FROM parent_blocks
+            GROUP BY amc_uuid
+        )
+        SELECT
+            amc.session_id,
+            amc.uuid,
+            amc.timestamp,
+            amc.is_sidechain,
+            amc.model,
+            amc.input_tokens,
+            amc.output_tokens,
+            amc.cache_read_tokens,
+            amc.cache_creation_tokens AS cc_total,
+            amc.cache_creation_5m,
+            amc.cache_creation_1h,
+            cb.user_block_type,
+            tc.tool_name,
+            tc.tool_input
+        FROM amc
+        LEFT JOIN chosen_block cb ON cb.amc_uuid = amc.uuid
+        LEFT JOIN tool_calls tc ON tc.tool_use_id = cb.tool_use_id
+        ORDER BY amc.timestamp
+"""
+
 
 # Reusable SQL fragments for per-session file metrics
 # (backed by file_reads / file_writes views).
@@ -163,7 +302,8 @@ SESSION_INFO_SELECT = """
     COALESCE(fw_agg.files_edited, 0) AS files_edited,
     COALESCE(fr_agg.files_read_only, 0) AS files_read_only,
     COALESCE(fr_agg.files_outside, 0) AS files_outside,
-    cmd.commands
+    cmd.commands,
+    sc.cost_usd
 """
 
 SESSION_INFO_JOINS = f"""
@@ -172,6 +312,7 @@ SESSION_INFO_JOINS = f"""
     LEFT JOIN {FILE_READS_SUBQUERY} ON ls.session_id = fr_agg.session_id
     LEFT JOIN {FILE_WRITES_SUBQUERY} ON ls.session_id = fw_agg.session_id
     LEFT JOIN {COMMAND_LIST_SUBQUERY} ON ls.session_id = cmd.session_id
+    LEFT JOIN {SESSION_COST_SUBQUERY} ON ls.session_id = sc.session_id
 """
 
 _EMPTY_SESSION_INFO: dict[str, object] = {
@@ -191,7 +332,27 @@ _EMPTY_SESSION_INFO: dict[str, object] = {
     "files_read_only": 0,
     "files_outside": 0,
     "commands": "",
+    "cost_usd": None,
+    "cost": "—",
 }
+
+
+_COST_DISPLAY_THRESHOLD = 0.01
+
+
+def format_cost(value: float | None) -> str:
+    """Render a USD cost the way the sessions list / cost tab want it.
+
+    Returns ``"—"`` for unknown / null / negative, ``"<$0.01"`` for sub-cent
+    costs, ``"$0.00"`` for exact zero, and ``"$0.42"`` style otherwise.
+    """
+    if value is None or value < 0:
+        return "—"
+    if value == 0:
+        return "$0.00"
+    if value < _COST_DISPLAY_THRESHOLD:
+        return "<$0.01"
+    return f"${value:.2f}"
 
 
 def session_row_to_dict(row: tuple) -> dict:
@@ -213,8 +374,10 @@ def session_row_to_dict(row: tuple) -> dict:
         files_read_only,
         files_outside,
         commands,
+        cost_usd,
     ) = row
     dur_str = format_duration(duration.total_seconds()) if duration else ""
+    cost_value = float(cost_usd) if cost_usd is not None else None
     return {
         "id": session_id,
         "date": str(started_at)[5:10] if started_at else "",
@@ -233,6 +396,8 @@ def session_row_to_dict(row: tuple) -> dict:
         "files_read_only": files_read_only or 0,
         "files_outside": files_outside or 0,
         "commands": commands or "",
+        "cost_usd": cost_value,
+        "cost": format_cost(cost_value),
     }
 
 
@@ -254,47 +419,98 @@ def fetch_distinct_projects(
     return [r[0] for r in rows]
 
 
+_EMPTY_TOKEN_USAGE: dict = {
+    "input": 0,
+    "output": 0,
+    "cache_read": 0,
+    "cache_creation": 0,
+    "cache_creation_5m": 0,
+    "cache_creation_1h": 0,
+    "cost_usd": 0.0,
+    "cost": "—",
+}
+
+
 def fetch_token_usage(
     db: duckdb.DuckDBPyConnection,
     *,
     session_id: str | None = None,
-    include_cache: bool = False,
-) -> tuple | None:
-    """Fetch token usage sums. Returns None on error.
+) -> dict:
+    """Fetch deduped token usage + estimated $ cost.
 
-    Without session_id: returns (input_tokens, output_tokens).
-    With include_cache: appends (cache_creation_tokens, cache_read_tokens).
+    Reads from ``assistant_message_costs`` (deduped by ``message.id``) so
+    callers don't need to know about the raw_messages duplication bug.
+
+    Always returns a dict (empty totals + ``"—"`` cost when the query fails
+    or there is no data) so templates don't need ``or {}`` guards.
+
+    Cost is computed in Python so we can apply the per-row cache_creation
+    fallback (``cc_total > 0`` with both 5m/1h zero implies legacy 5m).
     """
-    cache_cols = ""
-    if include_cache:
-        cache_cols = """,
-            SUM(CAST(json_extract(
-                message, '$.usage.cache_creation_input_tokens'
-            ) AS BIGINT)),
-            SUM(CAST(json_extract(
-                message, '$.usage.cache_read_input_tokens'
-            ) AS BIGINT))"""
-
     session_filter = ""
     params: list[str] = []
     if session_id is not None:
-        session_filter = "AND session_id = ?"
+        session_filter = "WHERE session_id = ?"
         params.append(session_id)
 
     try:
-        return db.execute(
+        rows = db.execute(
             f"""
             SELECT
-                SUM(CAST(json_extract(message, '$.usage.input_tokens') AS BIGINT)),
-                SUM(CAST(json_extract(message, '$.usage.output_tokens') AS BIGINT))
-                {cache_cols}
-            FROM raw_messages
-            WHERE type = 'assistant'
-              AND json_extract(message, '$.usage.input_tokens') IS NOT NULL
-              {session_filter}
+                model,
+                COALESCE(SUM(input_tokens), 0),
+                COALESCE(SUM(output_tokens), 0),
+                COALESCE(SUM(cache_read_tokens), 0),
+                COALESCE(SUM(cache_creation_tokens), 0),
+                COALESCE(SUM(cache_creation_5m), 0),
+                COALESCE(SUM(cache_creation_1h), 0)
+            FROM assistant_message_costs
+            {session_filter}
+            GROUP BY model
         """,  # noqa: S608
             params,
-        ).fetchone()
-    except Exception:
-        log.debug("token usage query failed", exc_info=True)
-        return None
+        ).fetchall()
+    except duckdb.CatalogException:
+        # Lazy-mode read connections may not yet have the derived view; the
+        # caller can still render with empty totals.  Any other failure is a
+        # bug we want to surface, not a zeroed-out template.
+        log.warning("assistant_message_costs view missing", exc_info=True)
+        return dict(_EMPTY_TOKEN_USAGE)
+
+    totals = {
+        "input": 0,
+        "output": 0,
+        "cache_read": 0,
+        "cache_creation": 0,
+        "cache_creation_5m": 0,
+        "cache_creation_1h": 0,
+    }
+    cost_usd = 0.0
+    for row in rows:
+        model = row[0]
+        in_tok, out_tok, cr_tok, cc_tok, cc_5m, cc_1h = (int(v or 0) for v in row[1:])
+        totals["input"] += in_tok
+        totals["output"] += out_tok
+        totals["cache_read"] += cr_tok
+        totals["cache_creation"] += cc_tok
+        totals["cache_creation_5m"] += cc_5m
+        totals["cache_creation_1h"] += cc_1h
+        # Legacy schema: usage.cache_creation_input_tokens with no 5m/1h
+        # breakdown — bill at the 5m rate (Anthropic's older default).
+        eff_5m, eff_1h = cc_5m, cc_1h
+        if cc_5m == 0 and cc_1h == 0 and cc_tok > 0:
+            eff_5m = cc_tok
+        cost_usd += compute_cost_usd(
+            model=model,
+            input_tokens=in_tok,
+            output_tokens=out_tok,
+            cache_read_tokens=cr_tok,
+            cache_creation_5m=eff_5m,
+            cache_creation_1h=eff_1h,
+        )
+
+    return {
+        **totals,
+        "cost_usd": cost_usd,
+        "cost": format_cost(cost_usd),
+    }

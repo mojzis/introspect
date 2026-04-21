@@ -48,6 +48,10 @@
         .msg-text { white-space: pre-wrap; word-break: break-word; margin: 0; font-size: 0.88rem; }
         .msg-text-human { font-size: 0.95rem; font-weight: 500; color: #1a1a2e; }
         .msg-text-error { color: #a00; }
+        .msg-text-clamp { max-height: calc(3 * 1.35em); overflow: hidden; position: relative; cursor: pointer; mask-image: linear-gradient(to bottom, black 70%, transparent 100%); -webkit-mask-image: linear-gradient(to bottom, black 70%, transparent 100%); }
+        .msg-text-meta { font-size: 0.72rem; color: #888; margin-top: 0.25rem; cursor: pointer; user-select: none; }
+        .msg-text-meta:hover { color: #555; }
+        .token-badge { font-family: ui-monospace, SFMono-Regular, Menlo, monospace; color: #888; font-size: 0.72rem; padding: 0.05rem 0.35rem; border-radius: 4px; background: rgba(0,0,0,0.03); }
         .kind-human_prompt { border-left-color: #3b5bdb; background: #eef2ff; padding-top: 0.85rem; padding-bottom: 0.85rem; }
         .kind-subagent_prompt { border-left-color: #8a5ad0; background: #f6f1ff; }
         .kind-agent_text { border-left-color: #999; }
@@ -93,6 +97,7 @@
         <a href="/bash" hx-get="/bash" hx-target="#content" hx-push-url="true">Bash</a>
         <a href="/mcps" hx-get="/mcps" hx-target="#content" hx-push-url="true">MCPs</a>
         <a href="/stats" hx-get="/stats" hx-target="#content" hx-push-url="true">Stats</a>
+        <a href="/cost-overview" hx-get="/cost-overview" hx-target="#content" hx-push-url="true">Cost Overview</a>
         <a href="/raw" hx-get="/raw" hx-target="#content" hx-push-url="true">Raw Data</a>
     </nav>
     <div class="container" id="content">

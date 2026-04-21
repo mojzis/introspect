@@ -140,6 +140,7 @@ def materialize_views(
         "session_titles",
         "conversation_turns",
         "session_messages_enriched",
+        "assistant_message_costs",
         "file_reads",
         "file_writes",
         "tool_calls",
@@ -268,6 +269,52 @@ def _create_derived_views(conn: duckdb.DuckDBPyConnection) -> None:
         FROM raw_messages rm
         LEFT JOIN project_map pm ON rm.cwd = pm.cwd
         GROUP BY rm.session_id
+    """)
+
+    # Per-assistant-message token usage, deduplicated by message.id.
+    #
+    # raw_messages can contain duplicate API responses with different `uuid`
+    # values but identical `message.id` (the same Anthropic API response
+    # logged more than once — observed at up to 17 copies).  Naive SUM
+    # aggregations over raw_messages therefore over-count tokens (and cost)
+    # by 2-17x.  Every cost/token computation should read from this view.
+    #
+    # `DISTINCT ON` is supported by DuckDB; the ORDER BY in the same SELECT
+    # makes "earliest copy wins" deterministic.
+    conn.execute("""
+        CREATE OR REPLACE VIEW assistant_message_costs AS
+        SELECT DISTINCT ON (json_extract_string(message, '$.id'))
+            session_id,
+            uuid,
+            parent_uuid,
+            timestamp,
+            is_sidechain,
+            model,
+            json_extract_string(message, '$.id') AS message_id,
+            COALESCE(CAST(json_extract(
+                message, '$.usage.input_tokens'
+            ) AS BIGINT), 0) AS input_tokens,
+            COALESCE(CAST(json_extract(
+                message, '$.usage.output_tokens'
+            ) AS BIGINT), 0) AS output_tokens,
+            COALESCE(CAST(json_extract(
+                message, '$.usage.cache_read_input_tokens'
+            ) AS BIGINT), 0) AS cache_read_tokens,
+            COALESCE(CAST(json_extract(
+                message, '$.usage.cache_creation_input_tokens'
+            ) AS BIGINT), 0) AS cache_creation_tokens,
+            COALESCE(CAST(json_extract(
+                message,
+                '$.usage.cache_creation.ephemeral_5m_input_tokens'
+            ) AS BIGINT), 0) AS cache_creation_5m,
+            COALESCE(CAST(json_extract(
+                message,
+                '$.usage.cache_creation.ephemeral_1h_input_tokens'
+            ) AS BIGINT), 0) AS cache_creation_1h
+        FROM raw_messages
+        WHERE type = 'assistant'
+          AND json_extract_string(message, '$.id') IS NOT NULL
+        ORDER BY json_extract_string(message, '$.id'), timestamp
     """)
 
     # Tool calls: assistant tool_use content blocks joined with results.

@@ -11,6 +11,7 @@ from introspect.api.handlers._helpers import (
     SESSIONS_SORT_DEFAULT,
 )
 from introspect.api.handlers.bash import bash as _bash
+from introspect.api.handlers.cost_overview import cost_overview as _cost_overview
 from introspect.api.handlers.dashboard import dashboard as _dashboard
 from introspect.api.handlers.mcps import mcps as _mcps
 from introspect.api.handlers.raw import raw_data as _raw_data
@@ -56,8 +57,12 @@ async def sessions(  # noqa: PLR0913
 
 
 @router.get("/sessions/{session_id}", response_class=HTMLResponse)
-async def session_detail(request: Request, session_id: str):
-    return await _session_detail(request, session_id)
+async def session_detail(
+    request: Request,
+    session_id: str,
+    tab: str = Query("messages"),
+):
+    return await _session_detail(request, session_id, tab)
 
 
 @router.get("/search", response_class=HTMLResponse)
@@ -119,3 +124,8 @@ async def bash(  # noqa: PLR0913
 @router.get("/stats", response_class=HTMLResponse)
 async def stats(request: Request):
     return await _stats(request)
+
+
+@router.get("/cost-overview", response_class=HTMLResponse)
+async def cost_overview(request: Request):
+    return await _cost_overview(request)

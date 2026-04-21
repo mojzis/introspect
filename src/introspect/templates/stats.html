@@ -38,13 +38,23 @@
     </div>
     {% if token_usage %}
     <div class="stat-card">
-        <div class="value">{{ "{:,}".format(token_usage[0] or 0) }}</div>
+        <div class="value">{{ "{:,}".format(token_usage.input or 0) }}</div>
         <div class="label">Total Input Tokens</div>
     </div>
     <div class="stat-card">
-        <div class="value">{{ "{:,}".format(token_usage[1] or 0) }}</div>
+        <div class="value">{{ "{:,}".format(token_usage.output or 0) }}</div>
         <div class="label">Total Output Tokens</div>
     </div>
+    <div class="stat-card">
+        <div class="value">{{ token_usage.cost or '—' }}</div>
+        <div class="label">Estimated Cost (all-time)</div>
+    </div>
+    {% if avg_cost %}
+    <div class="stat-card">
+        <div class="value">{{ avg_cost }}</div>
+        <div class="label">Avg Cost / Session</div>
+    </div>
+    {% endif %}
     {% endif %}
     {% if cache_tokens and (cache_tokens[0] or cache_tokens[1]) %}
     <div class="stat-card">

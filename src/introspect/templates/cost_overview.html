@@ -1,0 +1,119 @@
+{% extends parent %}
+{% block title %}Cost Overview - Introspect{% endblock %}
+{% block content %}
+<h1>Cost Overview</h1>
+
+<div class="card">
+    <h2>Where the money goes</h2>
+    {% if pareto.total_session_count %}
+    <div class="stat-grid" style="margin-top:0.8rem;">
+        <div class="stat-card">
+            <div class="value">{{ pareto.total_cost }}</div>
+            <div class="label">Total cost (all sessions)</div>
+        </div>
+        <div class="stat-card">
+            <div class="value">{{ pareto.pareto_session_count }}</div>
+            <div class="label">Sessions to 80%</div>
+        </div>
+        <div class="stat-card">
+            <div class="value">{{ pareto.total_session_count }}</div>
+            <div class="label">Sessions with cost</div>
+        </div>
+    </div>
+    <p style="margin-top:0.8rem;">
+        These <strong>{{ pareto.pareto_session_count }}</strong> sessions
+        represent 80% of <strong>{{ pareto.total_cost }}</strong> total cost
+        ({{ pareto.pareto_cost }} cumulative).
+    </p>
+    {% else %}
+    <p>No cost data yet.</p>
+    {% endif %}
+</div>
+
+<h2>Pareto table</h2>
+<div class="card">
+    {% if pareto.rows %}
+    <p style="color:#888;margin:0 0 0.6rem;">Sessions ranked by cost. The highlighted row is where cumulative spend crosses 80% — everything above it is the "vital few".</p>
+    <table>
+        <thead>
+            <tr>
+                <th>Started</th>
+                <th>Project</th>
+                <th>Title</th>
+                <th style="text-align:right;">Cost</th>
+                <th style="text-align:right;">Cumulative</th>
+                <th style="text-align:right;">% of total</th>
+            </tr>
+        </thead>
+        <tbody>
+            {% for row in pareto.rows %}
+            <tr{% if row.is_cutoff %} class="pareto-cutoff" style="background:#fff3cd;font-weight:600;border-top:2px solid #c0a000;"{% elif not row.in_pareto %} style="color:#888;"{% endif %}>
+                <td>{{ row.started_at }}</td>
+                <td>{{ row.project }}</td>
+                <td>
+                    <a href="/sessions/{{ row.session_id }}" hx-get="/sessions/{{ row.session_id }}" hx-target="#content" hx-push-url="true">{{ row.title or row.session_id[:8] }}</a>
+                </td>
+                <td style="text-align:right;">
+                    <a href="/sessions/{{ row.session_id }}?tab=cost" hx-get="/sessions/{{ row.session_id }}?tab=cost" hx-target="#content" hx-push-url="true">{{ row.cost }}</a>
+                </td>
+                <td style="text-align:right;">{{ row.cumulative }}</td>
+                <td style="text-align:right;">{{ "%.1f"|format(row.cum_pct) }}%</td>
+            </tr>
+            {% endfor %}
+        </tbody>
+    </table>
+    {% else %}
+    <p>No sessions with cost yet.</p>
+    {% endif %}
+</div>
+
+<h2>Breakdowns</h2>
+<div class="card">
+    <p style="color:#888;margin:0 0 0.6rem;">Each breakdown partitions every session into two buckets and compares total spend. "% of total $" sums to 100% across the pair.</p>
+
+    <div style="display:grid;grid-template-columns:repeat(auto-fit,minmax(320px,1fr));gap:1rem;">
+
+        {% set splits = [
+            ("Subagent presence", subagent_split, "Sessions that used Task/Agent subagents or produced sidechain messages."),
+            ("Huge reads", huge_reads_split, "Sessions where Read-category cache creation is ≥10% of cost and ≥100k tokens."),
+            ("Skill / slash command usage", skill_split, "Sessions that invoked a non-built-in slash command or skill."),
+        ] %}
+
+        {% for label, split, hint in splits %}
+        <div>
+            <h3 style="margin-bottom:0.25rem;">{{ label }}</h3>
+            <p style="color:#888;font-size:0.82rem;margin:0 0 0.4rem;">{{ hint }}</p>
+            <table>
+                <thead>
+                    <tr>
+                        <th></th>
+                        <th style="text-align:right;">Sessions</th>
+                        <th style="text-align:right;">Total $</th>
+                        <th style="text-align:right;">Mean $</th>
+                        <th style="text-align:right;">% of total $</th>
+                    </tr>
+                </thead>
+                <tbody>
+                    <tr>
+                        <td><strong>With</strong></td>
+                        <td style="text-align:right;">{{ split["with"].sessions }}</td>
+                        <td style="text-align:right;">{{ split["with"].cost }}</td>
+                        <td style="text-align:right;">{{ split["with"].mean_cost }}</td>
+                        <td style="text-align:right;">{{ "%.1f"|format(split["with"].pct_cost) }}%</td>
+                    </tr>
+                    <tr>
+                        <td><strong>Without</strong></td>
+                        <td style="text-align:right;">{{ split["without"].sessions }}</td>
+                        <td style="text-align:right;">{{ split["without"].cost }}</td>
+                        <td style="text-align:right;">{{ split["without"].mean_cost }}</td>
+                        <td style="text-align:right;">{{ "%.1f"|format(split["without"].pct_cost) }}%</td>
+                    </tr>
+                </tbody>
+            </table>
+        </div>
+        {% endfor %}
+
+    </div>
+</div>
+
+{% endblock %}

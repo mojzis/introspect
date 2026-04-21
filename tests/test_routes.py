@@ -598,6 +598,7 @@ def test_sessions_all_empty_params_returns_200():
         "model",
         "project",
         "branch",
+        "cost",
     ],
 )
 def test_sessions_sort_column(col):
@@ -701,6 +702,143 @@ def test_session_detail_expandable_blocks():
         assert response.status_code == 200
         # Tool use blocks are rendered (Bash tool call in test data)
         assert "Bash" in response.text
+
+
+# --- Session-detail entry tweaks: clamp, time-only stamps, token badges ---
+
+_TWEAK_SID = "01234567-abcd-abcd-abcd-fedcba987654"
+
+
+def _tweak_session_jsonl(tmp_dir: Path) -> Path:
+    """Session with long assistant text + short human prompt + token usage."""
+    long_body = "\n".join(f"line {i}" for i in range(1, 11))  # 10 lines
+    lines = [
+        # Give the first user row a ``toolUseResult`` key so DuckDB's schema
+        # inference sees the column (raw_messages SELECTs it). The field is
+        # otherwise irrelevant to the tests.
+        make_user_message(
+            _TWEAK_SID,
+            "u1",
+            None,
+            "2026-04-15T09:30:45.000Z",
+            "short hi",
+            tool_use_result={"content": "seed"},
+        ),
+        make_assistant_message(
+            _TWEAK_SID,
+            "a1",
+            "u1",
+            "2026-04-15T09:30:47.000Z",
+            [{"type": "text", "text": long_body}],
+            usage={
+                "input_tokens": 2134,
+                "output_tokens": 180,
+                "cache_read_input_tokens": 340,
+                "cache_creation_input_tokens": 5120,
+            },
+        ),
+    ]
+    return write_jsonl(tmp_dir, _TWEAK_SID, lines)
+
+
+@contextmanager
+def _tweak_client(tmp_path: Path):
+    """TestClient wired to the tweak-session fixture (long assistant body)."""
+    _tweak_session_jsonl(tmp_path)
+    db_path = tmp_path / "test.duckdb"
+    with (
+        patch.dict(
+            os.environ,
+            {
+                "INTROSPECT_DB_PATH": str(db_path),
+                "INTROSPECT_JSONL_GLOB": glob_pattern(tmp_path),
+                "INTROSPECT_DAYS": "0",
+            },
+        ),
+        TestClient(app) as client,
+    ):
+        yield client
+
+
+def test_session_detail_long_body_collapses():
+    """Long assistant text bodies render with clamp + meta indicator."""
+    with tempfile.TemporaryDirectory() as tmp_str:
+        tmp = Path(tmp_str)
+        with _tweak_client(tmp) as client:
+            response = client.get(f"/sessions/{_TWEAK_SID}?tab=messages")
+            assert response.status_code == 200
+            text = response.text
+            assert "msg-text-meta" in text
+            assert "click to expand" in text
+            # Body content is present.
+            assert "line 10" in text
+            # The <pre> surrounding the long body carries the Alpine class
+            # binding that toggles the clamp. Look in a 400-char window
+            # before "line 10" for that binding; the body should NOT render
+            # as a plain unclamped <pre class="msg-text"> elsewhere.
+            idx = text.find("line 10")
+            window_before = text[max(0, idx - 400) : idx]
+            assert "'msg-text-clamp': !expanded" in window_before
+            # Single-render design: the long body should appear only once in
+            # the rendered HTML (previous implementation rendered it twice,
+            # once per x-show branch).
+            assert text.count("line 10") == 1
+
+
+def test_session_detail_short_body_has_no_clamp():
+    """Short bodies (<=3 lines, <=240 chars) render without the clamp wrapper."""
+    with tempfile.TemporaryDirectory() as tmp, _patched_client(Path(tmp)) as client:
+        response = client.get(f"/sessions/{SID}?tab=messages")
+        assert response.status_code == 200
+        text = response.text
+        # Sample fixture has short bodies ("Sure, I can help!", "Hello, help me
+        # with tests") — none should trigger clamp.
+        # Confirm the short assistant reply is rendered as a plain msg-text.
+        assert "Sure, I can help!" in text
+        # And the short human prompt does NOT pull in a clamp wrapper.
+        human_idx = text.find("Hello, help me with tests")
+        assert human_idx != -1
+        window = text[max(0, human_idx - 200) : human_idx + 200]
+        assert "msg-text-clamp" not in window
+
+
+def test_session_detail_time_only_timestamp_with_title():
+    """Per-entry timestamps show HH:MM:SS with the full datetime in a title tip."""
+    with tempfile.TemporaryDirectory() as tmp_str:
+        tmp = Path(tmp_str)
+        with _tweak_client(tmp) as client:
+            response = client.get(f"/sessions/{_TWEAK_SID}?tab=messages")
+            assert response.status_code == 200
+            text = response.text
+            # Full datetime lives in the tooltip.
+            assert 'title="2026-04-15 09:30:47"' in text
+            # Visible text on the msg-time span is time-only.
+            assert ">09:30:47<" in text
+            # The visible span must not itself contain the date — only the
+            # adjacent title attribute should.
+            assert ">2026-04-15 09:30:47<" not in text
+
+
+def test_session_detail_assistant_token_badge():
+    """First-block assistant entries with usage render a token-badge + title."""
+    with tempfile.TemporaryDirectory() as tmp_str:
+        tmp = Path(tmp_str)
+        with _tweak_client(tmp) as client:
+            response = client.get(f"/sessions/{_TWEAK_SID}?tab=messages")
+            assert response.status_code == 200
+            text = response.text
+            assert "token-badge" in text
+            # Compact form: omit zero components, use arrow + ⚡/✎ glyphs.
+            assert "↓" in text
+            assert "↑" in text
+            assert "⚡" in text
+            assert "✎" in text
+            # Detailed tooltip includes raw counts.
+            assert "Input:" in text
+            assert "Output:" in text
+            assert "2,134" in text
+            assert "180" in text
+            assert "5,120" in text
 
 
 # --- Stats enrichment tests ---
@@ -1194,3 +1332,1173 @@ def test_session_detail_file_metrics_outside_count():
         text = response.text
         # One file (/home/user/other/config.yml) is outside /tmp/test
         assert "outside project" in text
+
+
+# --- Cost feature tests (sessions list + cost tab + dedup) ---
+
+
+def test_sessions_shows_cost_column():
+    """Sessions list has a Cost column rendering a $ value."""
+    with tempfile.TemporaryDirectory() as tmp, _patched_client(Path(tmp)) as client:
+        response = client.get("/sessions")
+        assert response.status_code == 200
+        assert "Cost" in response.text
+        assert "$" in response.text
+
+
+def test_sessions_cost_links_to_cost_tab():
+    """Cost cell wraps the value in a link to the session detail Cost tab."""
+    with tempfile.TemporaryDirectory() as tmp, _patched_client(Path(tmp)) as client:
+        response = client.get("/sessions")
+        assert response.status_code == 200
+        assert f'href="/sessions/{SID}?tab=cost"' in response.text
+
+
+def test_sessions_sort_by_cost():
+    """Sessions list accepts ?sort=cost without erroring."""
+    with tempfile.TemporaryDirectory() as tmp, _patched_client(Path(tmp)) as client:
+        response = client.get("/sessions?sort=cost&order=desc")
+        assert response.status_code == 200
+
+
+def test_session_detail_has_tab_strip():
+    """Session detail renders both tab links; messages is the default."""
+    with tempfile.TemporaryDirectory() as tmp, _patched_client(Path(tmp)) as client:
+        response = client.get(f"/sessions/{SID}")
+        assert response.status_code == 200
+        text = response.text
+        assert f"/sessions/{SID}?tab=messages" in text
+        assert f"/sessions/{SID}?tab=cost" in text
+        # Default tab highlights "Messages" via the bold border style.
+        assert "tab-strip" in text
+
+
+def test_session_detail_cost_tab_renders():
+    """Cost tab returns 200 and contains $, model, Read+Created, and SVG chart."""
+    with tempfile.TemporaryDirectory() as tmp, _patched_client(Path(tmp)) as client:
+        response = client.get(f"/sessions/{SID}?tab=cost")
+        assert response.status_code == 200
+        text = response.text
+        assert "$" in text
+        assert "claude-opus-4-6" in text
+        assert "Read" in text
+        assert "Created" in text
+        assert "<svg" in text
+
+
+def _dup_jsonl(tmp_dir: Path, session_id: str) -> Path:
+    """Build a JSONL with two assistant records sharing one message.id."""
+    usage = {
+        "input_tokens": 1_000_000,
+        "output_tokens": 1_000_000,
+        "cache_read_input_tokens": 0,
+        "cache_creation_input_tokens": 0,
+    }
+    lines = [
+        # Carry a tool_use_result on the seed user message so union_by_name
+        # picks the column up when materialising views.
+        make_user_message(
+            session_id,
+            "u1",
+            None,
+            "2026-04-21T10:00:00.000Z",
+            "hi",
+            tool_use_result={"content": "seed"},
+        ),
+        make_assistant_message(
+            session_id,
+            "a1",
+            "u1",
+            "2026-04-21T10:00:01.000Z",
+            [{"type": "text", "text": "ok"}],
+            model="claude-opus-4-7",
+            msg_id="msg-dedup-1",
+            usage=usage,
+        ),
+        # Duplicate: same message.id, different uuid, slightly later timestamp
+        make_assistant_message(
+            session_id,
+            "a1-dup",
+            "u1",
+            "2026-04-21T10:00:02.000Z",
+            [{"type": "text", "text": "ok"}],
+            model="claude-opus-4-7",
+            msg_id="msg-dedup-1",
+            usage=usage,
+        ),
+    ]
+    return write_jsonl(tmp_dir, session_id, lines)
+
+
+def test_session_cost_dedup():
+    """Duplicated message.id rows must collapse to one cost-bearing row."""
+    sid = "dedup-session-id-0000-0000-000000000001"
+    with tempfile.TemporaryDirectory() as tmp_str:
+        tmp = Path(tmp_str)
+        _dup_jsonl(tmp, sid)
+        db_path = tmp / "test.duckdb"
+        with (
+            patch.dict(
+                os.environ,
+                {
+                    "INTROSPECT_DB_PATH": str(db_path),
+                    "INTROSPECT_JSONL_GLOB": glob_pattern(tmp),
+                    "INTROSPECT_DAYS": "0",
+                },
+            ),
+            TestClient(app) as client,
+        ):
+            response = client.get(f"/sessions/{sid}?tab=cost")
+            assert response.status_code == 200
+            text = response.text
+            # 1M input * $5/M + 1M output * $25/M = $30.00 (single message,
+            # not $60 from the duplicated copy).
+            assert "$30.00" in text
+
+
+def _bloat_jsonl(tmp_dir: Path, session_id: str) -> Path:
+    """Build a JSONL where a Read-tool result is followed by a big cache-write."""
+    lines = [
+        make_user_message(
+            session_id, "u1", None, "2026-04-21T10:00:00.000Z", "please review"
+        ),
+        # First assistant message just initialises context (small usage)
+        make_assistant_message(
+            session_id,
+            "a1",
+            "u1",
+            "2026-04-21T10:00:01.000Z",
+            [
+                {
+                    "type": "tool_use",
+                    "id": "tu-read",
+                    "name": "Read",
+                    "input": {"file_path": "/repo/src/big_file.py"},
+                }
+            ],
+            model="claude-opus-4-7",
+            msg_id="msg-bloat-1",
+            usage={"input_tokens": 100, "output_tokens": 5},
+        ),
+        make_user_message(
+            session_id,
+            "u2",
+            "a1",
+            "2026-04-21T10:00:02.000Z",
+            [
+                {
+                    "type": "tool_result",
+                    "tool_use_id": "tu-read",
+                    "content": "x" * 1000,
+                    "is_error": False,
+                }
+            ],
+            tool_use_result={"content": "x" * 1000},
+            source_tool_uuid="a1",
+        ),
+        # Second assistant message: parent_uuid points at the user tool_result;
+        # the cache-creation tokens are attributed to the preceding Read.
+        make_assistant_message(
+            session_id,
+            "a2",
+            "u2",
+            "2026-04-21T10:00:03.000Z",
+            [{"type": "text", "text": "done"}],
+            model="claude-opus-4-7",
+            msg_id="msg-bloat-2",
+            usage={
+                "input_tokens": 100,
+                "output_tokens": 10,
+                "cache_creation_input_tokens": 200_000,
+                "cache_creation": {
+                    "ephemeral_5m_input_tokens": 200_000,
+                    "ephemeral_1h_input_tokens": 0,
+                },
+            },
+        ),
+    ]
+    return write_jsonl(tmp_dir, session_id, lines)
+
+
+def test_session_cost_bloat_attribution():
+    """Bloat table should attribute cache creation to the preceding Read tool."""
+    sid = "bloat-session-id-0000-0000-000000000001"
+    with tempfile.TemporaryDirectory() as tmp_str:
+        tmp = Path(tmp_str)
+        _bloat_jsonl(tmp, sid)
+        db_path = tmp / "test.duckdb"
+        with (
+            patch.dict(
+                os.environ,
+                {
+                    "INTROSPECT_DB_PATH": str(db_path),
+                    "INTROSPECT_JSONL_GLOB": glob_pattern(tmp),
+                    "INTROSPECT_DAYS": "0",
+                },
+            ),
+            TestClient(app) as client,
+        ):
+            response = client.get(f"/sessions/{sid}?tab=cost")
+            assert response.status_code == 200
+            text = response.text
+            assert "file read" in text
+            # basename of the read file should appear in the bloat bucket label
+            assert "big_file.py" in text
+
+
+def _subagent_jsonl(tmp_dir: Path, session_id: str) -> Path:
+    """Build a JSONL where a sidechain assistant message has cache_creation."""
+    lines = [
+        make_user_message(
+            session_id,
+            "u1",
+            None,
+            "2026-04-21T10:00:00.000Z",
+            "go",
+            tool_use_result={"content": "seed"},
+        ),
+        # Sidechain user prompt (simulating Task subagent dispatch)
+        make_user_message(
+            session_id,
+            "su1",
+            "u1",
+            "2026-04-21T10:00:01.000Z",
+            "subagent: do this",
+            is_sidechain=True,
+        ),
+        # Sidechain assistant response with significant cache_creation
+        make_assistant_message(
+            session_id,
+            "sa1",
+            "su1",
+            "2026-04-21T10:00:02.000Z",
+            [{"type": "text", "text": "done"}],
+            model="claude-opus-4-7",
+            msg_id="msg-side-1",
+            usage={
+                "input_tokens": 50,
+                "output_tokens": 10,
+                "cache_creation_input_tokens": 500_000,
+                "cache_creation": {
+                    "ephemeral_5m_input_tokens": 500_000,
+                    "ephemeral_1h_input_tokens": 0,
+                },
+            },
+            is_sidechain=True,
+        ),
+    ]
+    return write_jsonl(tmp_dir, session_id, lines)
+
+
+def test_session_cost_subagent_attribution():
+    """Sidechain rows feed the Subagent column orthogonally to category.
+
+    The fixture's sidechain assistant message has no preceding tool_use_id,
+    so it classifies as Conversation/human input — but lands under the
+    Subagent agent column rather than collapsing into a flat "Subagent"
+    category. That's the orthogonality contract.
+    """
+    sid = "subagent-session-0000-0000-000000000001"
+    with tempfile.TemporaryDirectory() as tmp_str:
+        tmp = Path(tmp_str)
+        _subagent_jsonl(tmp, sid)
+        db_path = tmp / "test.duckdb"
+        with (
+            patch.dict(
+                os.environ,
+                {
+                    "INTROSPECT_DB_PATH": str(db_path),
+                    "INTROSPECT_JSONL_GLOB": glob_pattern(tmp),
+                    "INTROSPECT_DAYS": "0",
+                },
+            ),
+            TestClient(app) as client,
+        ):
+            response = client.get(f"/sessions/{sid}?tab=cost")
+            assert response.status_code == 200
+            text = response.text
+            # Subagent appears as a column header AND in the agent column.
+            assert "Subagent" in text
+            # The orthogonal categories are still present (no flat "Subagent" cat).
+            assert "Read" in text
+            assert "Created" in text
+            assert "Conversation" in text
+
+
+# --- Phase 1: Cost chart (multi-series + inflection markers) tests ---
+
+
+def test_session_cost_tab_has_view_toggle():
+    """Cost tab renders an Alpine view-toggle with three click handlers."""
+    with tempfile.TemporaryDirectory() as tmp, _patched_client(Path(tmp)) as client:
+        response = client.get(f"/sessions/{SID}?tab=cost")
+        assert response.status_code == 200
+        text = response.text
+        assert "x-data" in text
+        # Assert on click handlers — these only exist on the toggle buttons,
+        # unlike the word "Total" which appears in the Bloat rollup too.
+        assert "view = 'total'" in text
+        assert "view = 'agent'" in text
+        assert "view = 'category'" in text
+        assert "By agent" in text
+        assert "By category" in text
+
+
+def test_session_cost_tab_has_multi_polylines():
+    """Cost tab renders six polylines (total + main/sub + read/created/conv).
+
+    The sample fixture has varied cost categories (Read, Created from Bash/Edit,
+    Conversation from sidechain), so every series should emit non-empty points.
+    """
+    with tempfile.TemporaryDirectory() as tmp, _patched_client(Path(tmp)) as client:
+        response = client.get(f"/sessions/{SID}?tab=cost")
+        assert response.status_code == 200
+        text = response.text
+        # Three x-show'd groups for the three views.
+        assert "view === 'total'" in text
+        assert "view === 'agent'" in text
+        assert "view === 'category'" in text
+        # At least six polylines total — one per series. Each must have a
+        # non-empty points= attribute (empty polylines indicate a bug where
+        # a series had no matching messages or bucketing broke).
+        assert text.count("<polyline") >= 6
+        # Empty polylines render as points="" — assert at least the total,
+        # main, and read/conversation series have coordinates.
+        assert 'points=""' not in text or text.count('points=""') < 6
+
+
+def _spikey_cost_jsonl(tmp_dir: Path, session_id: str) -> Path:
+    """Build a JSONL with one clear cost spike followed by many tiny messages.
+
+    Need ≥ 6 messages for spike detection. The spike is 1M input tokens on
+    message #3; every other message is tiny. With median ~0, threshold is
+    clamped to $0.01, and the big message is well above that.
+    """
+    lines: list[dict] = [
+        make_user_message(
+            session_id,
+            "u0",
+            None,
+            "2026-04-21T10:00:00.000Z",
+            "start",
+            tool_use_result={"content": "seed"},
+        ),
+    ]
+    tiny_usage = {"input_tokens": 10, "output_tokens": 5}
+    big_usage = {"input_tokens": 1_000_000, "output_tokens": 100_000}
+    # Pattern: tiny, tiny, BIG, tiny, tiny, tiny, tiny, tiny → 8 messages.
+    spike_idx = 2
+    for i in range(8):
+        usage = big_usage if i == spike_idx else tiny_usage
+        lines.append(
+            make_assistant_message(
+                session_id,
+                f"a{i}",
+                "u0",
+                f"2026-04-21T10:00:{i + 1:02d}.000Z",
+                [{"type": "text", "text": f"msg{i}"}],
+                model="claude-opus-4-7",
+                msg_id=f"msg-spiky-{i}",
+                usage=usage,
+            )
+        )
+    return write_jsonl(tmp_dir, session_id, lines)
+
+
+def test_session_cost_tab_marker_links_to_message():
+    """Spike marker renders as an <a href> deep-linking to a message anchor."""
+    sid = "spiky-session-000000-0000-000000000001"
+    with tempfile.TemporaryDirectory() as tmp_str:
+        tmp = Path(tmp_str)
+        _spikey_cost_jsonl(tmp, sid)
+        db_path = tmp / "test.duckdb"
+        with (
+            patch.dict(
+                os.environ,
+                {
+                    "INTROSPECT_DB_PATH": str(db_path),
+                    "INTROSPECT_JSONL_GLOB": glob_pattern(tmp),
+                    "INTROSPECT_DAYS": "0",
+                },
+            ),
+            TestClient(app) as client,
+        ):
+            response = client.get(f"/sessions/{sid}?tab=cost")
+            assert response.status_code == 200
+            text = response.text
+            assert f'href="/sessions/{sid}?tab=messages#msg-' in text
+
+
+def test_session_cost_tab_markers_render_as_vertical_ticks():
+    """Markers are <line> (vertical tick), not <circle>.
+
+    ``preserveAspectRatio="none"`` on the chart stretches circles into
+    ellipses — so markers use vertical ticks with ``vector-effect=
+    non-scaling-stroke`` to render at a consistent weight instead.
+    """
+    sid = "spiky-session-000000-0000-000000000002"
+    with tempfile.TemporaryDirectory() as tmp_str:
+        tmp = Path(tmp_str)
+        _spikey_cost_jsonl(tmp, sid)
+        db_path = tmp / "test.duckdb"
+        with (
+            patch.dict(
+                os.environ,
+                {
+                    "INTROSPECT_DB_PATH": str(db_path),
+                    "INTROSPECT_JSONL_GLOB": glob_pattern(tmp),
+                    "INTROSPECT_DAYS": "0",
+                },
+            ),
+            TestClient(app) as client,
+        ):
+            response = client.get(f"/sessions/{sid}?tab=cost")
+            assert response.status_code == 200
+            text = response.text
+            # Anchor present → at least one marker is rendered in some view.
+            assert f'href="/sessions/{sid}?tab=messages#msg-' in text
+            # Shape changed: no <circle> markers, <line> ticks instead.
+            assert "<circle" not in text
+            assert "<line " in text
+            # Anti-stretch guard so ticks render cleanly in the stretched SVG.
+            assert 'vector-effect="non-scaling-stroke"' in text
+
+
+def test_session_cost_tab_marker_groups_per_view():
+    """Markers are wrapped in per-view <g x-show> groups.
+
+    Otherwise a spike detected on the Total curve would float off the line
+    when the user switches to the By agent or By category view.
+    """
+    sid = "spiky-session-000000-0000-000000000003"
+    with tempfile.TemporaryDirectory() as tmp_str:
+        tmp = Path(tmp_str)
+        _spikey_cost_jsonl(tmp, sid)
+        db_path = tmp / "test.duckdb"
+        with (
+            patch.dict(
+                os.environ,
+                {
+                    "INTROSPECT_DB_PATH": str(db_path),
+                    "INTROSPECT_JSONL_GLOB": glob_pattern(tmp),
+                    "INTROSPECT_DAYS": "0",
+                },
+            ),
+            TestClient(app) as client,
+        ):
+            response = client.get(f"/sessions/{sid}?tab=cost")
+            assert response.status_code == 200
+            text = response.text
+            # Each view has its own marker group so ticks track the series
+            # actually being rendered.
+            anchor_prefix = f'href="/sessions/{sid}?tab=messages#msg-'
+            # At least 3 anchors to the same uuid (one per view: total, agent,
+            # category). Subagent fixture has no Task calls so no 'agents' view.
+            assert text.count(anchor_prefix) >= 3
+
+
+def _subagent_with_task_call_jsonl(tmp_dir: Path, session_id: str) -> Path:
+    """JSONL with a Task/Agent call + matching sidechain reply.
+
+    Drives the per-agent-type chart view: the Task call supplies a
+    subagent_type, and the sidechain assistant message incurs the cost that
+    the per-type series should plot. Distinct from the earlier
+    ``_subagent_jsonl`` fixture, which tests sidechain bloat *without* a
+    preceding Task call.
+    """
+    tiny = {"input_tokens": 100, "output_tokens": 10}
+    lines: list[dict] = [
+        make_user_message(
+            session_id,
+            "u1",
+            None,
+            "2026-04-21T10:00:00.000Z",
+            "kick off subagent",
+        ),
+        make_assistant_message(
+            session_id,
+            "a1",
+            "u1",
+            "2026-04-21T10:00:01.000Z",
+            [
+                {
+                    "type": "tool_use",
+                    "id": "toolu_task1",
+                    "name": "Task",
+                    "input": {
+                        "description": "look around",
+                        "prompt": "do research",
+                        "subagent_type": "Explore",
+                    },
+                }
+            ],
+            model="claude-opus-4-7",
+            msg_id="msg-main",
+            usage=tiny,
+        ),
+        make_user_message(
+            session_id,
+            "s1",
+            "a1",
+            "2026-04-21T10:00:02.000Z",
+            "do research",
+            is_sidechain=True,
+        ),
+        make_assistant_message(
+            session_id,
+            "s2",
+            "s1",
+            "2026-04-21T10:00:03.000Z",
+            [{"type": "text", "text": "done"}],
+            model="claude-opus-4-7",
+            msg_id="msg-sub",
+            usage={"input_tokens": 10_000, "output_tokens": 500},
+            is_sidechain=True,
+        ),
+        make_user_message(
+            session_id,
+            "u2",
+            "s2",
+            "2026-04-21T10:00:04.000Z",
+            [
+                {
+                    "type": "tool_result",
+                    "tool_use_id": "toolu_task1",
+                    "content": "subagent done",
+                    "is_error": False,
+                }
+            ],
+            tool_use_result={"content": "subagent done"},
+            source_tool_uuid="a1",
+        ),
+    ]
+    return write_jsonl(tmp_dir, session_id, lines)
+
+
+def test_session_cost_tab_hides_invocations_view_without_task_calls():
+    """No Task/Agent tool calls → 'By invocation' toggle absent."""
+    with tempfile.TemporaryDirectory() as tmp, _patched_client(Path(tmp)) as client:
+        response = client.get(f"/sessions/{SID}?tab=cost")
+        assert response.status_code == 200
+        text = response.text
+        # No Task call in the sample fixture, so the per-invocation view hides
+        # and the summary table doesn't render.
+        assert "view = 'invocations'" not in text
+        assert "By invocation" not in text
+        assert "Subagent invocations by cost" not in text
+
+
+def test_session_cost_tab_shows_invocations_view_with_subagent_type():
+    """Task call with subagent_type → per-invocation toggle, legend, table."""
+    sid = "subagent-session-00000-0000-000000000001"
+    with tempfile.TemporaryDirectory() as tmp_str:
+        tmp = Path(tmp_str)
+        _subagent_with_task_call_jsonl(tmp, sid)
+        db_path = tmp / "test.duckdb"
+        with (
+            patch.dict(
+                os.environ,
+                {
+                    "INTROSPECT_DB_PATH": str(db_path),
+                    "INTROSPECT_JSONL_GLOB": glob_pattern(tmp),
+                    "INTROSPECT_DAYS": "0",
+                },
+            ),
+            TestClient(app) as client,
+        ):
+            response = client.get(f"/sessions/{sid}?tab=cost")
+            assert response.status_code == 200
+            text = response.text
+            assert "view = 'invocations'" in text
+            assert "By invocation" in text
+            # Legend renders the rank + subagent_type verbatim ("#1 Explore").
+            assert "#1 Explore" in text
+            # Top-invocations table renders, with a link to the first sidechain
+            # message of the expensive invocation.
+            assert "Subagent invocations by cost" in text
+
+
+def test_session_messages_have_uuid_anchors():
+    """Messages tab rows carry id=\"msg-{uuid}\" anchors."""
+    with tempfile.TemporaryDirectory() as tmp, _patched_client(Path(tmp)) as client:
+        response = client.get(f"/sessions/{SID}?tab=messages")
+        assert response.status_code == 200
+        assert 'id="msg-' in response.text
+
+
+def _short_session_jsonl(tmp_dir: Path, session_id: str) -> Path:
+    """Build a 3-message session — below the inflection-detection minimum."""
+    usage = {"input_tokens": 100, "output_tokens": 20}
+    lines = [
+        make_user_message(
+            session_id,
+            "u1",
+            None,
+            "2026-04-21T10:00:00.000Z",
+            "hi",
+            tool_use_result={"content": "seed"},
+        ),
+        make_assistant_message(
+            session_id,
+            "a1",
+            "u1",
+            "2026-04-21T10:00:01.000Z",
+            [{"type": "text", "text": "ok"}],
+            model="claude-opus-4-7",
+            msg_id="msg-short-1",
+            usage=usage,
+        ),
+        make_assistant_message(
+            session_id,
+            "a2",
+            "u1",
+            "2026-04-21T10:00:02.000Z",
+            [{"type": "text", "text": "bye"}],
+            model="claude-opus-4-7",
+            msg_id="msg-short-2",
+            usage=usage,
+        ),
+    ]
+    return write_jsonl(tmp_dir, session_id, lines)
+
+
+def test_inflection_detection_empty_on_short_session():
+    """Sessions below _SPIKE_MIN_N produce no inflection markers."""
+    from introspect.api.handlers.sessions import _SPIKE_MIN_N  # noqa: PLC0415
+
+    # The fixture emits 2 assistant messages — must be below _SPIKE_MIN_N.
+    assert _SPIKE_MIN_N > 2
+    sid = "short-session-00000000-0000-000000000001"
+    with tempfile.TemporaryDirectory() as tmp_str:
+        tmp = Path(tmp_str)
+        _short_session_jsonl(tmp, sid)
+        db_path = tmp / "test.duckdb"
+        with (
+            patch.dict(
+                os.environ,
+                {
+                    "INTROSPECT_DB_PATH": str(db_path),
+                    "INTROSPECT_JSONL_GLOB": glob_pattern(tmp),
+                    "INTROSPECT_DAYS": "0",
+                },
+            ),
+            TestClient(app) as client,
+        ):
+            response = client.get(f"/sessions/{sid}?tab=cost")
+            assert response.status_code == 200
+            # No marker anchors rendered — the Cost tab must not produce any
+            # href to a message anchor when the session is below the minimum.
+            marker_prefix = f'href="/sessions/{sid}?tab=messages#msg-'
+            assert marker_prefix not in response.text
+
+
+def test_slope_detector_fires_on_gradual_ramp():
+    """Slope detector flags a sustained cost ramp even without a spike."""
+    from introspect.api.handlers.sessions import (  # noqa: PLC0415
+        _detect_inflection_points,
+    )
+
+    # 10 cheap messages, then 10 identical modest messages — each single
+    # message is below the spike threshold (median*2), but the slope-window
+    # delta jumps dramatically when the ramp starts.
+    inc = [0.0005] * 10 + [0.004] * 10
+    cum: list[float] = []
+    running = 0.0
+    for v in inc:
+        running += v
+        cum.append(running)
+    uuids = [f"u{i}" for i in range(len(inc))]
+    markers = _detect_inflection_points(uuids, inc, cum)
+    # At least one slope marker should fire (the step-up in window delta).
+    # No spikes — individual increments are all below $0.01.
+    assert any(m["kind"] == "slope" for m in markers), markers
+    assert all(m["kind"] != "spike" for m in markers), markers
+
+
+def test_slope_detector_handles_zero_variance():
+    """Constant-cost session must not over-fire slope markers (sigma=0)."""
+    from introspect.api.handlers.sessions import (  # noqa: PLC0415
+        _detect_inflection_points,
+    )
+
+    # All messages identical → every positive delta identical → sigma = 0.
+    # Without the guard, the threshold collapses to 0 and the top-N filter
+    # fires up to 5 arbitrary markers.
+    inc = [0.001] * 15
+    cum = [0.001 * (i + 1) for i in range(15)]
+    uuids = [f"u{i}" for i in range(15)]
+    markers = _detect_inflection_points(uuids, inc, cum)
+    assert all(m["kind"] != "slope" for m in markers), markers
+
+
+def test_slope_detector_handles_single_positive_delta():
+    """Single positive slope delta must not fire (can't compute variance)."""
+    from introspect.api.handlers.sessions import (  # noqa: PLC0415
+        _detect_inflection_points,
+    )
+
+    # 10 messages: all zero except one $0.50 late in the session.  The
+    # slope window captures exactly one positive delta — len < 2, so the
+    # slope branch must short-circuit (the spike branch may still fire).
+    inc = [0.0] * 14 + [0.5]
+    cum: list[float] = []
+    running = 0.0
+    for v in inc:
+        running += v
+        cum.append(running)
+    uuids = [f"u{i}" for i in range(len(inc))]
+    markers = _detect_inflection_points(uuids, inc, cum)
+    assert all(m["kind"] != "slope" for m in markers), markers
+
+
+# --- Phase 2: Cost Overview page tests ---
+
+
+def _cost_overview_setup(tmp_dir: Path, specs: list[tuple[str, list[dict]]]) -> None:
+    """Write one JSONL per (session_id, lines) tuple.
+
+    Helper for the Cost Overview fixtures which need to synthesise multiple
+    distinct sessions with known-cost profiles.
+    """
+    for session_id, lines in specs:
+        write_jsonl(tmp_dir, session_id, lines)
+
+
+def _session_at_cost(
+    session_id: str, input_tokens: int, *, timestamp_day: str = "2026-04-21"
+) -> list[dict]:
+    """Build a minimal two-message JSONL that costs exactly
+    ``input_tokens * $5 / 1_000_000`` at claude-opus-4-7 pricing.
+    """
+    lines = [
+        make_user_message(
+            session_id,
+            "u1",
+            None,
+            f"{timestamp_day}T10:00:00.000Z",
+            "go",
+            tool_use_result={"content": "seed"},
+        ),
+        make_assistant_message(
+            session_id,
+            "a1",
+            "u1",
+            f"{timestamp_day}T10:00:01.000Z",
+            [{"type": "text", "text": "ok"}],
+            model="claude-opus-4-7",
+            msg_id=f"msg-{session_id}-a1",
+            usage={"input_tokens": input_tokens, "output_tokens": 0},
+        ),
+    ]
+    return lines
+
+
+def _run_with_client(tmp: Path, fn):
+    """Run ``fn(client)`` with an initialised TestClient for this tmp dir."""
+    db_path = tmp / "test.duckdb"
+    with (
+        patch.dict(
+            os.environ,
+            {
+                "INTROSPECT_DB_PATH": str(db_path),
+                "INTROSPECT_JSONL_GLOB": glob_pattern(tmp),
+                "INTROSPECT_DAYS": "0",
+            },
+        ),
+        TestClient(app) as client,
+    ):
+        return fn(client)
+
+
+def _materialize_and_run(tmp: Path, fn):
+    """Materialize views and run ``fn(conn)`` against a standalone connection.
+
+    Avoids the TestClient fixture's writable DB lock so tests can call the
+    helper functions directly and assert on structured output.
+    """
+    from introspect.db import (  # noqa: PLC0415
+        get_connection,
+        materialize_views,
+    )
+
+    db_path = tmp / "test.duckdb"
+    conn = get_connection(db_path, glob_pattern(tmp))
+    try:
+        materialize_views(conn, glob_pattern(tmp), 0, resolve_projects=False)
+        return fn(conn)
+    finally:
+        conn.close()
+
+
+def test_cost_overview_page_renders():
+    """Cost Overview returns 200 and includes the hero total-cost string."""
+    # Three sessions at known costs so the hero total is deterministic.
+    # 4M+2M+1M = 7M input tokens * $5/M = $35.00.
+    specs = [
+        (
+            "sess-render-01-aaaa-aaaa-aaaaaaaaaaaa",
+            _session_at_cost("sess-render-01-aaaa-aaaa-aaaaaaaaaaaa", 4_000_000),
+        ),
+        (
+            "sess-render-02-aaaa-aaaa-aaaaaaaaaaaa",
+            _session_at_cost("sess-render-02-aaaa-aaaa-aaaaaaaaaaaa", 2_000_000),
+        ),
+        (
+            "sess-render-03-aaaa-aaaa-aaaaaaaaaaaa",
+            _session_at_cost("sess-render-03-aaaa-aaaa-aaaaaaaaaaaa", 1_000_000),
+        ),
+    ]
+    with tempfile.TemporaryDirectory() as tmp_str:
+        tmp = Path(tmp_str)
+        _cost_overview_setup(tmp, specs)
+
+        def _check(client):
+            response = client.get("/cost-overview")
+            assert response.status_code == 200
+            text = response.text
+            assert "Cost Overview" in text
+            # Hero total: $35.00 (4M+2M+1M) * $5/M.
+            assert "$35.00" in text
+
+        _run_with_client(tmp, _check)
+
+
+def test_cost_overview_pareto_cutoff_at_80pct():
+    """Pareto cutoff must include rows up to and including the 80% crossing.
+
+    Fixture: 10 sessions with input_tokens sized so cost_usd = tokens / 200k.
+    Costs: 100, 50, 30, 20, 10, 5, 5, 3, 2, 1. Total $226; 80% = $180.80.
+    Cumulative: 100, 150, 180, 200, 210, 215, 220, 223, 225, 226.
+    Row 3 is $180 (79.6%, below cutoff). Row 4 is $200 (88.5%, first
+    crossing) — row 4 is the cutoff and rows 1-4 are in Pareto; row 5 is
+    NOT in Pareto.
+    """
+    from introspect.api.handlers.cost_overview import (  # noqa: PLC0415
+        _build_pareto,
+    )
+
+    costs_usd = [100, 50, 30, 20, 10, 5, 5, 3, 2, 1]
+    specs: list[tuple[str, list[dict]]] = []
+    for rank, c in enumerate(costs_usd):
+        # $1 == 200_000 input tokens at $5/M claude-opus-4-7 pricing.
+        sid = f"sess-pareto-{rank:02d}-aaaa-aaaa-aaaaaaaaaaaa"
+        specs.append((sid, _session_at_cost(sid, c * 200_000)))
+    with tempfile.TemporaryDirectory() as tmp_str:
+        tmp = Path(tmp_str)
+        _cost_overview_setup(tmp, specs)
+
+        pareto = _materialize_and_run(tmp, _build_pareto)
+
+        # Rows are sorted by cost_usd DESC. Check the first 5 rows by
+        # cost and their Pareto membership.
+        rows = pareto["rows"]
+        assert len(rows) == 10
+        # Row 0: $100 (44.2% cum), in pareto, not cutoff.
+        assert rows[0]["cost_usd"] == pytest.approx(100.0)
+        assert rows[0]["in_pareto"]
+        assert not rows[0]["is_cutoff"]
+        # Row 1: $50 ($150, 66.4%), in pareto, not cutoff.
+        assert rows[1]["in_pareto"]
+        assert not rows[1]["is_cutoff"]
+        # Row 2: $30 ($180, 79.6%), in pareto, not cutoff (still < 80%).
+        assert rows[2]["in_pareto"]
+        assert not rows[2]["is_cutoff"]
+        # Row 3: $20 ($200, 88.5%), in pareto, IS cutoff (first ≥80%).
+        assert rows[3]["in_pareto"]
+        assert rows[3]["is_cutoff"]
+        # Row 4: $10 ($210), NOT in pareto.
+        assert not rows[4]["in_pareto"]
+        assert not rows[4]["is_cutoff"]
+
+        assert pareto["pareto_session_count"] == 4
+        assert pareto["total_session_count"] == 10
+        assert pareto["total_cost_usd"] == pytest.approx(226.0)
+
+
+def _subagent_overview_session(session_id: str, input_tokens: int) -> list[dict]:
+    """Two-message session whose assistant record is a sidechain message."""
+    lines = [
+        make_user_message(
+            session_id,
+            "u1",
+            None,
+            "2026-04-21T10:00:00.000Z",
+            "go",
+            tool_use_result={"content": "seed"},
+        ),
+        make_user_message(
+            session_id,
+            "su1",
+            "u1",
+            "2026-04-21T10:00:01.000Z",
+            "subagent",
+            is_sidechain=True,
+        ),
+        make_assistant_message(
+            session_id,
+            "sa1",
+            "su1",
+            "2026-04-21T10:00:02.000Z",
+            [{"type": "text", "text": "ok"}],
+            model="claude-opus-4-7",
+            msg_id=f"msg-{session_id}-sa1",
+            usage={"input_tokens": input_tokens, "output_tokens": 0},
+            is_sidechain=True,
+        ),
+    ]
+    return lines
+
+
+def test_cost_overview_subagent_split():
+    """Subagent-presence split: with-row counts only sidechain sessions."""
+    from introspect.api.handlers.cost_overview import (  # noqa: PLC0415
+        _build_subagent_split,
+        _fetch_cost_rows,
+    )
+
+    sid_with = "sess-side-01-aaaa-aaaa-aaaaaaaaaaaa"
+    sid_without = "sess-side-02-aaaa-aaaa-aaaaaaaaaaaa"
+    specs = [
+        (sid_with, _subagent_overview_session(sid_with, 2_000_000)),  # $10
+        (sid_without, _session_at_cost(sid_without, 1_000_000)),  # $5
+    ]
+    with tempfile.TemporaryDirectory() as tmp_str:
+        tmp = Path(tmp_str)
+        _cost_overview_setup(tmp, specs)
+
+        split = _materialize_and_run(
+            tmp,
+            lambda c: _build_subagent_split(c, _fetch_cost_rows(c)),
+        )
+
+        assert split["with"]["sessions"] == 1
+        assert split["without"]["sessions"] == 1
+        # Sidechain session cost = $10 (2M * $5/M).
+        assert split["with"]["cost_usd"] == pytest.approx(10.0)
+        # Non-sidechain cost = $5 (1M * $5/M).
+        assert split["without"]["cost_usd"] == pytest.approx(5.0)
+
+
+def _huge_reads_session(session_id: str) -> list[dict]:
+    """Build a session whose Read-category cache creation is ≥10% of cost
+    and ≥100k tokens — i.e., classifies as "with huge reads".
+
+    Strategy: a Read tool use followed by an assistant message whose
+    parent is the tool_result, with 200k cache-creation tokens (well over
+    the 100k floor) AND a dominant cache-creation cost share.
+    """
+    lines = [
+        make_user_message(
+            session_id,
+            "u1",
+            None,
+            "2026-04-21T10:00:00.000Z",
+            "please review",
+        ),
+        make_assistant_message(
+            session_id,
+            "a1",
+            "u1",
+            "2026-04-21T10:00:01.000Z",
+            [
+                {
+                    "type": "tool_use",
+                    "id": "tu-huge-read",
+                    "name": "Read",
+                    "input": {"file_path": "/repo/src/huge_file.py"},
+                }
+            ],
+            model="claude-opus-4-7",
+            msg_id=f"msg-{session_id}-a1",
+            usage={"input_tokens": 100, "output_tokens": 5},
+        ),
+        make_user_message(
+            session_id,
+            "u2",
+            "a1",
+            "2026-04-21T10:00:02.000Z",
+            [
+                {
+                    "type": "tool_result",
+                    "tool_use_id": "tu-huge-read",
+                    "content": "x" * 100,
+                    "is_error": False,
+                }
+            ],
+            tool_use_result={"content": "x" * 100},
+            source_tool_uuid="a1",
+        ),
+        make_assistant_message(
+            session_id,
+            "a2",
+            "u2",
+            "2026-04-21T10:00:03.000Z",
+            [{"type": "text", "text": "done"}],
+            model="claude-opus-4-7",
+            msg_id=f"msg-{session_id}-a2",
+            usage={
+                "input_tokens": 100,
+                "output_tokens": 10,
+                "cache_creation_input_tokens": 200_000,
+                "cache_creation": {
+                    "ephemeral_5m_input_tokens": 200_000,
+                    "ephemeral_1h_input_tokens": 0,
+                },
+            },
+        ),
+    ]
+    return lines
+
+
+def test_cost_overview_huge_reads_split():
+    """A session whose Read-category cache creation clears both guards
+    (≥10% of session cost AND ≥100k tokens) classifies as "with huge reads".
+    """
+    from introspect.api.handlers.cost_overview import (  # noqa: PLC0415
+        _build_huge_reads_split,
+        _fetch_cost_rows,
+    )
+
+    sid_with = "sess-huge-01-aaaa-aaaa-aaaaaaaaaaaa"
+    sid_without = "sess-huge-02-aaaa-aaaa-aaaaaaaaaaaa"
+    specs = [
+        (sid_with, _huge_reads_session(sid_with)),
+        (sid_without, _session_at_cost(sid_without, 1_000_000)),
+    ]
+    with tempfile.TemporaryDirectory() as tmp_str:
+        tmp = Path(tmp_str)
+        _cost_overview_setup(tmp, specs)
+
+        split = _materialize_and_run(
+            tmp,
+            lambda c: _build_huge_reads_split(c, _fetch_cost_rows(c)),
+        )
+
+        # Only the huge-reads session classifies "with".
+        assert split["with"]["sessions"] == 1
+        assert split["without"]["sessions"] == 1
+        # Pin the "without" side to the known baseline ($5.00 = 1M * $5/M).
+        # A threshold inversion would route the huge-reads session into
+        # "without" and push its cost above $5, so pinning this side
+        # exactly catches a with/without swap.
+        assert split["without"]["cost_usd"] == pytest.approx(5.0)
+        # The "with" side gets the session whose ~$1.25 cost is dominated
+        # by 200k cache-creation tokens — the ratio (not the absolute) is
+        # what clears the 10% guard. Confirm the with-side cost matches
+        # the huge-reads session, not the baseline.
+        assert split["with"]["cost_usd"] < split["without"]["cost_usd"]
+
+
+def _skill_session_command_tag(session_id: str) -> list[dict]:
+    """Session that uses a non-built-in skill via <command-name>."""
+    lines = [
+        make_user_message(
+            session_id,
+            "u1",
+            None,
+            "2026-04-21T10:00:00.000Z",
+            "<command-name>marimo-pair</command-name>\nplease pair",
+        ),
+        make_assistant_message(
+            session_id,
+            "a1",
+            "u1",
+            "2026-04-21T10:00:01.000Z",
+            [{"type": "text", "text": "ok"}],
+            model="claude-opus-4-7",
+            msg_id=f"msg-{session_id}-a1",
+            usage={"input_tokens": 1_000_000, "output_tokens": 0},
+        ),
+    ]
+    return lines
+
+
+def _skill_session_clear(session_id: str) -> list[dict]:
+    """Session whose only command is /clear — a built-in that must NOT
+    flip it into the "with skills" bucket.
+    """
+    lines = [
+        make_user_message(
+            session_id,
+            "u1",
+            None,
+            "2026-04-21T10:00:00.000Z",
+            "<command-name>/clear</command-name>",
+        ),
+        make_assistant_message(
+            session_id,
+            "a1",
+            "u1",
+            "2026-04-21T10:00:01.000Z",
+            [{"type": "text", "text": "ok"}],
+            model="claude-opus-4-7",
+            msg_id=f"msg-{session_id}-a1",
+            usage={"input_tokens": 1_000_000, "output_tokens": 0},
+        ),
+    ]
+    return lines
+
+
+def test_cost_overview_skill_split():
+    """/clear and other OBVIOUS_COMMANDS must not flip a session's classification.
+
+    Fixture: session 1 uses <command-name>marimo-pair</command-name> (should
+    classify as "with skills"); session 2 uses no commands; session 3 uses
+    /clear only. Only session 1 classifies as "with"; sessions 2 and 3 are
+    both "without".
+    """
+    from introspect.api.handlers.cost_overview import (  # noqa: PLC0415
+        _build_skill_split,
+        _fetch_cost_rows,
+    )
+
+    sid1 = "sess-skill-01-aaaa-aaaa-aaaaaaaaaaaa"
+    sid2 = "sess-skill-02-aaaa-aaaa-aaaaaaaaaaaa"
+    sid3 = "sess-skill-03-aaaa-aaaa-aaaaaaaaaaaa"
+    specs = [
+        (sid1, _skill_session_command_tag(sid1)),
+        (sid2, _session_at_cost(sid2, 1_000_000)),
+        (sid3, _skill_session_clear(sid3)),
+    ]
+    with tempfile.TemporaryDirectory() as tmp_str:
+        tmp = Path(tmp_str)
+        _cost_overview_setup(tmp, specs)
+
+        split = _materialize_and_run(
+            tmp,
+            lambda c: _build_skill_split(c, _fetch_cost_rows(c)),
+        )
+
+        # Only session 1 is "with skills"; sessions 2 and 3 are not.
+        assert split["with"]["sessions"] == 1
+        assert split["without"]["sessions"] == 2
+
+
+def test_cost_overview_nav_link_present():
+    """Nav link to /cost-overview is rendered on the sessions page."""
+    with tempfile.TemporaryDirectory() as tmp, _patched_client(Path(tmp)) as client:
+        response = client.get("/sessions")
+        assert response.status_code == 200
+        assert 'href="/cost-overview"' in response.text
+        assert "Cost Overview" in response.text
+
+
+def test_fetch_token_usage_dedup():
+    """Direct unit test: deduped totals should equal a single message's usage."""
+    from introspect.api.handlers._helpers import fetch_token_usage  # noqa: PLC0415
+    from introspect.db import get_connection, materialize_views  # noqa: PLC0415
+
+    sid = "ftu-dedup-session-0000-0000-000000000001"
+    with tempfile.TemporaryDirectory() as tmp_str:
+        tmp = Path(tmp_str)
+        _dup_jsonl(tmp, sid)
+        db_path = tmp / "test.duckdb"
+        conn = get_connection(db_path, glob_pattern(tmp))
+        materialize_views(conn, glob_pattern(tmp), 0, resolve_projects=False)
+        usage = fetch_token_usage(conn, session_id=sid)
+        conn.close()
+        assert usage is not None
+        # 1M input tokens for ONE message — the duplicate must not double it
+        assert usage["input"] == 1_000_000
+        assert usage["output"] == 1_000_000
+        assert usage["cost_usd"] == pytest.approx(30.0)
