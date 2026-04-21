@@ -768,18 +768,21 @@ def test_session_detail_long_body_collapses():
             response = client.get(f"/sessions/{_TWEAK_SID}?tab=messages")
             assert response.status_code == 200
             text = response.text
-            assert "msg-text-clamp" in text
             assert "msg-text-meta" in text
             assert "click to expand" in text
-            # The clamped block should NOT be rendered as a plain, unclamped
-            # <pre class="msg-text"> body — the body shows up inside the clamp
-            # wrapper (both x-show copies include the same body text).
-            assert "line 10" in text  # body content is present
-            # Raw-only (unclamped) msg-text variant is absent for the long body:
-            # every occurrence of "line 10" should be adjacent to a clamp class
-            # or the x-show=\"open\" alternate. Looser assertion: the clamp
-            # class appears somewhere in the response.
-            assert "msg-text msg-text-clamp" in text
+            # Body content is present.
+            assert "line 10" in text
+            # The <pre> surrounding the long body carries the Alpine class
+            # binding that toggles the clamp. Look in a 400-char window
+            # before "line 10" for that binding; the body should NOT render
+            # as a plain unclamped <pre class="msg-text"> elsewhere.
+            idx = text.find("line 10")
+            window_before = text[max(0, idx - 400) : idx]
+            assert "'msg-text-clamp': !expanded" in window_before
+            # Single-render design: the long body should appear only once in
+            # the rendered HTML (previous implementation rendered it twice,
+            # once per x-show branch).
+            assert text.count("line 10") == 1
 
 
 def test_session_detail_short_body_has_no_clamp():

@@ -150,18 +150,18 @@ _TOKEN_COMPACT_M = 1_000_000
 _TOKEN_COMPACT_SINGLE_DIGIT = 10
 
 
-def _format_tokens_compact(n: int) -> str:
+def _format_tokens_compact(count: int) -> str:
     """Compact human-readable token count, e.g. 2134 -> '2.1k', 1_250_000 -> '1.2M'."""
-    if n < _TOKEN_COMPACT_K:
-        return str(n)
-    if n < _TOKEN_COMPACT_M:
-        value = n / _TOKEN_COMPACT_K
+    if count < _TOKEN_COMPACT_K:
+        return str(count)
+    if count < _TOKEN_COMPACT_M:
+        value = count / _TOKEN_COMPACT_K
         return (
             f"{value:.1f}k"
             if value < _TOKEN_COMPACT_SINGLE_DIGIT
             else f"{round(value)}k"
         )
-    value = n / _TOKEN_COMPACT_M
+    value = count / _TOKEN_COMPACT_M
     return (
         f"{value:.1f}M" if value < _TOKEN_COMPACT_SINGLE_DIGIT else f"{round(value)}M"
     )
@@ -175,8 +175,9 @@ def _collapse_info(
 ) -> tuple[int, int, bool]:
     """Return ``(line_count, char_count, needs_collapse)`` for a text body.
 
-    Accepts non-string input (e.g. dicts yielded by the tool_calls join) by
-    coercing to ``str`` first — matches what Jinja will render downstream.
+    Accepts non-string input (e.g. dicts yielded by the ``tool_calls`` join
+    for tool-result rows whose payload is JSON, not a string) by coercing to
+    ``str`` first — matches what Jinja will render downstream.
     """
     if not text:
         return 0, 0, False
@@ -420,8 +421,19 @@ def _build_messages_context(db, session_id: str) -> list[dict]:
             tokens_summary = ""
             tokens_title = ""
 
-        timestamp_full = str(rec["timestamp"])[:19] if rec["timestamp"] else ""
-        timestamp_time = str(rec["timestamp"])[11:19] if rec["timestamp"] else ""
+        ts = rec["timestamp"]
+        if ts is not None and hasattr(ts, "strftime"):
+            timestamp_full = ts.strftime("%Y-%m-%d %H:%M:%S")
+            timestamp_time = ts.strftime("%H:%M:%S")
+        elif ts:
+            # Defensive path: driver handed us a string. Slice the canonical
+            # ``YYYY-MM-DD HH:MM:SS`` / ``YYYY-MM-DDTHH:MM:SS`` layout.
+            ts_str = str(ts)
+            timestamp_full = ts_str[:19]
+            timestamp_time = ts_str[11:19]
+        else:
+            timestamp_full = ""
+            timestamp_time = ""
 
         parsed_messages.append(
             {
@@ -456,10 +468,6 @@ def _build_messages_context(db, session_id: str) -> list[dict]:
                     _format_exec_time(exec_secs) if exec_secs is not None else ""
                 ),
                 "tool_use_id": rec["tool_use_id"] or "",
-                "tokens_in": tokens_in if show_tokens else 0,
-                "tokens_out": tokens_out if show_tokens else 0,
-                "cache_read": cache_read if show_tokens else 0,
-                "cache_create": cache_create if show_tokens else 0,
                 "tokens_summary": tokens_summary,
                 "tokens_title": tokens_title,
             }
