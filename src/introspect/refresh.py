@@ -7,6 +7,7 @@ import contextlib
 import glob
 import logging
 import os
+from datetime import UTC, datetime
 from pathlib import Path
 from typing import TYPE_CHECKING
 
@@ -80,21 +81,35 @@ async def refresh_loop(  # noqa: PLR0913
     days: int,
     resolve_projects: bool,
     interval_seconds: float,
+    trigger: asyncio.Event,
 ) -> None:
-    """Poll JSONL mtime and rebuild the materialized DB when files change."""
+    """Poll JSONL mtime and rebuild the materialized DB when files change.
+
+    The loop sleeps up to ``interval_seconds`` between ticks, but wakes early
+    when ``trigger`` is set (e.g. a manual "Refresh now" click). The mtime
+    short-circuit still gates the rebuild — a manual wake on an unchanged
+    filesystem is a fast no-op.
+    """
     sidecar = db_path.with_name(db_path.name + ".next")
     last_mtime = newest_mtime(jsonl_glob)
     while True:
         try:
-            await asyncio.sleep(interval_seconds)
+            with contextlib.suppress(TimeoutError):
+                await asyncio.wait_for(trigger.wait(), timeout=interval_seconds)
+            trigger.clear()
             current = newest_mtime(jsonl_glob)
             if current <= last_mtime:
                 continue
             log.info("JSONL changed; rebuilding materialized DB")
-            await asyncio.to_thread(
-                _rebuild_sidecar, sidecar, jsonl_glob, days, resolve_projects
-            )
-            await asyncio.to_thread(_swap_in, app, db_path, sidecar)
+            app.state.refresh_in_progress = True
+            try:
+                await asyncio.to_thread(
+                    _rebuild_sidecar, sidecar, jsonl_glob, days, resolve_projects
+                )
+                await asyncio.to_thread(_swap_in, app, db_path, sidecar)
+                app.state.last_refreshed_at = datetime.now(UTC)
+            finally:
+                app.state.refresh_in_progress = False
             last_mtime = current
             log.info("refresh complete")
         except asyncio.CancelledError:

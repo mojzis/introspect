@@ -63,7 +63,13 @@ def _build_initial_db(db_path: Path, jsonl_glob: str) -> None:
 def _fake_app(
     read_conn: duckdb.DuckDBPyConnection | None = None,
 ) -> types.SimpleNamespace:
-    return types.SimpleNamespace(state=types.SimpleNamespace(read_conn=read_conn))
+    return types.SimpleNamespace(
+        state=types.SimpleNamespace(
+            read_conn=read_conn,
+            refresh_in_progress=False,
+            last_refreshed_at=None,
+        )
+    )
 
 
 def test_newest_mtime_empty_glob(tmp_path: Path) -> None:
@@ -103,7 +109,15 @@ def test_refresh_short_circuits_when_unchanged(
 
     async def run() -> None:
         task = asyncio.create_task(
-            refresh_loop(app, db_path, jsonl_glob, 0, False, interval_seconds=0.05)  # ty: ignore[invalid-argument-type]
+            refresh_loop(
+                app,  # ty: ignore[invalid-argument-type]
+                db_path,
+                jsonl_glob,
+                0,
+                False,
+                interval_seconds=0.05,
+                trigger=asyncio.Event(),
+            )
         )
         with pytest.raises((asyncio.TimeoutError, TimeoutError)):
             await asyncio.wait_for(asyncio.shield(task), timeout=0.3)
@@ -127,7 +141,15 @@ def test_refresh_rebuilds_and_swaps_on_change(tmp_path: Path) -> None:
 
     async def run() -> None:
         task = asyncio.create_task(
-            refresh_loop(app, db_path, jsonl_glob, 0, False, interval_seconds=0.05)  # ty: ignore[invalid-argument-type]
+            refresh_loop(
+                app,  # ty: ignore[invalid-argument-type]
+                db_path,
+                jsonl_glob,
+                0,
+                False,
+                interval_seconds=0.05,
+                trigger=asyncio.Event(),
+            )
         )
         try:
             # No change yet - loop should not rebuild.
@@ -208,6 +230,7 @@ def test_refresh_survives_rebuild_error(
                     0,
                     False,
                     interval_seconds=0.05,
+                    trigger=asyncio.Event(),
                 )
             )
             try:
@@ -229,3 +252,172 @@ def test_refresh_survives_rebuild_error(
         "refresh failed" in record.message and record.levelno == logging.WARNING
         for record in caplog.records
     )
+
+
+def test_refresh_wakes_on_trigger(tmp_path: Path) -> None:
+    """Setting the trigger event should cause the loop to rebuild promptly.
+
+    Interval is 10 s so a naive ``asyncio.sleep(interval)`` would never swap
+    in time; if we see the swap inside ~1.5 s, the trigger wiring works.
+    """
+    jsonl_glob = glob_pattern(tmp_path)
+    db_path = tmp_path / "db.duckdb"
+
+    _write_session(tmp_path, "sess-trig-a", subdir="proj-a")
+    _build_initial_db(db_path, jsonl_glob)
+
+    read_conn = duckdb.connect(str(db_path), read_only=True)
+    app = _fake_app(read_conn)
+    trigger = asyncio.Event()
+
+    async def run() -> None:
+        task = asyncio.create_task(
+            refresh_loop(
+                app,  # ty: ignore[invalid-argument-type]
+                db_path,
+                jsonl_glob,
+                0,
+                False,
+                interval_seconds=10.0,
+                trigger=trigger,
+            )
+        )
+        try:
+            # Let the task actually start and capture ``last_mtime`` *before*
+            # we bump the filesystem, otherwise the mtime short-circuit
+            # swallows the wake.
+            await asyncio.sleep(0.1)
+
+            current_latest = newest_mtime(jsonl_glob)
+            time.sleep(0.05)
+            _write_session(tmp_path, "sess-trig-b", subdir="proj-b")
+            new_file = tmp_path / "projects" / "proj-b" / "sess-trig-b.jsonl"
+            bumped = current_latest + 1.0
+            os.utime(new_file, (bumped, bumped))
+
+            trigger.set()
+
+            # Give the loop a chance to wake, rebuild, and swap. The rebuild
+            # runs ``materialize_views`` in a thread so total time varies;
+            # poll generously and rely on interval_seconds=10 to prove the
+            # swap came from the trigger, not the timeout.
+            for _ in range(100):
+                await asyncio.sleep(0.05)
+                if app.state.read_conn is not read_conn:
+                    break
+            assert app.state.read_conn is not read_conn, "trigger did not cause a swap"
+        finally:
+            task.cancel()
+            with pytest.raises(asyncio.CancelledError):
+                await task
+
+    asyncio.run(run())
+    app.state.read_conn.close()
+
+
+def test_last_refreshed_at_updates_after_swap(tmp_path: Path) -> None:
+    """After a successful swap, ``last_refreshed_at`` should advance."""
+    from datetime import UTC, datetime  # noqa: PLC0415
+
+    jsonl_glob = glob_pattern(tmp_path)
+    db_path = tmp_path / "db.duckdb"
+
+    _write_session(tmp_path, "sess-lr-a", subdir="proj-a")
+    _build_initial_db(db_path, jsonl_glob)
+
+    read_conn = duckdb.connect(str(db_path), read_only=True)
+    app = _fake_app(read_conn)
+    before = datetime.now(UTC)
+    app.state.last_refreshed_at = before
+
+    async def run() -> None:
+        task = asyncio.create_task(
+            refresh_loop(
+                app,  # ty: ignore[invalid-argument-type]
+                db_path,
+                jsonl_glob,
+                0,
+                False,
+                interval_seconds=0.05,
+                trigger=asyncio.Event(),
+            )
+        )
+        try:
+            # Let the task capture ``last_mtime`` before we bump the fs.
+            await asyncio.sleep(0.1)
+
+            current_latest = newest_mtime(jsonl_glob)
+            time.sleep(0.05)
+            _write_session(tmp_path, "sess-lr-b", subdir="proj-b")
+            new_file = tmp_path / "projects" / "proj-b" / "sess-lr-b.jsonl"
+            bumped = current_latest + 1.0
+            os.utime(new_file, (bumped, bumped))
+
+            for _ in range(40):
+                await asyncio.sleep(0.1)
+                if app.state.read_conn is not read_conn:
+                    break
+            assert app.state.read_conn is not read_conn
+            assert app.state.last_refreshed_at > before
+        finally:
+            task.cancel()
+            with pytest.raises(asyncio.CancelledError):
+                await task
+
+    asyncio.run(run())
+    app.state.read_conn.close()
+
+
+def test_refresh_clears_in_progress_on_error(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A raising ``_rebuild_sidecar`` must leave ``refresh_in_progress=False``."""
+    _write_session(tmp_path, "sess-err-flag")
+    jsonl_glob = glob_pattern(tmp_path)
+    db_path = tmp_path / "db.duckdb"
+
+    # Force every tick to look like a change.
+    counter = {"n": 0}
+
+    def fake_newest_mtime(_glob: str) -> float:
+        counter["n"] += 1
+        return float(counter["n"])
+
+    monkeypatch.setattr(refresh, "newest_mtime", fake_newest_mtime)
+
+    def fake_rebuild(*args, **kwargs):
+        raise RuntimeError("boom")
+
+    monkeypatch.setattr(refresh, "_rebuild_sidecar", fake_rebuild)
+    monkeypatch.setattr(refresh, "_swap_in", lambda *a, **kw: None)
+
+    app = _fake_app()
+
+    async def run() -> None:
+        task = asyncio.create_task(
+            refresh_loop(
+                app,  # ty: ignore[invalid-argument-type]
+                db_path,
+                jsonl_glob,
+                0,
+                False,
+                interval_seconds=0.05,
+                trigger=asyncio.Event(),
+            )
+        )
+        try:
+            # Poll a few ticks; the loop should error-and-retry each time,
+            # and refresh_in_progress should end up False after each attempt.
+            for _ in range(30):
+                await asyncio.sleep(0.05)
+                if counter["n"] >= 3:
+                    break
+            # Give the finally block one more tick to settle.
+            await asyncio.sleep(0.1)
+            assert app.state.refresh_in_progress is False
+        finally:
+            task.cancel()
+            with pytest.raises(asyncio.CancelledError):
+                await task
+
+    asyncio.run(run())
