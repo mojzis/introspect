@@ -31,12 +31,30 @@
          {% if msg.kind == 'subagent_prompt' %}x-show="!onlyHuman"{% endif %}>
 
         {% if msg.kind == 'human_prompt' %}
-            <div class="msg-kind-label">you <span class="msg-time">{{ msg.timestamp }}</span></div>
+            <div class="msg-kind-label">you <span class="msg-time" title="{{ msg.timestamp_full }}">{{ msg.timestamp }}</span></div>
+            {% if msg.text_needs_collapse %}
+            <div x-data="{ open: false }">
+                <pre class="msg-text msg-text-human msg-text-clamp" x-show="!open" @click="open = true">{{ msg.text }}</pre>
+                <pre class="msg-text msg-text-human" x-show="open" style="display:none;">{{ msg.text }}</pre>
+                <div class="msg-text-meta" x-show="!open" @click="open = true">{{ msg.text_line_count }} lines · {{ msg.text_char_count }} chars — click to expand</div>
+                <button class="tool-btn tool-btn-sm" x-show="open" style="display:none;" @click="open = false">Collapse</button>
+            </div>
+            {% else %}
             <pre class="msg-text msg-text-human">{{ msg.text }}</pre>
+            {% endif %}
 
         {% elif msg.kind == 'subagent_prompt' %}
-            <div class="msg-kind-label">prompt to subagent <span class="sidechain-badge">subagent</span> <span class="msg-time">{{ msg.timestamp }}</span></div>
+            <div class="msg-kind-label">prompt to subagent <span class="sidechain-badge">subagent</span> <span class="msg-time" title="{{ msg.timestamp_full }}">{{ msg.timestamp }}</span></div>
+            {% if msg.text_needs_collapse %}
+            <div x-data="{ open: false }">
+                <pre class="msg-text msg-text-clamp" x-show="!open" @click="open = true">{{ msg.text }}</pre>
+                <pre class="msg-text" x-show="open" style="display:none;">{{ msg.text }}</pre>
+                <div class="msg-text-meta" x-show="!open" @click="open = true">{{ msg.text_line_count }} lines · {{ msg.text_char_count }} chars — click to expand</div>
+                <button class="tool-btn tool-btn-sm" x-show="open" style="display:none;" @click="open = false">Collapse</button>
+            </div>
+            {% else %}
             <pre class="msg-text">{{ msg.text }}</pre>
+            {% endif %}
 
         {% elif msg.kind == 'slash_command' %}
             <div class="slash-divider">
@@ -44,11 +62,20 @@
             </div>
 
         {% elif msg.kind == 'agent_text' %}
-            <div class="msg-kind-label">assistant{% if msg.is_sidechain %} <span class="sidechain-badge">subagent</span>{% endif %} <span class="msg-time">{{ msg.timestamp }}</span></div>
+            <div class="msg-kind-label">assistant{% if msg.is_sidechain %} <span class="sidechain-badge">subagent</span>{% endif %}{% if msg.is_first_block and msg.tokens_summary %} <span class="token-badge" title="{{ msg.tokens_title }}">{{ msg.tokens_summary }}</span>{% endif %} <span class="msg-time" title="{{ msg.timestamp_full }}">{{ msg.timestamp }}</span></div>
+            {% if msg.text_needs_collapse %}
+            <div x-data="{ open: false }">
+                <pre class="msg-text msg-text-clamp" x-show="!open" @click="open = true">{{ msg.text }}</pre>
+                <pre class="msg-text" x-show="open" style="display:none;">{{ msg.text }}</pre>
+                <div class="msg-text-meta" x-show="!open" @click="open = true">{{ msg.text_line_count }} lines · {{ msg.text_char_count }} chars — click to expand</div>
+                <button class="tool-btn tool-btn-sm" x-show="open" style="display:none;" @click="open = false">Collapse</button>
+            </div>
+            {% else %}
             <pre class="msg-text">{{ msg.text }}</pre>
+            {% endif %}
 
         {% elif msg.kind == 'agent_thinking' %}
-            <div class="msg-kind-label">thinking{% if msg.is_sidechain %} <span class="sidechain-badge">subagent</span>{% endif %} <span class="msg-time">{{ msg.timestamp }}</span></div>
+            <div class="msg-kind-label">thinking{% if msg.is_sidechain %} <span class="sidechain-badge">subagent</span>{% endif %}{% if msg.is_first_block and msg.tokens_summary %} <span class="token-badge" title="{{ msg.tokens_title }}">{{ msg.tokens_summary }}</span>{% endif %} <span class="msg-time" title="{{ msg.timestamp_full }}">{{ msg.timestamp }}</span></div>
             {% if msg.thinking_has_more %}
             <div x-data="{ open: false }">
                 <pre class="msg-text" x-show="!open">{{ msg.thinking_preview }}</pre>
@@ -69,15 +96,33 @@
                     {% if msg.is_error %}<span class="badge badge-error">error</span>{% endif %}
                     {% if msg.exec_time %}<span class="exec-time">{{ msg.exec_time }}</span>{% endif %}
                     {% if msg.is_sidechain %}<span class="sidechain-badge">subagent</span>{% endif %}
-                    <span class="msg-time">{{ msg.timestamp }}</span>
+                    <span class="msg-time" title="{{ msg.timestamp_full }}">{{ msg.timestamp }}</span>
                     <span class="tool-chevron" x-text="open ? '▾' : '▸'"></span>
                 </div>
                 <div x-show="open" style="display:none;">
                     <div class="tool-section-label">input</div>
+                    {% if msg.tool_input_needs_collapse %}
+                    <div x-data="{ open: false }">
+                        <pre class="msg-text msg-text-clamp" x-show="!open" @click="open = true">{{ msg.tool_input }}</pre>
+                        <pre class="msg-text" x-show="open" style="display:none;">{{ msg.tool_input }}</pre>
+                        <div class="msg-text-meta" x-show="!open" @click="open = true">{{ msg.tool_input_line_count }} lines · {{ msg.tool_input_char_count }} chars — click to expand</div>
+                        <button class="tool-btn tool-btn-sm" x-show="open" style="display:none;" @click="open = false">Collapse</button>
+                    </div>
+                    {% else %}
                     <pre class="msg-text">{{ msg.tool_input }}</pre>
+                    {% endif %}
                     {% if msg.tool_result %}
                     <div class="tool-section-label">result{% if msg.is_error %} (error){% endif %}</div>
+                    {% if msg.tool_result_needs_collapse %}
+                    <div x-data="{ open: false }">
+                        <pre class="msg-text msg-text-clamp {% if msg.is_error %}msg-text-error{% endif %}" x-show="!open" @click="open = true">{{ msg.tool_result }}</pre>
+                        <pre class="msg-text {% if msg.is_error %}msg-text-error{% endif %}" x-show="open" style="display:none;">{{ msg.tool_result }}</pre>
+                        <div class="msg-text-meta" x-show="!open" @click="open = true">{{ msg.tool_result_line_count }} lines · {{ msg.tool_result_char_count }} chars — click to expand</div>
+                        <button class="tool-btn tool-btn-sm" x-show="open" style="display:none;" @click="open = false">Collapse</button>
+                    </div>
+                    {% else %}
                     <pre class="msg-text {% if msg.is_error %}msg-text-error{% endif %}">{{ msg.tool_result }}</pre>
+                    {% endif %}
                     {% endif %}
                 </div>
             </div>

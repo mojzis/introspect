@@ -31,6 +31,8 @@ from ._helpers import (
 _MESSAGE_HARD_CAP = 5000
 _THINKING_PREVIEW_MAX = 200
 _TOOL_HINT_MAX = 120
+_BODY_COLLAPSE_LINES = 3
+_BODY_COLLAPSE_CHARS = 240
 _COMMAND_NAME_RE = re.compile(r"<command-name>([^<]+)</command-name>")
 
 # Per-tool preferred input keys for the one-line collapsed summary.
@@ -141,6 +143,48 @@ def _tool_hint(tool_name: str, raw_input: str | None) -> str:
 def _single_line(value: str, limit: int) -> str:
     collapsed = " ".join(value.split())
     return collapsed if len(collapsed) <= limit else collapsed[: limit - 1] + "…"
+
+
+_TOKEN_COMPACT_K = 1_000
+_TOKEN_COMPACT_M = 1_000_000
+_TOKEN_COMPACT_SINGLE_DIGIT = 10
+
+
+def _format_tokens_compact(n: int) -> str:
+    """Compact human-readable token count, e.g. 2134 -> '2.1k', 1_250_000 -> '1.2M'."""
+    if n < _TOKEN_COMPACT_K:
+        return str(n)
+    if n < _TOKEN_COMPACT_M:
+        value = n / _TOKEN_COMPACT_K
+        return (
+            f"{value:.1f}k"
+            if value < _TOKEN_COMPACT_SINGLE_DIGIT
+            else f"{round(value)}k"
+        )
+    value = n / _TOKEN_COMPACT_M
+    return (
+        f"{value:.1f}M" if value < _TOKEN_COMPACT_SINGLE_DIGIT else f"{round(value)}M"
+    )
+
+
+def _collapse_info(
+    text: object,
+    *,
+    lines: int = _BODY_COLLAPSE_LINES,
+    chars: int = _BODY_COLLAPSE_CHARS,
+) -> tuple[int, int, bool]:
+    """Return ``(line_count, char_count, needs_collapse)`` for a text body.
+
+    Accepts non-string input (e.g. dicts yielded by the tool_calls join) by
+    coercing to ``str`` first — matches what Jinja will render downstream.
+    """
+    if not text:
+        return 0, 0, False
+    s = text if isinstance(text, str) else str(text)
+    char_count = len(s)
+    line_count = s.count("\n") + 1
+    needs = line_count > lines or char_count > chars
+    return line_count, char_count, needs
 
 
 def _coerce_bool(value: object) -> bool:
@@ -301,9 +345,14 @@ def _build_messages_context(db, session_id: str) -> list[dict]:
             e.tool_use_id,
             tc.tool_use_result,
             tc.is_error,
-            tc.execution_time
+            tc.execution_time,
+            amc.input_tokens,
+            amc.output_tokens,
+            amc.cache_read_tokens,
+            amc.cache_creation_tokens
         FROM session_messages_enriched e
         LEFT JOIN tool_calls tc ON tc.tool_use_id = e.tool_use_id
+        LEFT JOIN assistant_message_costs amc ON amc.uuid = e.uuid
         WHERE e.session_id = ?
           AND e.kind <> 'tool_result'
         ORDER BY e.timestamp ASC, e.block_idx ASC
@@ -329,14 +378,63 @@ def _build_messages_context(db, session_id: str) -> list[dict]:
         is_first = bool(uuid_val) and uuid_val not in seen_uuids
         if uuid_val:
             seen_uuids.add(uuid_val)
+
+        capped_text = _cap(rec["text"])
+        pretty_tool_input = _pretty_tool_input(rec["tool_input"])
+        capped_tool_result = _cap(rec["tool_use_result"])
+
+        text_lines, text_chars, text_needs_collapse = _collapse_info(capped_text)
+        tool_input_lines, tool_input_chars, tool_input_needs_collapse = _collapse_info(
+            pretty_tool_input
+        )
+        tool_result_lines, tool_result_chars, tool_result_needs_collapse = (
+            _collapse_info(capped_tool_result)
+        )
+
+        tokens_in = int(rec["input_tokens"] or 0)
+        tokens_out = int(rec["output_tokens"] or 0)
+        cache_read = int(rec["cache_read_tokens"] or 0)
+        cache_create = int(rec["cache_creation_tokens"] or 0)
+
+        is_assistant_entry = kind in ("agent_text", "agent_thinking")
+        show_tokens = (
+            is_first
+            and is_assistant_entry
+            and (tokens_in or tokens_out or cache_read or cache_create)
+        )
+        if show_tokens:
+            parts: list[str] = []
+            if tokens_in:
+                parts.append(f"↓{_format_tokens_compact(tokens_in)}")
+            if tokens_out:
+                parts.append(f"↑{_format_tokens_compact(tokens_out)}")
+            if cache_read:
+                parts.append(f"⚡{_format_tokens_compact(cache_read)}")
+            tokens_summary = " ".join(parts)
+            tokens_title = (
+                f"Input: {tokens_in:,} · Output: {tokens_out:,} "
+                f"· Cache read: {cache_read:,} "
+                f"· Cache create: {cache_create:,}"
+            )
+        else:
+            tokens_summary = ""
+            tokens_title = ""
+
+        timestamp_full = str(rec["timestamp"])[:19] if rec["timestamp"] else ""
+        timestamp_time = str(rec["timestamp"])[11:19] if rec["timestamp"] else ""
+
         parsed_messages.append(
             {
                 "uuid": uuid_val,
                 "is_first_block": is_first,
-                "timestamp": str(rec["timestamp"])[:19] if rec["timestamp"] else "",
+                "timestamp": timestamp_time,
+                "timestamp_full": timestamp_full,
                 "kind": kind,
                 "is_sidechain": bool(rec["is_sidechain"]),
-                "text": _cap(rec["text"]),
+                "text": capped_text,
+                "text_line_count": text_lines,
+                "text_char_count": text_chars,
+                "text_needs_collapse": text_needs_collapse,
                 "thinking_text": _cap(rec["thinking_text"]),
                 "thinking_preview": thinking_preview,
                 "thinking_has_more": thinking_has_more,
@@ -345,13 +443,25 @@ def _build_messages_context(db, session_id: str) -> list[dict]:
                 ),
                 "tool_name": rec["tool_name"] or "",
                 "tool_hint": _tool_hint(rec["tool_name"] or "", rec["tool_input"]),
-                "tool_input": _pretty_tool_input(rec["tool_input"]),
-                "tool_result": _cap(rec["tool_use_result"]),
+                "tool_input": pretty_tool_input,
+                "tool_input_line_count": tool_input_lines,
+                "tool_input_char_count": tool_input_chars,
+                "tool_input_needs_collapse": tool_input_needs_collapse,
+                "tool_result": capped_tool_result,
+                "tool_result_line_count": tool_result_lines,
+                "tool_result_char_count": tool_result_chars,
+                "tool_result_needs_collapse": tool_result_needs_collapse,
                 "is_error": _coerce_bool(rec["is_error"]),
                 "exec_time": (
                     _format_exec_time(exec_secs) if exec_secs is not None else ""
                 ),
                 "tool_use_id": rec["tool_use_id"] or "",
+                "tokens_in": tokens_in if show_tokens else 0,
+                "tokens_out": tokens_out if show_tokens else 0,
+                "cache_read": cache_read if show_tokens else 0,
+                "cache_create": cache_create if show_tokens else 0,
+                "tokens_summary": tokens_summary,
+                "tokens_title": tokens_title,
             }
         )
     return parsed_messages
@@ -366,6 +476,29 @@ _BLOAT_BASH_FIRST_WORD_MAX = 32
 # writes, and conversation too).
 _BLOAT_CATEGORIES = ("Read", "Created", "Conversation")
 _BLOAT_AGENTS = ("Main", "Subagent")
+
+# Colors cycled through for per-invocation chart series. Main agent always
+# gets _MAIN_AGENT_COLOR; the top-N most expensive subagent invocations get
+# the palette entries in cost-descending order, so the expensive "bad apples"
+# land on the most visually distinct colors.  Palette size caps how many
+# invocations appear individually — the rest roll into an "Other" series.
+_MAIN_AGENT_COLOR = "#3b5bdb"
+_INVOCATION_COLOR_PALETTE = (
+    "#c62828",  # red — reserved for the single most expensive call
+    "#c86b1a",
+    "#c0a000",
+    "#2e8b57",
+    "#0e7490",
+    "#5a6e9a",
+    "#8a5ad0",
+    "#a0429e",
+    "#6b4f9e",
+    "#3f7d50",
+    "#a26a3f",
+    "#7b3b8a",
+)
+_INVOCATION_OTHER_COLOR = "#888888"
+_INVOCATION_TOP_N = len(_INVOCATION_COLOR_PALETTE)
 
 
 def _basename(path: str | None) -> str:
@@ -588,7 +721,24 @@ def _build_cost_context(db, session_id: str) -> dict:
     ]
     bucket_totals, category_totals = _aggregate_bloat(bloat_rows)
 
-    chart = _build_chart_from_attrib(attrib_rows, total_cost)
+    # Task/Agent invocations give us the subagent_type for each sidechain run.
+    # Ordered by called_at so the chart builder can sweep through them in one
+    # pass alongside the (already-sorted) attrib_rows.
+    subagent_type_timeline = db.execute(
+        """
+        SELECT called_at,
+               json_extract_string(tool_input, '$.subagent_type')
+        FROM tool_calls
+        WHERE session_id = ? AND tool_name IN ('Task', 'Agent')
+        ORDER BY called_at
+        """,
+        [session_id],
+    ).fetchall()
+    # Skip Task calls without a subagent_type (general Agent tool uses without
+    # a named type) so they don't overwrite the current type with None mid-run.
+    subagent_type_timeline = [(t, s) for t, s in subagent_type_timeline if s]
+
+    chart = _build_chart_from_attrib(attrib_rows, subagent_type_timeline, total_cost)
     raw_tokens = sum(c["tokens"] for c in category_totals.values())
     total_bloat_tokens = raw_tokens or 1
     total_bloat_cost = sum(c["cost_usd"] for c in category_totals.values())
@@ -843,18 +993,157 @@ def _polyline_from_series(
     return " ".join(coords)
 
 
-def _render_multi_chart(
+def _rank_invocations(
+    uuids: list[str],
+    inc_usd: list[float],
+    invocation_ids: list[int | None],
+) -> tuple[list[dict], dict[int, str], dict[int, int], dict[str, list[float]]]:
+    """Rank subagent invocations by cost and build their per-series increments.
+
+    Returns ``(ranked, first_uuid_by_inv, top_inv_index, per_inv_inc)``:
+
+    * ``ranked``  — all invocations sorted by ``cost_usd`` descending. Each
+      row is ``{"inv": inv_id, "cost_usd": float, "messages": int}``.
+    * ``first_uuid_by_inv`` — inv_id → uuid of that invocation's earliest
+      sidechain message (for deep-links).
+    * ``top_inv_index`` — inv_id → 0-based rank for invocations that fit in
+      the palette; others are absent and will roll up into ``inv_other``.
+    * ``per_inv_inc`` — series-key → per-message increment list, keyed by
+      ``inv_<rank>`` for the top-N and ``inv_other`` for the remainder.
+    """
+    n = len(uuids)
+    per_inv_totals: dict[int, dict] = {}
+    first_uuid_by_inv: dict[int, str] = {}
+    for i in range(n):
+        inv = invocation_ids[i]
+        if inv is None:
+            continue
+        bucket = per_inv_totals.setdefault(
+            inv, {"inv": inv, "cost_usd": 0.0, "messages": 0}
+        )
+        bucket["cost_usd"] += inc_usd[i]
+        bucket["messages"] += 1
+        if inv not in first_uuid_by_inv:
+            first_uuid_by_inv[inv] = uuids[i]
+    ranked = sorted(per_inv_totals.values(), key=lambda d: d["cost_usd"], reverse=True)
+    top_invs = ranked[:_INVOCATION_TOP_N]
+    top_inv_index = {entry["inv"]: rank for rank, entry in enumerate(top_invs)}
+    has_other = len(ranked) > _INVOCATION_TOP_N
+    per_inv_inc: dict[str, list[float]] = {
+        f"inv_{rank}": [0.0] * n for rank in range(len(top_invs))
+    }
+    if has_other:
+        per_inv_inc["inv_other"] = [0.0] * n
+    for i in range(n):
+        inv = invocation_ids[i]
+        if inv is None:
+            continue
+        rank = top_inv_index.get(inv)
+        key = f"inv_{rank}" if rank is not None else "inv_other"
+        per_inv_inc[key][i] = inc_usd[i]
+    return ranked, first_uuid_by_inv, top_inv_index, per_inv_inc
+
+
+def _build_invocation_views(
+    *,
+    ranked: list[dict],
+    invocation_types: list[str],
+    per_inv_first_uuid: dict[int, str],
+    main_cost: float,
+    main_messages: int,
+) -> tuple[list[dict], list[dict]]:
+    """Build the chart-legend series + summary-table rows for invocations."""
+    top_invs = ranked[:_INVOCATION_TOP_N]
+    other_invs = ranked[_INVOCATION_TOP_N:]
+
+    def _label(entry: dict, rank: int) -> str:
+        stype = invocation_types[entry["inv"]] or "(unknown)"
+        return f"#{rank + 1} {stype}"
+
+    series: list[dict] = [
+        {
+            "key": "main",
+            "name": "Main",
+            "color": _MAIN_AGENT_COLOR,
+            "cost": format_cost(main_cost),
+            "messages": main_messages,
+            "first_uuid": None,
+        },
+    ]
+    for rank, entry in enumerate(top_invs):
+        series.append(
+            {
+                "key": f"inv_{rank}",
+                "name": _label(entry, rank),
+                "color": _INVOCATION_COLOR_PALETTE[rank],
+                "cost": format_cost(entry["cost_usd"]),
+                "messages": entry["messages"],
+                "first_uuid": per_inv_first_uuid.get(entry["inv"]),
+            }
+        )
+    if other_invs:
+        other_cost = sum(e["cost_usd"] for e in other_invs)
+        other_msgs = sum(e["messages"] for e in other_invs)
+        series.append(
+            {
+                "key": "inv_other",
+                "name": f"Other ({len(other_invs)} invocations)",
+                "color": _INVOCATION_OTHER_COLOR,
+                "cost": format_cost(other_cost),
+                "messages": other_msgs,
+                "first_uuid": None,
+            }
+        )
+
+    summary = [
+        {
+            "rank": rank + 1,
+            "subagent_type": invocation_types[entry["inv"]] or "(unknown)",
+            "cost": format_cost(entry["cost_usd"]),
+            "cost_usd": entry["cost_usd"],
+            "messages": entry["messages"],
+            "first_uuid": per_inv_first_uuid.get(entry["inv"]),
+            "color": _INVOCATION_COLOR_PALETTE[rank]
+            if rank < _INVOCATION_TOP_N
+            else _INVOCATION_OTHER_COLOR,
+        }
+        for rank, entry in enumerate(ranked)
+    ]
+    return series, summary
+
+
+def _render_multi_chart(  # noqa: PLR0913
     uuids: list[str],
     inc_usd: list[float],
     is_sidechain_list: list[bool],
     categories: list[str],
+    invocation_ids: list[int | None],
+    invocation_types: list[str],
     total_cost: float,
 ) -> dict:
-    """Build the per-series stacked-area chart + marker overlay.
+    """Build the per-series chart + marker overlay.
 
-    Per-message series are bucketed as *increments* (then cumsum'd) to keep
-    stacked series exactly summing to Total at every bucket.
+    ``invocation_ids[i]`` is the 0-based Task/Agent invocation index the
+    i-th message belongs to (``None`` for main-agent messages).
+    ``invocation_types`` lists each invocation's ``subagent_type`` in
+    called_at order — so ``invocation_types[invocation_ids[i]]`` names the
+    agent type of message i.
+
+    The "by invocation" view ranks invocations by total cost descending.
+    The top-N (palette size) get individual polylines in the most distinct
+    colors so outliers — e.g. one runaway Explore that dwarfs the rest —
+    land in the red/orange slots and stand out at a glance.  Invocations
+    beyond the palette roll up into a single "Other" gray series; the chart
+    still totals correctly even when there are many small calls.
     """
+    fixed_empty_polylines = {
+        "total": "",
+        "main": "",
+        "sub": "",
+        "read": "",
+        "created": "",
+        "conversation": "",
+    }
     n_messages = len(uuids)
     if n_messages == 0:
         return {
@@ -863,22 +1152,10 @@ def _render_multi_chart(
             "max": 0.0,
             "messages": 0,
             "points": 0,
-            "polylines": {
-                "total": "",
-                "main": "",
-                "sub": "",
-                "read": "",
-                "created": "",
-                "conversation": "",
-            },
-            "stack_pairs": {
-                "agent": [("main", "#3b5bdb"), ("sub", "#8a5ad0")],
-                "category": [
-                    ("read", "#c86b1a"),
-                    ("created", "#2e8b57"),
-                    ("conversation", "#5a6e9a"),
-                ],
-            },
+            "polylines": fixed_empty_polylines,
+            "invocation_series": [],
+            "invocation_summary": [],
+            "has_subagents": False,
             "markers": [],
         }
 
@@ -896,6 +1173,18 @@ def _render_multi_chart(
         for i in range(n_messages)
     ]
 
+    ranked, per_inv_first_uuid, top_inv_index, per_inv_inc = _rank_invocations(
+        uuids, inc_usd, invocation_ids
+    )
+
+    def _inv_series_key(inv_id: int | None) -> str:
+        if inv_id is None:
+            return "main"
+        rank = top_inv_index.get(inv_id)
+        if rank is None:
+            return "inv_other"
+        return f"inv_{rank}"
+
     # Inflection detection on raw arrays.
     raw_cum: list[float] = []
     running = 0.0
@@ -904,7 +1193,6 @@ def _render_multi_chart(
         raw_cum.append(running)
     raw_markers = _detect_inflection_points(uuids, inc_usd, raw_cum)
 
-    # Bucket all series together so bucket_size is identical.
     cumulatives, bucket_size = _bucket_series(
         {
             "total": inc_usd,
@@ -913,6 +1201,7 @@ def _render_multi_chart(
             "read": read_inc,
             "created": created_inc,
             "conversation": convo_inc,
+            **per_inv_inc,
         },
         n_messages,
     )
@@ -926,9 +1215,21 @@ def _render_multi_chart(
         for name, series in cumulatives.items()
     }
 
-    # Translate raw marker indices to bucketed x-positions + recompute y on
-    # the bucketed total curve so markers land on the displayed Total line.
-    cum_total_bucketed = cumulatives["total"]
+    invocation_series, invocation_summary = _build_invocation_views(
+        ranked=ranked,
+        invocation_types=invocation_types,
+        per_inv_first_uuid=per_inv_first_uuid,
+        main_cost=sum(main_inc),
+        main_messages=sum(1 for i in range(n_messages) if not is_sidechain_list[i]),
+    )
+
+    def _y_on(series_key: str, bucket_idx: int) -> float:
+        series = cumulatives.get(series_key, [])
+        if not series:
+            return height
+        val = series[bucket_idx]
+        return height - (val / max_cost) * height
+
     markers_out: list[dict] = []
     for m in raw_markers:
         raw_idx = m["idx"]
@@ -936,12 +1237,16 @@ def _render_multi_chart(
         if bucket_idx >= points:
             bucket_idx = points - 1
         x = _x_for_index(bucket_idx, points, width)
-        y_val = cum_total_bucketed[bucket_idx] if cum_total_bucketed else 0.0
-        y = height - (y_val / max_cost) * height
+        agent_key = "sub" if is_sidechain_list[raw_idx] else "main"
+        category_key = categories[raw_idx].lower()
+        inv_key = _inv_series_key(invocation_ids[raw_idx])
         markers_out.append(
             {
                 "x": round(x, 1),
-                "y": round(y, 1),
+                "y_total": round(_y_on("total", bucket_idx), 1),
+                "y_agent": round(_y_on(agent_key, bucket_idx), 1),
+                "y_category": round(_y_on(category_key, bucket_idx), 1),
+                "y_invocation": round(_y_on(inv_key, bucket_idx), 1),
                 "uuid": m["uuid"],
                 "kind": m["kind"],
                 "inc_cost": format_cost(m["inc_usd"]),
@@ -957,32 +1262,41 @@ def _render_multi_chart(
         "messages": n_messages,
         "points": points,
         "polylines": polylines,
-        "stack_pairs": {
-            "agent": [("main", "#3b5bdb"), ("sub", "#8a5ad0")],
-            "category": [
-                ("read", "#c86b1a"),
-                ("created", "#2e8b57"),
-                ("conversation", "#5a6e9a"),
-            ],
-        },
+        "invocation_series": invocation_series,
+        "invocation_summary": invocation_summary,
+        "has_subagents": bool(ranked),
         "markers": markers_out,
     }
 
 
 def _build_chart_from_attrib(
     attrib_rows: list[tuple],
+    subagent_type_timeline: list[tuple],
     total_cost: float,
 ) -> dict:
-    """Extract per-message arrays from the attribution query and render chart."""
+    """Extract per-message arrays from the attribution query and render chart.
+
+    ``subagent_type_timeline`` is a list of ``(called_at, subagent_type)``
+    pairs in ascending time order — Task/Agent tool_use calls from the main
+    thread. Each entry defines one invocation. Sidechain messages inherit
+    the invocation id (= index into this list) of the most recent preceding
+    call. Sequential subagents are attributed exactly; fully parallel
+    subagents from one turn get lumped under whichever call came first —
+    the visual breakdown stays meaningful even so.
+    """
+    invocation_types = [s for _t, s in subagent_type_timeline]
     uuids: list[str] = []
     inc_usd: list[float] = []
     is_sidechain_list: list[bool] = []
     categories: list[str] = []
+    invocation_ids: list[int | None] = []
+    timeline_idx = 0
+    current_invocation: int | None = None
     for row in attrib_rows:
         (
             _session_id,
             uuid,
-            _timestamp,
+            timestamp,
             is_side,
             model,
             in_tok,
@@ -995,6 +1309,15 @@ def _build_chart_from_attrib(
             tool_name,
             tool_input_raw,
         ) = row
+        # Advance timeline pointer: every Task/Agent call whose called_at is
+        # <= this message's timestamp is "in effect" for any sidechain rows
+        # that follow. The pointer index itself is the invocation id.
+        while (
+            timeline_idx < len(subagent_type_timeline)
+            and subagent_type_timeline[timeline_idx][0] <= timestamp
+        ):
+            current_invocation = timeline_idx
+            timeline_idx += 1
         in_tok_i = int(in_tok or 0)
         out_tok_i = int(out_tok or 0)
         cr_tok_i = int(cr_tok or 0)
@@ -1023,9 +1346,16 @@ def _build_chart_from_attrib(
         inc_usd.append(cost)
         is_sidechain_list.append(bool(is_side))
         categories.append(category)
+        invocation_ids.append(current_invocation if is_side else None)
 
     return _render_multi_chart(
-        uuids, inc_usd, is_sidechain_list, categories, total_cost
+        uuids,
+        inc_usd,
+        is_sidechain_list,
+        categories,
+        invocation_ids,
+        invocation_types,
+        total_cost,
     )
 
 

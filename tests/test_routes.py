@@ -704,6 +704,138 @@ def test_session_detail_expandable_blocks():
         assert "Bash" in response.text
 
 
+# --- Session-detail entry tweaks: clamp, time-only stamps, token badges ---
+
+_TWEAK_SID = "01234567-abcd-abcd-abcd-fedcba987654"
+
+
+def _tweak_session_jsonl(tmp_dir: Path) -> Path:
+    """Session with long assistant text + short human prompt + token usage."""
+    long_body = "\n".join(f"line {i}" for i in range(1, 11))  # 10 lines
+    lines = [
+        # Give the first user row a ``toolUseResult`` key so DuckDB's schema
+        # inference sees the column (raw_messages SELECTs it). The field is
+        # otherwise irrelevant to the tests.
+        make_user_message(
+            _TWEAK_SID,
+            "u1",
+            None,
+            "2026-04-15T09:30:45.000Z",
+            "short hi",
+            tool_use_result={"content": "seed"},
+        ),
+        make_assistant_message(
+            _TWEAK_SID,
+            "a1",
+            "u1",
+            "2026-04-15T09:30:47.000Z",
+            [{"type": "text", "text": long_body}],
+            usage={
+                "input_tokens": 2134,
+                "output_tokens": 180,
+                "cache_read_input_tokens": 340,
+                "cache_creation_input_tokens": 5120,
+            },
+        ),
+    ]
+    return write_jsonl(tmp_dir, _TWEAK_SID, lines)
+
+
+@contextmanager
+def _tweak_client(tmp_path: Path):
+    """TestClient wired to the tweak-session fixture (long assistant body)."""
+    _tweak_session_jsonl(tmp_path)
+    db_path = tmp_path / "test.duckdb"
+    with (
+        patch.dict(
+            os.environ,
+            {
+                "INTROSPECT_DB_PATH": str(db_path),
+                "INTROSPECT_JSONL_GLOB": glob_pattern(tmp_path),
+                "INTROSPECT_DAYS": "0",
+            },
+        ),
+        TestClient(app) as client,
+    ):
+        yield client
+
+
+def test_session_detail_long_body_collapses():
+    """Long assistant text bodies render with clamp + meta indicator."""
+    with tempfile.TemporaryDirectory() as tmp_str:
+        tmp = Path(tmp_str)
+        with _tweak_client(tmp) as client:
+            response = client.get(f"/sessions/{_TWEAK_SID}?tab=messages")
+            assert response.status_code == 200
+            text = response.text
+            assert "msg-text-clamp" in text
+            assert "msg-text-meta" in text
+            assert "click to expand" in text
+            # The clamped block should NOT be rendered as a plain, unclamped
+            # <pre class="msg-text"> body — the body shows up inside the clamp
+            # wrapper (both x-show copies include the same body text).
+            assert "line 10" in text  # body content is present
+            # Raw-only (unclamped) msg-text variant is absent for the long body:
+            # every occurrence of "line 10" should be adjacent to a clamp class
+            # or the x-show=\"open\" alternate. Looser assertion: the clamp
+            # class appears somewhere in the response.
+            assert "msg-text msg-text-clamp" in text
+
+
+def test_session_detail_short_body_has_no_clamp():
+    """Short bodies (<=3 lines, <=240 chars) render without the clamp wrapper."""
+    with tempfile.TemporaryDirectory() as tmp, _patched_client(Path(tmp)) as client:
+        response = client.get(f"/sessions/{SID}?tab=messages")
+        assert response.status_code == 200
+        text = response.text
+        # Sample fixture has short bodies ("Sure, I can help!", "Hello, help me
+        # with tests") — none should trigger clamp.
+        # Confirm the short assistant reply is rendered as a plain msg-text.
+        assert "Sure, I can help!" in text
+        # And the short human prompt does NOT pull in a clamp wrapper.
+        human_idx = text.find("Hello, help me with tests")
+        assert human_idx != -1
+        window = text[max(0, human_idx - 200) : human_idx + 200]
+        assert "msg-text-clamp" not in window
+
+
+def test_session_detail_time_only_timestamp_with_title():
+    """Per-entry timestamps show HH:MM:SS with the full datetime in a title tip."""
+    with tempfile.TemporaryDirectory() as tmp_str:
+        tmp = Path(tmp_str)
+        with _tweak_client(tmp) as client:
+            response = client.get(f"/sessions/{_TWEAK_SID}?tab=messages")
+            assert response.status_code == 200
+            text = response.text
+            # Full datetime lives in the tooltip.
+            assert 'title="2026-04-15 09:30:47"' in text
+            # Visible text on the msg-time span is time-only.
+            assert ">09:30:47<" in text
+            # The visible span must not itself contain the date — only the
+            # adjacent title attribute should.
+            assert ">2026-04-15 09:30:47<" not in text
+
+
+def test_session_detail_assistant_token_badge():
+    """First-block assistant entries with usage render a token-badge + title."""
+    with tempfile.TemporaryDirectory() as tmp_str:
+        tmp = Path(tmp_str)
+        with _tweak_client(tmp) as client:
+            response = client.get(f"/sessions/{_TWEAK_SID}?tab=messages")
+            assert response.status_code == 200
+            text = response.text
+            assert "token-badge" in text
+            # Compact form: omit zero components, use arrow + ⚡ glyphs.
+            assert "↓" in text
+            assert "↑" in text
+            assert "⚡" in text
+            # Detailed tooltip includes raw counts.
+            assert "Input:" in text
+            assert "Output:" in text
+            assert "2,134" in text
+            assert "180" in text
+
+
 # --- Stats enrichment tests ---
 
 
@@ -1590,6 +1722,195 @@ def test_session_cost_tab_marker_links_to_message():
             assert response.status_code == 200
             text = response.text
             assert f'href="/sessions/{sid}?tab=messages#msg-' in text
+
+
+def test_session_cost_tab_markers_render_as_vertical_ticks():
+    """Markers are <line> (vertical tick), not <circle>.
+
+    ``preserveAspectRatio="none"`` on the chart stretches circles into
+    ellipses — so markers use vertical ticks with ``vector-effect=
+    non-scaling-stroke`` to render at a consistent weight instead.
+    """
+    sid = "spiky-session-000000-0000-000000000002"
+    with tempfile.TemporaryDirectory() as tmp_str:
+        tmp = Path(tmp_str)
+        _spikey_cost_jsonl(tmp, sid)
+        db_path = tmp / "test.duckdb"
+        with (
+            patch.dict(
+                os.environ,
+                {
+                    "INTROSPECT_DB_PATH": str(db_path),
+                    "INTROSPECT_JSONL_GLOB": glob_pattern(tmp),
+                    "INTROSPECT_DAYS": "0",
+                },
+            ),
+            TestClient(app) as client,
+        ):
+            response = client.get(f"/sessions/{sid}?tab=cost")
+            assert response.status_code == 200
+            text = response.text
+            # Anchor present → at least one marker is rendered in some view.
+            assert f'href="/sessions/{sid}?tab=messages#msg-' in text
+            # Shape changed: no <circle> markers, <line> ticks instead.
+            assert "<circle" not in text
+            assert "<line " in text
+            # Anti-stretch guard so ticks render cleanly in the stretched SVG.
+            assert 'vector-effect="non-scaling-stroke"' in text
+
+
+def test_session_cost_tab_marker_groups_per_view():
+    """Markers are wrapped in per-view <g x-show> groups.
+
+    Otherwise a spike detected on the Total curve would float off the line
+    when the user switches to the By agent or By category view.
+    """
+    sid = "spiky-session-000000-0000-000000000003"
+    with tempfile.TemporaryDirectory() as tmp_str:
+        tmp = Path(tmp_str)
+        _spikey_cost_jsonl(tmp, sid)
+        db_path = tmp / "test.duckdb"
+        with (
+            patch.dict(
+                os.environ,
+                {
+                    "INTROSPECT_DB_PATH": str(db_path),
+                    "INTROSPECT_JSONL_GLOB": glob_pattern(tmp),
+                    "INTROSPECT_DAYS": "0",
+                },
+            ),
+            TestClient(app) as client,
+        ):
+            response = client.get(f"/sessions/{sid}?tab=cost")
+            assert response.status_code == 200
+            text = response.text
+            # Each view has its own marker group so ticks track the series
+            # actually being rendered.
+            anchor_prefix = f'href="/sessions/{sid}?tab=messages#msg-'
+            # At least 3 anchors to the same uuid (one per view: total, agent,
+            # category). Subagent fixture has no Task calls so no 'agents' view.
+            assert text.count(anchor_prefix) >= 3
+
+
+def _subagent_with_task_call_jsonl(tmp_dir: Path, session_id: str) -> Path:
+    """JSONL with a Task/Agent call + matching sidechain reply.
+
+    Drives the per-agent-type chart view: the Task call supplies a
+    subagent_type, and the sidechain assistant message incurs the cost that
+    the per-type series should plot. Distinct from the earlier
+    ``_subagent_jsonl`` fixture, which tests sidechain bloat *without* a
+    preceding Task call.
+    """
+    tiny = {"input_tokens": 100, "output_tokens": 10}
+    lines: list[dict] = [
+        make_user_message(
+            session_id,
+            "u1",
+            None,
+            "2026-04-21T10:00:00.000Z",
+            "kick off subagent",
+        ),
+        make_assistant_message(
+            session_id,
+            "a1",
+            "u1",
+            "2026-04-21T10:00:01.000Z",
+            [
+                {
+                    "type": "tool_use",
+                    "id": "toolu_task1",
+                    "name": "Task",
+                    "input": {
+                        "description": "look around",
+                        "prompt": "do research",
+                        "subagent_type": "Explore",
+                    },
+                }
+            ],
+            model="claude-opus-4-7",
+            msg_id="msg-main",
+            usage=tiny,
+        ),
+        make_user_message(
+            session_id,
+            "s1",
+            "a1",
+            "2026-04-21T10:00:02.000Z",
+            "do research",
+            is_sidechain=True,
+        ),
+        make_assistant_message(
+            session_id,
+            "s2",
+            "s1",
+            "2026-04-21T10:00:03.000Z",
+            [{"type": "text", "text": "done"}],
+            model="claude-opus-4-7",
+            msg_id="msg-sub",
+            usage={"input_tokens": 10_000, "output_tokens": 500},
+            is_sidechain=True,
+        ),
+        make_user_message(
+            session_id,
+            "u2",
+            "s2",
+            "2026-04-21T10:00:04.000Z",
+            [
+                {
+                    "type": "tool_result",
+                    "tool_use_id": "toolu_task1",
+                    "content": "subagent done",
+                    "is_error": False,
+                }
+            ],
+            tool_use_result={"content": "subagent done"},
+            source_tool_uuid="a1",
+        ),
+    ]
+    return write_jsonl(tmp_dir, session_id, lines)
+
+
+def test_session_cost_tab_hides_invocations_view_without_task_calls():
+    """No Task/Agent tool calls → 'By invocation' toggle absent."""
+    with tempfile.TemporaryDirectory() as tmp, _patched_client(Path(tmp)) as client:
+        response = client.get(f"/sessions/{SID}?tab=cost")
+        assert response.status_code == 200
+        text = response.text
+        # No Task call in the sample fixture, so the per-invocation view hides
+        # and the summary table doesn't render.
+        assert "view = 'invocations'" not in text
+        assert "By invocation" not in text
+        assert "Subagent invocations by cost" not in text
+
+
+def test_session_cost_tab_shows_invocations_view_with_subagent_type():
+    """Task call with subagent_type → per-invocation toggle, legend, table."""
+    sid = "subagent-session-00000-0000-000000000001"
+    with tempfile.TemporaryDirectory() as tmp_str:
+        tmp = Path(tmp_str)
+        _subagent_with_task_call_jsonl(tmp, sid)
+        db_path = tmp / "test.duckdb"
+        with (
+            patch.dict(
+                os.environ,
+                {
+                    "INTROSPECT_DB_PATH": str(db_path),
+                    "INTROSPECT_JSONL_GLOB": glob_pattern(tmp),
+                    "INTROSPECT_DAYS": "0",
+                },
+            ),
+            TestClient(app) as client,
+        ):
+            response = client.get(f"/sessions/{sid}?tab=cost")
+            assert response.status_code == 200
+            text = response.text
+            assert "view = 'invocations'" in text
+            assert "By invocation" in text
+            # Legend renders the rank + subagent_type verbatim ("#1 Explore").
+            assert "#1 Explore" in text
+            # Top-invocations table renders, with a link to the first sidechain
+            # message of the expensive invocation.
+            assert "Subagent invocations by cost" in text
 
 
 def test_session_messages_have_uuid_anchors():
