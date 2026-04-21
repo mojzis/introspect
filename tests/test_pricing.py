@@ -5,6 +5,9 @@ from __future__ import annotations
 import pytest
 
 from introspect.pricing import (
+    PRICING_CACHE_READ_RATE_SQL,
+    PRICING_CACHE_WRITE_1H_RATE_SQL,
+    PRICING_CACHE_WRITE_5M_RATE_SQL,
     PRICING_INPUT_RATE_SQL,
     PRICING_OUTPUT_RATE_SQL,
     Rates,
@@ -93,30 +96,40 @@ def test_compute_cost_usd_synthetic_is_zero():
     )
 
 
-def test_pricing_sql_matches_python():
-    """SQL CASE rates must agree with Python rates — keep them in lockstep."""
+# All five rate dimensions feed SESSION_COST_SUBQUERY; a typo in any one
+# would silently mis-bill (cache_read in particular is the dominant cost for
+# typical Claude Code sessions).
+_SQL_RATE_PAIRS = [
+    ("input", PRICING_INPUT_RATE_SQL),
+    ("output", PRICING_OUTPUT_RATE_SQL),
+    ("cache_read", PRICING_CACHE_READ_RATE_SQL),
+    ("cache_write_5m", PRICING_CACHE_WRITE_5M_RATE_SQL),
+    ("cache_write_1h", PRICING_CACHE_WRITE_1H_RATE_SQL),
+]
+
+_SQL_TEST_MODELS = [
+    "claude-opus-4-7",
+    "claude-opus-4-1",
+    "claude-sonnet-4-6",
+    "claude-haiku-4-5-20251001",
+    "claude-haiku-3-5",
+    "<synthetic>",
+    "unknown-model",
+]
+
+
+@pytest.mark.parametrize("model", _SQL_TEST_MODELS)
+@pytest.mark.parametrize(("attr", "sql"), _SQL_RATE_PAIRS)
+def test_pricing_sql_matches_python(model, attr, sql):
+    """Each SQL CASE rate must agree with the Python ``Rates`` attribute."""
     import duckdb  # noqa: PLC0415
 
     conn = duckdb.connect(":memory:")
-    cases = [
-        "claude-opus-4-7",
-        "claude-opus-4-1",
-        "claude-sonnet-4-6",
-        "claude-haiku-4-5-20251001",
-        "claude-haiku-3-5",
-        "<synthetic>",
-        "unknown-model",
-    ]
-    for model in cases:
-        row = conn.execute(
-            f"SELECT {PRICING_INPUT_RATE_SQL}, {PRICING_OUTPUT_RATE_SQL} "
-            "FROM (SELECT ? AS model)",
-            [model],
-        ).fetchone()
-        assert row is not None, model
-        sql_input, sql_output = row
-        py = rates_for(model)
-        # DuckDB returns Decimal for fractional CASE-derived numerics; coerce
-        # to float so the equality check is value-based.
-        assert float(sql_input) == pytest.approx(py.input), model
-        assert float(sql_output) == pytest.approx(py.output), model
+    row = conn.execute(
+        f"SELECT {sql} FROM (SELECT ? AS model)",
+        [model],
+    ).fetchone()
+    assert row is not None, model
+    # DuckDB returns Decimal for fractional CASE-derived numerics; coerce to
+    # float so the equality check is value-based.
+    assert float(row[0]) == pytest.approx(getattr(rates_for(model), attr))

@@ -85,11 +85,20 @@ TOOL_COUNTS_SUBQUERY = """(
 ) tc"""
 
 
-# Per-session $ cost computed from the deduped assistant_message_costs view.
-# Per-row pricing in DuckDB (mixed-model sessions cost-correctly without
-# pulling rows into Python just to sort the sessions list).
 def _build_session_cost_subquery() -> str:
-    """Assemble the per-session $ cost subquery, plumbing in the rate CASE strings."""
+    """Assemble the per-session $ cost subquery, plumbing in the rate CASE strings.
+
+    Reads from the deduped ``assistant_message_costs`` view and computes cost
+    per row (so mixed-model sessions roll up correctly) — done in DuckDB
+    rather than Python so the sessions list can ``ORDER BY cost_usd`` without
+    materializing every assistant message.
+
+    The ``cc_fallback`` term covers the legacy schema where
+    ``usage.cache_creation_input_tokens`` is set but the
+    ``cache_creation.{ephemeral_5m,ephemeral_1h}_input_tokens`` sub-fields
+    are zero — bill those tokens at the 5m write rate (Anthropic's older
+    default).  Mirrors the Python fallback in ``fetch_token_usage``.
+    """
     cc_fallback = (
         "(CASE WHEN cache_creation_5m = 0 AND cache_creation_1h = 0 "
         "THEN cache_creation_tokens ELSE 0 END)"
@@ -368,8 +377,11 @@ def fetch_token_usage(
         """,  # noqa: S608
             params,
         ).fetchall()
-    except Exception:
-        log.debug("token usage query failed", exc_info=True)
+    except duckdb.CatalogException:
+        # Lazy-mode read connections may not yet have the derived view; the
+        # caller can still render with empty totals.  Any other failure is a
+        # bug we want to surface, not a zeroed-out template.
+        log.warning("assistant_message_costs view missing", exc_info=True)
         return dict(_EMPTY_TOKEN_USAGE)
 
     totals = {
@@ -381,15 +393,17 @@ def fetch_token_usage(
         "cache_creation_1h": 0,
     }
     cost_usd = 0.0
-    for r in rows:
-        model = r[0]
-        in_tok, out_tok, cr_tok, cc_tok, cc_5m, cc_1h = (int(v or 0) for v in r[1:])
+    for row in rows:
+        model = row[0]
+        in_tok, out_tok, cr_tok, cc_tok, cc_5m, cc_1h = (int(v or 0) for v in row[1:])
         totals["input"] += in_tok
         totals["output"] += out_tok
         totals["cache_read"] += cr_tok
         totals["cache_creation"] += cc_tok
         totals["cache_creation_5m"] += cc_5m
         totals["cache_creation_1h"] += cc_1h
+        # Legacy schema: usage.cache_creation_input_tokens with no 5m/1h
+        # breakdown — bill at the 5m rate (Anthropic's older default).
         eff_5m, eff_1h = cc_5m, cc_1h
         if cc_5m == 0 and cc_1h == 0 and cc_tok > 0:
             eff_5m = cc_tok

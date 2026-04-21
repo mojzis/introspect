@@ -53,14 +53,14 @@
 
 <h2>Bloat attribution — Read vs Created</h2>
 <div class="card">
-    <p style="color:#888;margin:0 0 0.6rem;">Where new context tokens came from. Total accounted: {{ "{:,}".format(cost_ctx.bloat_total_tokens) }} tokens / {{ cost_ctx.bloat_total_cost }}.</p>
+    <p style="color:#888;margin:0 0 0.6rem;">Where new context tokens (cache writes) came from. Cost shown is the cache-write portion only — see the per-model table above for the full session cost. Total accounted: {{ "{:,}".format(cost_ctx.bloat_total_tokens) }} tokens / {{ cost_ctx.bloat_total_cost }} of cache writes.</p>
     <table>
         <thead>
             <tr>
                 <th>Category</th>
                 <th style="text-align:right;">Tokens added</th>
-                <th style="text-align:right;">Cost</th>
-                <th style="text-align:right;">% of session</th>
+                <th style="text-align:right;">Cache write cost</th>
+                <th style="text-align:right;">% of cache writes</th>
             </tr>
         </thead>
         <tbody>
@@ -85,8 +85,8 @@
                 <th>Bucket</th>
                 <th>Category</th>
                 <th style="text-align:right;">Tokens</th>
-                <th style="text-align:right;">Cost</th>
-                <th style="text-align:right;">% of session</th>
+                <th style="text-align:right;">Cache write cost</th>
+                <th style="text-align:right;">% of cache writes</th>
             </tr>
         </thead>
         <tbody>

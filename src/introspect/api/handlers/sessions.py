@@ -428,9 +428,11 @@ def _aggregate_per_model(rows: list[tuple]) -> tuple[list[dict], list[tuple], fl
     by_model: dict[str, dict] = {}
     cumulative_pts: list[tuple] = []
     running = 0.0
-    for r in rows:
-        ts, _is_side, model = r[0], r[1], r[2]
-        in_tok, out_tok, cr_tok, cc_tok, cc_5m, cc_1h = (int(v or 0) for v in r[3:9])
+    for cost_row in rows:
+        ts, _is_side, model = cost_row[0], cost_row[1], cost_row[2]
+        in_tok, out_tok, cr_tok, cc_tok, cc_5m, cc_1h = (
+            int(v or 0) for v in cost_row[3:9]
+        )
         eff_5m = cc_tok if (cc_5m == 0 and cc_1h == 0 and cc_tok > 0) else cc_5m
         cost = compute_cost_usd(
             model=model,
@@ -466,8 +468,8 @@ def _aggregate_per_model(rows: list[tuple]) -> tuple[list[dict], list[tuple], fl
         bucket["cache_creation_1h"] += cc_1h
         bucket["cost_usd"] += cost
     per_model = sorted(by_model.values(), key=lambda d: d["cost_usd"], reverse=True)
-    for m in per_model:
-        m["cost"] = format_cost(m["cost_usd"])
+    for entry in per_model:
+        entry["cost"] = format_cost(entry["cost_usd"])
     return per_model, cumulative_pts, running
 
 
@@ -477,7 +479,7 @@ def _aggregate_bloat(rows: list[tuple]) -> tuple[dict, dict]:
     category_totals: dict[str, dict] = {
         c: {"category": c, "tokens": 0, "cost_usd": 0.0} for c in _BLOAT_CATEGORIES
     }
-    for r in rows:
+    for bloat_row in rows:
         (
             is_side,
             model,
@@ -487,7 +489,7 @@ def _aggregate_bloat(rows: list[tuple]) -> tuple[dict, dict]:
             user_block_type,
             tool_name,
             tool_input_raw,
-        ) = r
+        ) = bloat_row
         cc_total = int(cc_total or 0)
         cc_5m = int(cc_5m or 0)
         cc_1h = int(cc_1h or 0)
@@ -510,12 +512,12 @@ def _aggregate_bloat(rows: list[tuple]) -> tuple[dict, dict]:
         cat_entry = category_totals[category]
         cat_entry["tokens"] += cc_total
         cat_entry["cost_usd"] += cost
-        b = bucket_totals.setdefault(
+        bucket_entry = bucket_totals.setdefault(
             bucket,
             {"bucket": bucket, "category": category, "tokens": 0, "cost_usd": 0.0},
         )
-        b["tokens"] += cc_total
-        b["cost_usd"] += cost
+        bucket_entry["tokens"] += cc_total
+        bucket_entry["cost_usd"] += cost
     return bucket_totals, category_totals
 
 
@@ -627,14 +629,14 @@ def _build_cost_context(db, session_id: str) -> dict:
     extra_count = max(0, len(sorted_buckets) - _BLOAT_TOP_N)
     top_buckets_view = [
         {
-            "bucket": b["bucket"],
-            "category": b["category"],
-            "tokens": b["tokens"],
-            "cost_usd": b["cost_usd"],
-            "cost": format_cost(b["cost_usd"]),
-            "pct": 100.0 * b["tokens"] / total_bloat_tokens,
+            "bucket": bucket["bucket"],
+            "category": bucket["category"],
+            "tokens": bucket["tokens"],
+            "cost_usd": bucket["cost_usd"],
+            "cost": format_cost(bucket["cost_usd"]),
+            "pct": 100.0 * bucket["tokens"] / total_bloat_tokens,
         }
-        for b in sorted_buckets[:_BLOAT_TOP_N]
+        for bucket in sorted_buckets[:_BLOAT_TOP_N]
     ]
 
     return {

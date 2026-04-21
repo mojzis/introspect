@@ -17,6 +17,7 @@ generated mechanically.
 
 from __future__ import annotations
 
+import functools
 import logging
 from typing import NamedTuple
 
@@ -59,28 +60,50 @@ _PRICING: dict[str, Rates] = {
 _ZERO_RATES = Rates(0, 0, 0, 0, 0)
 _SYNTHETIC = "<synthetic>"
 
-_warned_unknown_models: set[str] = set()
+
+# Sort once at module load: CASE evaluates branches in order, and LIKE
+# 'claude-opus-4%' would otherwise swallow 'claude-opus-4-7'.  Sort longest
+# prefix first so the most specific match wins.  Reused by ``rates_for`` so
+# Python and SQL share the same prefix-resolution order.
+_PRICING_BY_PREFIX_LEN = sorted(
+    _PRICING.items(), key=lambda item: len(item[0]), reverse=True
+)
+
+# Defensive: every prefix is interpolated into a SQL LIKE literal in
+# ``_build_case_sql``.  Fail loud at module load if a key contains a single
+# quote (would break the SQL string) or a ``%`` wildcard (would broaden the
+# CASE branch silently).  Today's keys are clean; this exists so a future
+# contributor adding e.g. ``"claude-foo'bar"`` gets a clear error instead of
+# a SQL syntax exception thousands of lines away.
+for _prefix in _PRICING:
+    if "'" in _prefix or "%" in _prefix:
+        msg = f"_PRICING key {_prefix!r} contains a SQL-unsafe character"
+        raise ValueError(msg)
+
+
+@functools.lru_cache(maxsize=128)
+def _warn_unknown_model_once(model: str) -> None:
+    """Emit one WARNING per unknown model name (bounded LRU)."""
+    log.warning("unknown model for pricing: %r — billing as $0", model)
 
 
 def rates_for(model: str | None) -> Rates:
     """Look up rates for a model, matching by prefix.
 
     Returns zero rates for ``<synthetic>``, ``None``, the empty string, or any
-    unrecognized model. Unknown models are logged once at WARNING level.
+    unrecognized model. Unknown models are logged once at WARNING level
+    (bounded by an LRU cache so a flood of distinct unknown names can't grow
+    memory unboundedly).
     """
     if not model or model == _SYNTHETIC:
         return _ZERO_RATES
     # Prefer the longest matching prefix (so "claude-opus-4-1" beats
-    # "claude-opus-4" if both are present).
-    best: tuple[int, Rates] | None = None
-    for prefix, rates in _PRICING.items():
-        if model.startswith(prefix) and (best is None or len(prefix) > best[0]):
-            best = (len(prefix), rates)
-    if best is not None:
-        return best[1]
-    if model not in _warned_unknown_models:
-        log.warning("unknown model for pricing: %r — billing as $0", model)
-        _warned_unknown_models.add(model)
+    # "claude-opus-4" if both are present).  Reuse the same sorted list the
+    # SQL builder uses to keep the two lookup strategies consistent.
+    for prefix, rates in _PRICING_BY_PREFIX_LEN:
+        if model.startswith(prefix):
+            return rates
+    _warn_unknown_model_once(model)
     return _ZERO_RATES
 
 
@@ -105,14 +128,6 @@ def compute_cost_usd(  # noqa: PLR0913
         + (cache_creation_5m or 0) * r.cache_write_5m
         + (cache_creation_1h or 0) * r.cache_write_1h
     ) / _PER_MILLION
-
-
-# Sort once at module load: CASE evaluates branches in order, and LIKE
-# 'claude-opus-4%' would otherwise swallow 'claude-opus-4-7'.  Sort longest
-# prefix first so the most specific match wins.
-_PRICING_BY_PREFIX_LEN = sorted(
-    _PRICING.items(), key=lambda item: len(item[0]), reverse=True
-)
 
 
 def _build_case_sql(rate_attr: str) -> str:

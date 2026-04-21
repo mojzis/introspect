@@ -140,6 +140,7 @@ def materialize_views(
         "session_titles",
         "conversation_turns",
         "session_messages_enriched",
+        "assistant_message_costs",
         "file_reads",
         "file_writes",
         "tool_calls",
