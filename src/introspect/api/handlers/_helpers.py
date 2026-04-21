@@ -120,6 +120,99 @@ def _build_session_cost_subquery() -> str:
 
 SESSION_COST_SUBQUERY = _build_session_cost_subquery()
 
+
+def build_cost_attribution_sql(amc_filter: str = "") -> str:
+    """Build the full cost-attribution query used by both cost views.
+
+    The result query yields one row per deduped assistant message with the
+    bloat classifier inputs attached (``user_block_type``, ``tool_name``,
+    ``tool_input``). Two consumers share this query:
+
+    * ``_build_cost_context`` (session-detail Cost tab) — scopes to one
+      session via ``WHERE session_id = ?``.
+    * ``_build_huge_reads_split`` (Cost Overview) — runs unscoped across
+      every session.
+
+    Keeping the classifier CTE in one place means the two paths can't drift
+    — "huge reads" on the overview must agree with what the session-detail
+    Cost tab calls Read-category cache creation.
+
+    Args:
+        amc_filter: a SQL ``WHERE`` clause (including the keyword) to scope
+            the inner ``assistant_message_costs`` read, e.g.
+            ``"WHERE session_id = ?"``. Empty string means "all sessions".
+
+    The returned SQL yields columns:
+        session_id, uuid, timestamp, is_sidechain, model,
+        input_tokens, output_tokens, cache_read_tokens, cc_total,
+        cache_creation_5m, cache_creation_1h,
+        user_block_type, tool_name, tool_input
+    """
+    # amc_filter is a trusted module-local literal ("" or "WHERE session_id = ?"
+    # — never user input), so splicing it into the query is safe.
+    amc_cte = f"WITH amc AS (SELECT * FROM assistant_message_costs {amc_filter})"  # noqa: S608
+    return amc_cte + _COST_ATTRIBUTION_STATIC_TAIL
+
+
+# Static tail of the cost-attribution SQL — the only variable part is the
+# ``amc`` CTE's WHERE clause (handled by :func:`build_cost_attribution_sql`),
+# so the rest lives in one place as a module constant.
+_COST_ATTRIBUTION_STATIC_TAIL = """,
+        parent_blocks AS (
+            SELECT
+                amc.uuid AS amc_uuid,
+                json_extract_string(
+                    u.message, '$.content[' || i.idx || '].type'
+                ) AS block_type,
+                json_extract_string(
+                    u.message, '$.content[' || i.idx || '].tool_use_id'
+                ) AS block_tool_use_id,
+                i.idx AS block_idx
+            FROM amc
+            JOIN raw_messages u
+              ON u.uuid = amc.parent_uuid AND u.type = 'user'
+              AND json_array_length(json_extract(u.message, '$.content')) > 0,
+              generate_series(
+                  0,
+                  CAST(json_array_length(
+                      json_extract(u.message, '$.content')
+                  ) - 1 AS BIGINT)
+              ) AS i(idx)
+        ),
+        chosen_block AS (
+            -- Prefer a tool_result block (any index) over a text block.
+            SELECT amc_uuid,
+                   FIRST(block_type ORDER BY
+                         CASE WHEN block_type = 'tool_result' THEN 0 ELSE 1 END,
+                         block_idx) AS user_block_type,
+                   FIRST(block_tool_use_id ORDER BY
+                         CASE WHEN block_type = 'tool_result' THEN 0 ELSE 1 END,
+                         block_idx) AS tool_use_id
+            FROM parent_blocks
+            GROUP BY amc_uuid
+        )
+        SELECT
+            amc.session_id,
+            amc.uuid,
+            amc.timestamp,
+            amc.is_sidechain,
+            amc.model,
+            amc.input_tokens,
+            amc.output_tokens,
+            amc.cache_read_tokens,
+            amc.cache_creation_tokens AS cc_total,
+            amc.cache_creation_5m,
+            amc.cache_creation_1h,
+            cb.user_block_type,
+            tc.tool_name,
+            tc.tool_input
+        FROM amc
+        LEFT JOIN chosen_block cb ON cb.amc_uuid = amc.uuid
+        LEFT JOIN tool_calls tc ON tc.tool_use_id = cb.tool_use_id
+        ORDER BY amc.timestamp
+"""
+
+
 # Reusable SQL fragments for per-session file metrics
 # (backed by file_reads / file_writes views).
 FILE_READS_SUBQUERY = """(

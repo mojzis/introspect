@@ -1725,6 +1725,416 @@ def test_slope_detector_handles_single_positive_delta():
     assert all(m["kind"] != "slope" for m in markers), markers
 
 
+# --- Phase 2: Cost Overview page tests ---
+
+
+def _cost_overview_setup(tmp_dir: Path, specs: list[tuple[str, list[dict]]]) -> None:
+    """Write one JSONL per (session_id, lines) tuple.
+
+    Helper for the Cost Overview fixtures which need to synthesise multiple
+    distinct sessions with known-cost profiles.
+    """
+    for session_id, lines in specs:
+        write_jsonl(tmp_dir, session_id, lines)
+
+
+def _session_at_cost(
+    session_id: str, input_tokens: int, *, timestamp_day: str = "2026-04-21"
+) -> list[dict]:
+    """Build a minimal two-message JSONL that costs exactly
+    ``input_tokens * $5 / 1_000_000`` at claude-opus-4-7 pricing.
+    """
+    lines = [
+        make_user_message(
+            session_id,
+            "u1",
+            None,
+            f"{timestamp_day}T10:00:00.000Z",
+            "go",
+            tool_use_result={"content": "seed"},
+        ),
+        make_assistant_message(
+            session_id,
+            "a1",
+            "u1",
+            f"{timestamp_day}T10:00:01.000Z",
+            [{"type": "text", "text": "ok"}],
+            model="claude-opus-4-7",
+            msg_id=f"msg-{session_id}-a1",
+            usage={"input_tokens": input_tokens, "output_tokens": 0},
+        ),
+    ]
+    return lines
+
+
+def _run_with_client(tmp: Path, fn):
+    """Run ``fn(client)`` with an initialised TestClient for this tmp dir."""
+    db_path = tmp / "test.duckdb"
+    with (
+        patch.dict(
+            os.environ,
+            {
+                "INTROSPECT_DB_PATH": str(db_path),
+                "INTROSPECT_JSONL_GLOB": glob_pattern(tmp),
+                "INTROSPECT_DAYS": "0",
+            },
+        ),
+        TestClient(app) as client,
+    ):
+        return fn(client)
+
+
+def _materialize_and_run(tmp: Path, fn):
+    """Materialize views and run ``fn(conn)`` against a standalone connection.
+
+    Avoids the TestClient fixture's writable DB lock so tests can call the
+    helper functions directly and assert on structured output.
+    """
+    from introspect.db import (  # noqa: PLC0415
+        get_connection,
+        materialize_views,
+    )
+
+    db_path = tmp / "test.duckdb"
+    conn = get_connection(db_path, glob_pattern(tmp))
+    try:
+        materialize_views(conn, glob_pattern(tmp), 0, resolve_projects=False)
+        return fn(conn)
+    finally:
+        conn.close()
+
+
+def test_cost_overview_page_renders():
+    """Cost Overview returns 200 and includes the hero total-cost string."""
+    # Three sessions at known costs so the hero total is deterministic.
+    # 4M+2M+1M = 7M input tokens * $5/M = $35.00.
+    specs = [
+        (
+            "sess-render-01-aaaa-aaaa-aaaaaaaaaaaa",
+            _session_at_cost("sess-render-01-aaaa-aaaa-aaaaaaaaaaaa", 4_000_000),
+        ),
+        (
+            "sess-render-02-aaaa-aaaa-aaaaaaaaaaaa",
+            _session_at_cost("sess-render-02-aaaa-aaaa-aaaaaaaaaaaa", 2_000_000),
+        ),
+        (
+            "sess-render-03-aaaa-aaaa-aaaaaaaaaaaa",
+            _session_at_cost("sess-render-03-aaaa-aaaa-aaaaaaaaaaaa", 1_000_000),
+        ),
+    ]
+    with tempfile.TemporaryDirectory() as tmp_str:
+        tmp = Path(tmp_str)
+        _cost_overview_setup(tmp, specs)
+
+        def _check(client):
+            response = client.get("/cost-overview")
+            assert response.status_code == 200
+            text = response.text
+            assert "Cost Overview" in text
+            # Hero total: $35.00 (4M+2M+1M) * $5/M.
+            assert "$35.00" in text
+
+        _run_with_client(tmp, _check)
+
+
+def test_cost_overview_pareto_cutoff_at_80pct():
+    """Pareto cutoff must include rows up to and including the 80% crossing.
+
+    Fixture: 10 sessions with input_tokens sized so cost_usd = tokens / 200k.
+    Costs: 100, 50, 30, 20, 10, 5, 5, 3, 2, 1. Total $226; 80% = $180.80.
+    Cumulative: 100, 150, 180, 200, 210, 215, 220, 223, 225, 226.
+    Row 3 is $180 (79.6%, below cutoff). Row 4 is $200 (88.5%, first
+    crossing) — row 4 is the cutoff and rows 1-4 are in Pareto; row 5 is
+    NOT in Pareto.
+    """
+    from introspect.api.handlers.cost_overview import (  # noqa: PLC0415
+        _build_pareto,
+    )
+
+    costs_usd = [100, 50, 30, 20, 10, 5, 5, 3, 2, 1]
+    specs: list[tuple[str, list[dict]]] = []
+    for rank, c in enumerate(costs_usd):
+        # $1 == 200_000 input tokens at $5/M claude-opus-4-7 pricing.
+        sid = f"sess-pareto-{rank:02d}-aaaa-aaaa-aaaaaaaaaaaa"
+        specs.append((sid, _session_at_cost(sid, c * 200_000)))
+    with tempfile.TemporaryDirectory() as tmp_str:
+        tmp = Path(tmp_str)
+        _cost_overview_setup(tmp, specs)
+
+        pareto = _materialize_and_run(tmp, _build_pareto)
+
+        # Rows are sorted by cost_usd DESC. Check the first 5 rows by
+        # cost and their Pareto membership.
+        rows = pareto["rows"]
+        assert len(rows) == 10
+        # Row 0: $100 (44.2% cum), in pareto, not cutoff.
+        assert rows[0]["cost_usd"] == pytest.approx(100.0)
+        assert rows[0]["in_pareto"]
+        assert not rows[0]["is_cutoff"]
+        # Row 1: $50 ($150, 66.4%), in pareto, not cutoff.
+        assert rows[1]["in_pareto"]
+        assert not rows[1]["is_cutoff"]
+        # Row 2: $30 ($180, 79.6%), in pareto, not cutoff (still < 80%).
+        assert rows[2]["in_pareto"]
+        assert not rows[2]["is_cutoff"]
+        # Row 3: $20 ($200, 88.5%), in pareto, IS cutoff (first ≥80%).
+        assert rows[3]["in_pareto"]
+        assert rows[3]["is_cutoff"]
+        # Row 4: $10 ($210), NOT in pareto.
+        assert not rows[4]["in_pareto"]
+        assert not rows[4]["is_cutoff"]
+
+        assert pareto["pareto_session_count"] == 4
+        assert pareto["total_session_count"] == 10
+        assert pareto["total_cost_usd"] == pytest.approx(226.0)
+
+
+def _subagent_overview_session(session_id: str, input_tokens: int) -> list[dict]:
+    """Two-message session whose assistant record is a sidechain message."""
+    lines = [
+        make_user_message(
+            session_id,
+            "u1",
+            None,
+            "2026-04-21T10:00:00.000Z",
+            "go",
+            tool_use_result={"content": "seed"},
+        ),
+        make_user_message(
+            session_id,
+            "su1",
+            "u1",
+            "2026-04-21T10:00:01.000Z",
+            "subagent",
+            is_sidechain=True,
+        ),
+        make_assistant_message(
+            session_id,
+            "sa1",
+            "su1",
+            "2026-04-21T10:00:02.000Z",
+            [{"type": "text", "text": "ok"}],
+            model="claude-opus-4-7",
+            msg_id=f"msg-{session_id}-sa1",
+            usage={"input_tokens": input_tokens, "output_tokens": 0},
+            is_sidechain=True,
+        ),
+    ]
+    return lines
+
+
+def test_cost_overview_subagent_split():
+    """Subagent-presence split: with-row counts only sidechain sessions."""
+    from introspect.api.handlers.cost_overview import (  # noqa: PLC0415
+        _build_subagent_split,
+    )
+
+    sid_with = "sess-side-01-aaaa-aaaa-aaaaaaaaaaaa"
+    sid_without = "sess-side-02-aaaa-aaaa-aaaaaaaaaaaa"
+    specs = [
+        (sid_with, _subagent_overview_session(sid_with, 2_000_000)),  # $10
+        (sid_without, _session_at_cost(sid_without, 1_000_000)),  # $5
+    ]
+    with tempfile.TemporaryDirectory() as tmp_str:
+        tmp = Path(tmp_str)
+        _cost_overview_setup(tmp, specs)
+
+        split = _materialize_and_run(tmp, _build_subagent_split)
+
+        assert split["with"]["sessions"] == 1
+        assert split["without"]["sessions"] == 1
+        # Sidechain session cost = $10 (2M * $5/M).
+        assert split["with"]["cost_usd"] == pytest.approx(10.0)
+        # Non-sidechain cost = $5 (1M * $5/M).
+        assert split["without"]["cost_usd"] == pytest.approx(5.0)
+
+
+def _huge_reads_session(session_id: str) -> list[dict]:
+    """Build a session whose Read-category cache creation is ≥10% of cost
+    and ≥100k tokens — i.e., classifies as "with huge reads".
+
+    Strategy: a Read tool use followed by an assistant message whose
+    parent is the tool_result, with 200k cache-creation tokens (well over
+    the 100k floor) AND a dominant cache-creation cost share.
+    """
+    lines = [
+        make_user_message(
+            session_id,
+            "u1",
+            None,
+            "2026-04-21T10:00:00.000Z",
+            "please review",
+        ),
+        make_assistant_message(
+            session_id,
+            "a1",
+            "u1",
+            "2026-04-21T10:00:01.000Z",
+            [
+                {
+                    "type": "tool_use",
+                    "id": "tu-huge-read",
+                    "name": "Read",
+                    "input": {"file_path": "/repo/src/huge_file.py"},
+                }
+            ],
+            model="claude-opus-4-7",
+            msg_id=f"msg-{session_id}-a1",
+            usage={"input_tokens": 100, "output_tokens": 5},
+        ),
+        make_user_message(
+            session_id,
+            "u2",
+            "a1",
+            "2026-04-21T10:00:02.000Z",
+            [
+                {
+                    "type": "tool_result",
+                    "tool_use_id": "tu-huge-read",
+                    "content": "x" * 100,
+                    "is_error": False,
+                }
+            ],
+            tool_use_result={"content": "x" * 100},
+            source_tool_uuid="a1",
+        ),
+        make_assistant_message(
+            session_id,
+            "a2",
+            "u2",
+            "2026-04-21T10:00:03.000Z",
+            [{"type": "text", "text": "done"}],
+            model="claude-opus-4-7",
+            msg_id=f"msg-{session_id}-a2",
+            usage={
+                "input_tokens": 100,
+                "output_tokens": 10,
+                "cache_creation_input_tokens": 200_000,
+                "cache_creation": {
+                    "ephemeral_5m_input_tokens": 200_000,
+                    "ephemeral_1h_input_tokens": 0,
+                },
+            },
+        ),
+    ]
+    return lines
+
+
+def test_cost_overview_huge_reads_split():
+    """A session whose Read-category cache creation clears both guards
+    (≥10% of session cost AND ≥100k tokens) classifies as "with huge reads".
+    """
+    from introspect.api.handlers.cost_overview import (  # noqa: PLC0415
+        _build_huge_reads_split,
+    )
+
+    sid_with = "sess-huge-01-aaaa-aaaa-aaaaaaaaaaaa"
+    sid_without = "sess-huge-02-aaaa-aaaa-aaaaaaaaaaaa"
+    specs = [
+        (sid_with, _huge_reads_session(sid_with)),
+        (sid_without, _session_at_cost(sid_without, 1_000_000)),
+    ]
+    with tempfile.TemporaryDirectory() as tmp_str:
+        tmp = Path(tmp_str)
+        _cost_overview_setup(tmp, specs)
+
+        split = _materialize_and_run(tmp, _build_huge_reads_split)
+
+        # Only the huge-reads session classifies "with".
+        assert split["with"]["sessions"] == 1
+        assert split["without"]["sessions"] == 1
+
+
+def _skill_session_command_tag(session_id: str) -> list[dict]:
+    """Session that uses a non-built-in skill via <command-name>."""
+    lines = [
+        make_user_message(
+            session_id,
+            "u1",
+            None,
+            "2026-04-21T10:00:00.000Z",
+            "<command-name>marimo-pair</command-name>\nplease pair",
+        ),
+        make_assistant_message(
+            session_id,
+            "a1",
+            "u1",
+            "2026-04-21T10:00:01.000Z",
+            [{"type": "text", "text": "ok"}],
+            model="claude-opus-4-7",
+            msg_id=f"msg-{session_id}-a1",
+            usage={"input_tokens": 1_000_000, "output_tokens": 0},
+        ),
+    ]
+    return lines
+
+
+def _skill_session_clear(session_id: str) -> list[dict]:
+    """Session whose only command is /clear — a built-in that must NOT
+    flip it into the "with skills" bucket.
+    """
+    lines = [
+        make_user_message(
+            session_id,
+            "u1",
+            None,
+            "2026-04-21T10:00:00.000Z",
+            "<command-name>/clear</command-name>",
+        ),
+        make_assistant_message(
+            session_id,
+            "a1",
+            "u1",
+            "2026-04-21T10:00:01.000Z",
+            [{"type": "text", "text": "ok"}],
+            model="claude-opus-4-7",
+            msg_id=f"msg-{session_id}-a1",
+            usage={"input_tokens": 1_000_000, "output_tokens": 0},
+        ),
+    ]
+    return lines
+
+
+def test_cost_overview_skill_split():
+    """/clear and other OBVIOUS_COMMANDS must not flip a session's classification.
+
+    Fixture: session 1 uses <command-name>marimo-pair</command-name> (should
+    classify as "with skills"); session 2 uses no commands; session 3 uses
+    /clear only. Only session 1 classifies as "with"; sessions 2 and 3 are
+    both "without".
+    """
+    from introspect.api.handlers.cost_overview import (  # noqa: PLC0415
+        _build_skill_split,
+    )
+
+    sid1 = "sess-skill-01-aaaa-aaaa-aaaaaaaaaaaa"
+    sid2 = "sess-skill-02-aaaa-aaaa-aaaaaaaaaaaa"
+    sid3 = "sess-skill-03-aaaa-aaaa-aaaaaaaaaaaa"
+    specs = [
+        (sid1, _skill_session_command_tag(sid1)),
+        (sid2, _session_at_cost(sid2, 1_000_000)),
+        (sid3, _skill_session_clear(sid3)),
+    ]
+    with tempfile.TemporaryDirectory() as tmp_str:
+        tmp = Path(tmp_str)
+        _cost_overview_setup(tmp, specs)
+
+        split = _materialize_and_run(tmp, _build_skill_split)
+
+        # Only session 1 is "with skills"; sessions 2 and 3 are not.
+        assert split["with"]["sessions"] == 1
+        assert split["without"]["sessions"] == 2
+
+
+def test_cost_overview_nav_link_present():
+    """Nav link to /cost-overview is rendered on the sessions page."""
+    with tempfile.TemporaryDirectory() as tmp, _patched_client(Path(tmp)) as client:
+        response = client.get("/sessions")
+        assert response.status_code == 200
+        assert 'href="/cost-overview"' in response.text
+        assert "Cost Overview" in response.text
+
+
 def test_fetch_token_usage_dedup():
     """Direct unit test: deduped totals should equal a single message's usage."""
     from introspect.api.handlers._helpers import fetch_token_usage  # noqa: PLC0415

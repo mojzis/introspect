@@ -19,6 +19,7 @@ from ._helpers import (
     SESSIONS_PER_PAGE_DEFAULT,
     SESSIONS_SORT_COLS,
     SESSIONS_SORT_DEFAULT,
+    build_cost_attribution_sql,
     conn,
     fetch_token_usage,
     format_cost,
@@ -557,82 +558,31 @@ def _build_cost_context(db, session_id: str) -> dict:
     # lived at index >= 1, mis-attributing legitimate file reads as "human
     # input".
     attrib_rows = db.execute(
-        """
-        WITH amc AS (
-            SELECT * FROM assistant_message_costs WHERE session_id = ?
-        ),
-        parent_blocks AS (
-            SELECT
-                amc.uuid AS amc_uuid,
-                json_extract_string(
-                    u.message, '$.content[' || i.idx || '].type'
-                ) AS block_type,
-                json_extract_string(
-                    u.message, '$.content[' || i.idx || '].tool_use_id'
-                ) AS block_tool_use_id,
-                i.idx AS block_idx
-            FROM amc
-            JOIN raw_messages u
-              ON u.uuid = amc.parent_uuid AND u.type = 'user'
-              AND json_array_length(json_extract(u.message, '$.content')) > 0,
-              generate_series(
-                  0,
-                  CAST(json_array_length(
-                      json_extract(u.message, '$.content')
-                  ) - 1 AS BIGINT)
-              ) AS i(idx)
-        ),
-        chosen_block AS (
-            -- Prefer a tool_result block (any index) over a text block.
-            SELECT amc_uuid,
-                   FIRST(block_type ORDER BY
-                         CASE WHEN block_type = 'tool_result' THEN 0 ELSE 1 END,
-                         block_idx) AS user_block_type,
-                   FIRST(block_tool_use_id ORDER BY
-                         CASE WHEN block_type = 'tool_result' THEN 0 ELSE 1 END,
-                         block_idx) AS tool_use_id
-            FROM parent_blocks
-            GROUP BY amc_uuid
-        )
-        SELECT
-            amc.uuid,
-            amc.timestamp,
-            amc.is_sidechain,
-            amc.model,
-            amc.input_tokens,
-            amc.output_tokens,
-            amc.cache_read_tokens,
-            amc.cache_creation_tokens AS cc_total,
-            amc.cache_creation_5m,
-            amc.cache_creation_1h,
-            cb.user_block_type,
-            tc.tool_name,
-            tc.tool_input
-        FROM amc
-        LEFT JOIN chosen_block cb ON cb.amc_uuid = amc.uuid
-        LEFT JOIN tool_calls tc ON tc.tool_use_id = cb.tool_use_id
-        ORDER BY amc.timestamp
-        """,
+        build_cost_attribution_sql("WHERE session_id = ?"),
         [session_id],
     ).fetchall()
 
-    # _aggregate_per_model reads indices 0..8 of its input row:
-    # (timestamp, is_sidechain, model, in, out, cache_read, cc_total,
-    #  cache_creation_5m, cache_creation_1h).  That matches attrib_rows[1:10]
-    # — slicing lets the two aggregators share one scan of the view.
-    per_model_rows = [row[1:10] for row in attrib_rows]
+    # Columns from build_cost_attribution_sql (0-indexed):
+    #   0 session_id, 1 uuid, 2 timestamp, 3 is_sidechain, 4 model,
+    #   5 input_tokens, 6 output_tokens, 7 cache_read_tokens, 8 cc_total,
+    #   9 cache_creation_5m, 10 cache_creation_1h,
+    #   11 user_block_type, 12 tool_name, 13 tool_input.
+    #
+    # _aggregate_per_model reads 9 columns starting from timestamp (index 2),
+    # so the slice rows[2:11] gives it exactly what it needs.
+    per_model_rows = [row[2:11] for row in attrib_rows]
     per_model, total_cost = _aggregate_per_model(per_model_rows)
 
     bloat_rows = [
         (
-            row[2],  # is_sidechain
-            row[3],  # model
-            row[7],  # cc_total
-            row[8],  # cache_creation_5m
-            row[9],  # cache_creation_1h
-            row[10],  # user_block_type
-            row[11],  # tool_name
-            row[12],  # tool_input
+            row[3],  # is_sidechain
+            row[4],  # model
+            row[8],  # cc_total
+            row[9],  # cache_creation_5m
+            row[10],  # cache_creation_1h
+            row[11],  # user_block_type
+            row[12],  # tool_name
+            row[13],  # tool_input
         )
         for row in attrib_rows
     ]
@@ -1030,6 +980,7 @@ def _build_chart_from_attrib(
     categories: list[str] = []
     for row in attrib_rows:
         (
+            _session_id,
             uuid,
             _timestamp,
             is_side,
