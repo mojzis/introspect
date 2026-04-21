@@ -1666,6 +1666,65 @@ def test_inflection_detection_empty_on_short_session():
             assert marker_prefix not in response.text
 
 
+def test_slope_detector_fires_on_gradual_ramp():
+    """Slope detector flags a sustained cost ramp even without a spike."""
+    from introspect.api.handlers.sessions import (  # noqa: PLC0415
+        _detect_inflection_points,
+    )
+
+    # 10 cheap messages, then 10 identical modest messages — each single
+    # message is below the spike threshold (median*2), but the slope-window
+    # delta jumps dramatically when the ramp starts.
+    inc = [0.0005] * 10 + [0.004] * 10
+    cum: list[float] = []
+    running = 0.0
+    for v in inc:
+        running += v
+        cum.append(running)
+    uuids = [f"u{i}" for i in range(len(inc))]
+    markers = _detect_inflection_points(uuids, inc, cum)
+    # At least one slope marker should fire (the step-up in window delta).
+    # No spikes — individual increments are all below $0.01.
+    assert any(m["kind"] == "slope" for m in markers), markers
+    assert all(m["kind"] != "spike" for m in markers), markers
+
+
+def test_slope_detector_handles_zero_variance():
+    """Constant-cost session must not over-fire slope markers (sigma=0)."""
+    from introspect.api.handlers.sessions import (  # noqa: PLC0415
+        _detect_inflection_points,
+    )
+
+    # All messages identical → every positive delta identical → sigma = 0.
+    # Without the guard, the threshold collapses to 0 and the top-N filter
+    # fires up to 5 arbitrary markers.
+    inc = [0.001] * 15
+    cum = [0.001 * (i + 1) for i in range(15)]
+    uuids = [f"u{i}" for i in range(15)]
+    markers = _detect_inflection_points(uuids, inc, cum)
+    assert all(m["kind"] != "slope" for m in markers), markers
+
+
+def test_slope_detector_handles_single_positive_delta():
+    """Single positive slope delta must not fire (can't compute variance)."""
+    from introspect.api.handlers.sessions import (  # noqa: PLC0415
+        _detect_inflection_points,
+    )
+
+    # 10 messages: all zero except one $0.50 late in the session.  The
+    # slope window captures exactly one positive delta — len < 2, so the
+    # slope branch must short-circuit (the spike branch may still fire).
+    inc = [0.0] * 14 + [0.5]
+    cum: list[float] = []
+    running = 0.0
+    for v in inc:
+        running += v
+        cum.append(running)
+    uuids = [f"u{i}" for i in range(len(inc))]
+    markers = _detect_inflection_points(uuids, inc, cum)
+    assert all(m["kind"] != "slope" for m in markers), markers
+
+
 def test_fetch_token_usage_dedup():
     """Direct unit test: deduped totals should equal a single message's usage."""
     from introspect.api.handlers._helpers import fetch_token_usage  # noqa: PLC0415

@@ -41,7 +41,7 @@
 
 <h2>Cumulative cost over time</h2>
 <div class="card">
-    {% if cost_ctx.chart.polylines.total %}
+    {% if cost_ctx.chart.messages %}
     <div x-data="{ view: localStorage.getItem('introspect.costView') || 'total' }"
          x-init="$watch('view', v => localStorage.setItem('introspect.costView', v))">
         <div class="filter-bar" style="margin-bottom:0.6rem;">

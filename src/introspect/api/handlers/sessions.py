@@ -548,38 +548,14 @@ def _aggregate_bloat(rows: list[tuple]) -> tuple[dict, dict]:
 
 def _build_cost_context(db, session_id: str) -> dict:
     """Build the data structures the Cost tab template needs."""
-    rows = db.execute(
-        """
-        SELECT
-            timestamp,
-            is_sidechain,
-            model,
-            input_tokens,
-            output_tokens,
-            cache_read_tokens,
-            cache_creation_tokens,
-            cache_creation_5m,
-            cache_creation_1h,
-            parent_uuid
-        FROM assistant_message_costs
-        WHERE session_id = ?
-        ORDER BY timestamp
-        """,
-        [session_id],
-    ).fetchall()
-
-    per_model, total_cost = _aggregate_per_model(rows)
-
-    # Note on the parent-user-message join: `u.message.content` is an array
-    # of blocks (parallel-tool calls produce one tool_result per block).  We
-    # unnest blocks first, then prefer a tool_result block when one exists —
-    # otherwise the outer LEFT JOIN's ON clause would silently drop the
-    # tool_use_id whenever the result lived at index >= 1, mis-attributing
-    # legitimate file reads as "human input".
-    #
-    # This query drives both the bloat aggregator *and* the per-message
-    # cost chart — we pull every field both consumers need, then let the
-    # Python splitters pick the subset they care about.
+    # Single query drives three consumers: per-model rollup, bloat
+    # aggregator, *and* the per-message cost chart.  The parent-user-message
+    # join unnests `u.message.content` (an array of blocks — parallel-tool
+    # calls produce one tool_result per block), then prefers a tool_result
+    # block over text.  Without the explicit unnest, the outer LEFT JOIN's
+    # ON clause would silently drop the tool_use_id whenever the result
+    # lived at index >= 1, mis-attributing legitimate file reads as "human
+    # input".
     attrib_rows = db.execute(
         """
         WITH amc AS (
@@ -639,6 +615,13 @@ def _build_cost_context(db, session_id: str) -> dict:
         """,
         [session_id],
     ).fetchall()
+
+    # _aggregate_per_model reads indices 0..8 of its input row:
+    # (timestamp, is_sidechain, model, in, out, cache_read, cc_total,
+    #  cache_creation_5m, cache_creation_1h).  That matches attrib_rows[1:10]
+    # — slicing lets the two aggregators share one scan of the view.
+    per_model_rows = [row[1:10] for row in attrib_rows]
+    per_model, total_cost = _aggregate_per_model(per_model_rows)
 
     bloat_rows = [
         (
@@ -745,7 +728,7 @@ def _build_cost_context(db, session_id: str) -> dict:
         "bloat_extra_count": extra_count,
         "bloat_total_tokens": raw_tokens,
         "bloat_total_cost": format_cost(total_bloat_cost),
-        "has_data": bool(rows),
+        "has_data": bool(attrib_rows),
     }
 
 
@@ -760,6 +743,9 @@ _SPIKE_MEDIAN_MULTIPLIER = 2
 _SLOPE_SIGMA_MULTIPLIER = 2
 _SLOPE_WINDOW = 5
 _SLOPE_DEDUPE_RADIUS = 3
+# Slope detection needs ≥ 2 positive deltas to compute variance — 1 value
+# has zero spread and would collapse the threshold to 0.
+_SLOPE_MIN_POSITIVE_DELTAS = 2
 
 
 def _detect_inflection_points(
@@ -810,29 +796,38 @@ def _detect_inflection_points(
             deltas.append((i, delta))
             if delta > 0:
                 positive_deltas.append(delta)
-        if positive_deltas:
+        # Require ≥ 2 positive deltas AND non-zero stdev so that a degenerate
+        # distribution (all cheap, or one identical positive value) doesn't
+        # collapse the threshold to 0 and mark every non-decreasing window.
+        if len(positive_deltas) >= _SLOPE_MIN_POSITIVE_DELTAS:
             mean_d = sum(positive_deltas) / len(positive_deltas)
             var = sum((d - mean_d) ** 2 for d in positive_deltas) / len(positive_deltas)
             sigma = math.sqrt(var)
-            threshold = _SLOPE_SIGMA_MULTIPLIER * sigma
-            # Filter + de-dupe against spikes
-            filtered = [
-                (i, d)
-                for i, d in deltas
-                if d >= threshold
-                and not any(abs(i - s) <= _SLOPE_DEDUPE_RADIUS for s in spike_indices)
-            ]
-            filtered.sort(key=lambda t: t[1], reverse=True)
-            for idx, _d in filtered[:_SLOPE_TOP_N]:
-                markers.append(
-                    {
-                        "idx": idx,
-                        "uuid": uuids[idx],
-                        "kind": "slope",
-                        "inc_usd": inc_usd[idx],
-                        "cum_usd": cum[idx],
-                    }
-                )
+            if sigma > 0:
+                # Floor at $0.01 (same floor the spike branch uses) so noise
+                # near the cent level can't fire a marker even if sigma is
+                # tiny but nonzero.
+                threshold = max(_SLOPE_SIGMA_MULTIPLIER * sigma, _SPIKE_ABS_FLOOR)
+                # Filter + de-dupe against spikes
+                filtered = [
+                    (i, d)
+                    for i, d in deltas
+                    if d >= threshold
+                    and not any(
+                        abs(i - s) <= _SLOPE_DEDUPE_RADIUS for s in spike_indices
+                    )
+                ]
+                filtered.sort(key=lambda t: t[1], reverse=True)
+                for idx, _d in filtered[:_SLOPE_TOP_N]:
+                    markers.append(
+                        {
+                            "idx": idx,
+                            "uuid": uuids[idx],
+                            "kind": "slope",
+                            "inc_usd": inc_usd[idx],
+                            "cum_usd": cum[idx],
+                        }
+                    )
 
     markers.sort(key=lambda m: m["idx"])
     return markers
@@ -844,9 +839,9 @@ def _bucket_series(
 ) -> tuple[dict[str, list[float]], int]:
     """Bucket per-series *increments* into ≤120 buckets, then cumsum.
 
-    Bucketing increments (not cumulatives) guarantees that series which sum
-    to the Total at every raw index also sum to the Total at every bucket —
-    no floating-point drift, stacked areas align exactly.
+    Bucketing increments (not cumulatives) keeps stacked series aligned to
+    within float rounding error — well below SVG pixel resolution — whereas
+    bucketing cumulatives independently could accumulate visible drift.
 
     Returns (cumulative_by_series, bucket_size).
     """
@@ -871,17 +866,28 @@ def _bucket_series(
     return result, bucket_size
 
 
+def _x_for_index(idx: int, total_points: int, width: float) -> float:
+    """Map a bucketed index to an SVG x-coord.
+
+    Single source of truth so polyline rendering and marker placement stay
+    in lockstep; changing the x-scaling (e.g. to bucket-midpoints) here
+    updates both consumers.
+    """
+    n = max(1, total_points - 1)
+    return (idx / n) * width
+
+
 def _polyline_from_series(
     values: list[float], width: float, height: float, max_val: float
 ) -> str:
     """Render a list of cumulative values as an SVG polyline point string."""
     if not values:
         return ""
-    n = max(1, len(values) - 1)
     scale = max_val if max_val > 0 else 1.0
+    points = len(values)
     coords: list[str] = []
     for i, v in enumerate(values):
-        x = (i / n) * width if n else 0
+        x = _x_for_index(i, points, width)
         y = height - (v / scale) * height
         coords.append(f"{x:.1f},{y:.1f}")
     return " ".join(coords)
@@ -973,14 +979,13 @@ def _render_multi_chart(
     # Translate raw marker indices to bucketed x-positions + recompute y on
     # the bucketed total curve so markers land on the displayed Total line.
     cum_total_bucketed = cumulatives["total"]
-    n_x = max(1, points - 1)
     markers_out: list[dict] = []
     for m in raw_markers:
         raw_idx = m["idx"]
         bucket_idx = raw_idx // bucket_size
         if bucket_idx >= points:
             bucket_idx = points - 1
-        x = (bucket_idx / n_x) * width if n_x else 0
+        x = _x_for_index(bucket_idx, points, width)
         y_val = cum_total_bucketed[bucket_idx] if cum_total_bucketed else 0.0
         y = height - (y_val / max_cost) * height
         markers_out.append(
