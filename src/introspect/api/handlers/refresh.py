@@ -33,11 +33,14 @@ _DAY_SECONDS = 86400
 def format_relative(dt: datetime | None) -> str:
     """Format ``dt`` relative to ``now()`` for the top-bar indicator.
 
-    * ``None`` -> ``"never"``
-    * < 30 s  -> ``"just now"``
-    * < 1 h   -> ``"Nm ago"``
-    * < 24 h  -> ``"Nh ago"``
-    * else    -> ``"YYYY-MM-DD HH:MM"``
+    Always a duration — the label never includes a date (negative ``delta``
+    from clock skew collapses into the "just now" branch).
+
+    * ``None``  -> ``"never"``
+    * < 30 s    -> ``"just now"``
+    * < 1 h     -> ``"Nm ago"``
+    * < 24 h    -> ``"Nh ago"``
+    * otherwise -> ``"Nd ago"``
     """
     if dt is None:
         return "never"
@@ -45,16 +48,18 @@ def format_relative(dt: datetime | None) -> str:
     if dt.tzinfo is None:
         dt = dt.replace(tzinfo=UTC)
     delta = (now - dt).total_seconds()
-    if delta < 0:
-        # Clock skew / future timestamp — treat as "just now".
-        return "just now"
     if delta < _JUST_NOW_SECONDS:
         return "just now"
     if delta < _HOUR_SECONDS:
         return f"{int(delta // _MINUTE_SECONDS)}m ago"
     if delta < _DAY_SECONDS:
         return f"{int(delta // _HOUR_SECONDS)}h ago"
-    return dt.strftime("%Y-%m-%d %H:%M")
+    return f"{int(delta // _DAY_SECONDS)}d ago"
+
+
+# Expose to Jinja so base.html's {% include %} path renders the same relative
+# label as the HTMX fragment (previously it fell back to strftime).
+templates.env.globals["format_relative"] = format_relative  # ty: ignore[invalid-assignment]
 
 
 def _render(
@@ -76,12 +81,9 @@ def _render(
     )
 
 
-async def refresh_now(request: Request) -> HTMLResponse:
-    """POST /refresh — wake the background loop and re-render the indicator."""
+def _current_indicator(request: Request) -> HTMLResponse:
+    """Render the indicator from current ``app.state`` — no side effects."""
     state = request.app.state
-    # ``refresh_trigger`` is the only legitimately-optional attribute:
-    # ``lifespan`` omits it when ``INTROSPECT_REFRESH_INTERVAL_SECONDS <= 0``.
-    # ``refresh_in_progress`` and ``last_refreshed_at`` are always initialized.
     trigger: asyncio.Event | None = getattr(state, "refresh_trigger", None)
     if trigger is None:
         return _render(
@@ -90,6 +92,32 @@ async def refresh_now(request: Request) -> HTMLResponse:
             in_progress=False,
             last_refreshed_at=None,
         )
+    return _render(
+        request,
+        disabled=False,
+        in_progress=bool(state.refresh_in_progress),
+        last_refreshed_at=state.last_refreshed_at,
+    )
+
+
+async def refresh_status(request: Request) -> HTMLResponse:
+    """GET /refresh-status — the fragment polls this while ``in_progress``.
+
+    Does NOT set the trigger; just a read of current state so the "refreshing…"
+    label can flip to "Last refreshed …" once the background rebuild finishes.
+    """
+    return _current_indicator(request)
+
+
+async def refresh_now(request: Request) -> HTMLResponse:
+    """POST /refresh — wake the background loop and re-render the indicator."""
+    state = request.app.state
+    # ``refresh_trigger`` is the only legitimately-optional attribute:
+    # ``lifespan`` omits it when ``INTROSPECT_REFRESH_INTERVAL_SECONDS <= 0``.
+    # ``refresh_in_progress`` and ``last_refreshed_at`` are always initialized.
+    trigger: asyncio.Event | None = getattr(state, "refresh_trigger", None)
+    if trigger is None:
+        return _current_indicator(request)
 
     trigger.set()
 
@@ -111,9 +139,6 @@ async def refresh_now(request: Request) -> HTMLResponse:
             await asyncio.sleep(_WAIT_FOR_FINISH_STEP)
             waited += _WAIT_FOR_FINISH_STEP
 
-    return _render(
-        request,
-        disabled=False,
-        in_progress=bool(state.refresh_in_progress),
-        last_refreshed_at=state.last_refreshed_at,
-    )
+    # If the rebuild didn't finish inside the HTTP budget, render ``in_progress``
+    # and let the template poll ``/refresh-status`` until it flips.
+    return _current_indicator(request)

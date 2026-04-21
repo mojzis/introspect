@@ -1,25 +1,24 @@
 {#
   Top-nav refresh indicator. Rendered both:
     - inline via {% include %} from base.html (uses request.app.state)
-    - as an HTMX fragment from POST /refresh (uses handler-passed vars)
+    - as an HTMX fragment from POST /refresh and GET /refresh-status
+      (uses handler-passed vars)
 
   The handler always passes `disabled`, `in_progress`, `relative`. For the
-  base.html include path we fall back to reading request.app.state directly.
+  base.html include path we fall back to reading request.app.state directly
+  and computing `relative` via the `format_relative` Jinja global.
+
+  While `in_progress` is truthy, the span self-polls GET /refresh-status so
+  the "refreshing…" label flips to "Last refreshed …" once the background
+  rebuild completes without the user having to click again.
 #}
 {% set _state = request.app.state %}
 {% set _disabled = disabled if disabled is defined else (_state.refresh_trigger is not defined or _state.refresh_trigger is none) %}
 {% set _in_progress = in_progress if in_progress is defined else (_state.refresh_in_progress|default(false)) %}
 {% set _last = last_refreshed_at if last_refreshed_at is defined else _state.last_refreshed_at|default(none) %}
-{% if relative is defined %}
-    {% set _relative = relative %}
-{% else %}
-    {% if _last is none %}
-        {% set _relative = "never" %}
-    {% else %}
-        {% set _relative = _last.strftime("%Y-%m-%d %H:%M") %}
-    {% endif %}
-{% endif %}
-<span id="refresh-state" class="refresh-indicator">
+{% set _relative = relative if relative is defined else format_relative(_last) %}
+<span id="refresh-state" class="refresh-indicator"
+      {%- if _in_progress and not _disabled %} hx-get="/refresh-status" hx-trigger="load delay:800ms" hx-target="#refresh-state" hx-swap="outerHTML"{% endif %}>
     {% if _disabled %}
         <span class="refresh-muted">auto-refresh off</span>
     {% else %}

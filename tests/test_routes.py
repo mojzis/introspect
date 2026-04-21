@@ -2,9 +2,10 @@
 
 import asyncio
 import os
+import re
 import tempfile
 from contextlib import contextmanager
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from unittest.mock import patch
 
@@ -2543,3 +2544,59 @@ def test_base_html_shows_refresh_indicator():
         response = client.get("/")
         assert response.status_code == 200
         assert 'id="refresh-state"' in response.text
+
+
+def test_refresh_status_renders_without_setting_trigger():
+    """GET /refresh-status returns the fragment without poking the loop."""
+    with tempfile.TemporaryDirectory() as tmp, _patched_client(Path(tmp)) as client:
+        trigger = asyncio.Event()
+        app.state.refresh_trigger = trigger
+        app.state.refresh_in_progress = False
+        app.state.last_refreshed_at = datetime.now(UTC)
+        try:
+            response = client.get("/refresh-status")
+            assert response.status_code == 200
+            assert 'id="refresh-state"' in response.text
+            # Status endpoint must NOT poke the trigger — polling should be idle.
+            assert not trigger.is_set()
+        finally:
+            for attr in ("refresh_trigger", "refresh_in_progress", "last_refreshed_at"):
+                if hasattr(app.state, attr):
+                    delattr(app.state, attr)
+
+
+def test_refresh_status_polls_while_in_progress():
+    """While in_progress, the fragment includes hx-get polling attributes."""
+    with tempfile.TemporaryDirectory() as tmp, _patched_client(Path(tmp)) as client:
+        app.state.refresh_trigger = asyncio.Event()
+        app.state.refresh_in_progress = True
+        app.state.last_refreshed_at = datetime.now(UTC)
+        try:
+            response = client.get("/refresh-status")
+            assert response.status_code == 200
+            assert 'hx-get="/refresh-status"' in response.text
+            assert "hx-trigger=" in response.text
+            assert "refreshing" in response.text
+        finally:
+            for attr in ("refresh_trigger", "refresh_in_progress", "last_refreshed_at"):
+                if hasattr(app.state, attr):
+                    delattr(app.state, attr)
+
+
+def test_refresh_indicator_label_has_no_date():
+    """The rendered label never contains a YYYY-MM-DD date — only relative time."""
+    with tempfile.TemporaryDirectory() as tmp, _patched_client(Path(tmp)) as client:
+        app.state.refresh_trigger = asyncio.Event()
+        app.state.refresh_in_progress = False
+        # 3 days ago — previously rendered via strftime("%Y-%m-%d %H:%M").
+        app.state.last_refreshed_at = datetime.now(UTC) - timedelta(days=3)
+        try:
+            response = client.get("/refresh-status")
+            assert response.status_code == 200
+            assert "3d ago" in response.text
+            # No ISO-like date substring.
+            assert re.search(r"\d{4}-\d{2}-\d{2}", response.text) is None
+        finally:
+            for attr in ("refresh_trigger", "refresh_in_progress", "last_refreshed_at"):
+                if hasattr(app.state, attr):
+                    delattr(app.state, attr)
