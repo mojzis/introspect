@@ -1488,6 +1488,184 @@ def test_session_cost_subagent_attribution():
             assert "Conversation" in text
 
 
+# --- Phase 1: Cost chart (multi-series + inflection markers) tests ---
+
+
+def test_session_cost_tab_has_view_toggle():
+    """Cost tab renders an Alpine view-toggle with three click handlers."""
+    with tempfile.TemporaryDirectory() as tmp, _patched_client(Path(tmp)) as client:
+        response = client.get(f"/sessions/{SID}?tab=cost")
+        assert response.status_code == 200
+        text = response.text
+        assert "x-data" in text
+        # Assert on click handlers — these only exist on the toggle buttons,
+        # unlike the word "Total" which appears in the Bloat rollup too.
+        assert "view = 'total'" in text
+        assert "view = 'agent'" in text
+        assert "view = 'category'" in text
+        assert "By agent" in text
+        assert "By category" in text
+
+
+def test_session_cost_tab_has_multi_polylines():
+    """Cost tab renders six polylines (total + main/sub + read/created/conv).
+
+    The sample fixture has varied cost categories (Read, Created from Bash/Edit,
+    Conversation from sidechain), so every series should emit non-empty points.
+    """
+    with tempfile.TemporaryDirectory() as tmp, _patched_client(Path(tmp)) as client:
+        response = client.get(f"/sessions/{SID}?tab=cost")
+        assert response.status_code == 200
+        text = response.text
+        # Three x-show'd groups for the three views.
+        assert "view === 'total'" in text
+        assert "view === 'agent'" in text
+        assert "view === 'category'" in text
+        # At least six polylines total — one per series. Each must have a
+        # non-empty points= attribute (empty polylines indicate a bug where
+        # a series had no matching messages or bucketing broke).
+        assert text.count("<polyline") >= 6
+        # Empty polylines render as points="" — assert at least the total,
+        # main, and read/conversation series have coordinates.
+        assert 'points=""' not in text or text.count('points=""') < 6
+
+
+def _spikey_cost_jsonl(tmp_dir: Path, session_id: str) -> Path:
+    """Build a JSONL with one clear cost spike followed by many tiny messages.
+
+    Need ≥ 6 messages for spike detection. The spike is 1M input tokens on
+    message #3; every other message is tiny. With median ~0, threshold is
+    clamped to $0.01, and the big message is well above that.
+    """
+    lines: list[dict] = [
+        make_user_message(
+            session_id,
+            "u0",
+            None,
+            "2026-04-21T10:00:00.000Z",
+            "start",
+            tool_use_result={"content": "seed"},
+        ),
+    ]
+    tiny_usage = {"input_tokens": 10, "output_tokens": 5}
+    big_usage = {"input_tokens": 1_000_000, "output_tokens": 100_000}
+    # Pattern: tiny, tiny, BIG, tiny, tiny, tiny, tiny, tiny → 8 messages.
+    spike_idx = 2
+    for i in range(8):
+        usage = big_usage if i == spike_idx else tiny_usage
+        lines.append(
+            make_assistant_message(
+                session_id,
+                f"a{i}",
+                "u0",
+                f"2026-04-21T10:00:{i + 1:02d}.000Z",
+                [{"type": "text", "text": f"msg{i}"}],
+                model="claude-opus-4-7",
+                msg_id=f"msg-spiky-{i}",
+                usage=usage,
+            )
+        )
+    return write_jsonl(tmp_dir, session_id, lines)
+
+
+def test_session_cost_tab_marker_links_to_message():
+    """Spike marker renders as an <a href> deep-linking to a message anchor."""
+    sid = "spiky-session-000000-0000-000000000001"
+    with tempfile.TemporaryDirectory() as tmp_str:
+        tmp = Path(tmp_str)
+        _spikey_cost_jsonl(tmp, sid)
+        db_path = tmp / "test.duckdb"
+        with (
+            patch.dict(
+                os.environ,
+                {
+                    "INTROSPECT_DB_PATH": str(db_path),
+                    "INTROSPECT_JSONL_GLOB": glob_pattern(tmp),
+                    "INTROSPECT_DAYS": "0",
+                },
+            ),
+            TestClient(app) as client,
+        ):
+            response = client.get(f"/sessions/{sid}?tab=cost")
+            assert response.status_code == 200
+            text = response.text
+            assert f'href="/sessions/{sid}?tab=messages#msg-' in text
+
+
+def test_session_messages_have_uuid_anchors():
+    """Messages tab rows carry id=\"msg-{uuid}\" anchors."""
+    with tempfile.TemporaryDirectory() as tmp, _patched_client(Path(tmp)) as client:
+        response = client.get(f"/sessions/{SID}?tab=messages")
+        assert response.status_code == 200
+        assert 'id="msg-' in response.text
+
+
+def _short_session_jsonl(tmp_dir: Path, session_id: str) -> Path:
+    """Build a 3-message session — below the inflection-detection minimum."""
+    usage = {"input_tokens": 100, "output_tokens": 20}
+    lines = [
+        make_user_message(
+            session_id,
+            "u1",
+            None,
+            "2026-04-21T10:00:00.000Z",
+            "hi",
+            tool_use_result={"content": "seed"},
+        ),
+        make_assistant_message(
+            session_id,
+            "a1",
+            "u1",
+            "2026-04-21T10:00:01.000Z",
+            [{"type": "text", "text": "ok"}],
+            model="claude-opus-4-7",
+            msg_id="msg-short-1",
+            usage=usage,
+        ),
+        make_assistant_message(
+            session_id,
+            "a2",
+            "u1",
+            "2026-04-21T10:00:02.000Z",
+            [{"type": "text", "text": "bye"}],
+            model="claude-opus-4-7",
+            msg_id="msg-short-2",
+            usage=usage,
+        ),
+    ]
+    return write_jsonl(tmp_dir, session_id, lines)
+
+
+def test_inflection_detection_empty_on_short_session():
+    """Sessions below _SPIKE_MIN_N produce no inflection markers."""
+    from introspect.api.handlers.sessions import _SPIKE_MIN_N  # noqa: PLC0415
+
+    # The fixture emits 2 assistant messages — must be below _SPIKE_MIN_N.
+    assert _SPIKE_MIN_N > 2
+    sid = "short-session-00000000-0000-000000000001"
+    with tempfile.TemporaryDirectory() as tmp_str:
+        tmp = Path(tmp_str)
+        _short_session_jsonl(tmp, sid)
+        db_path = tmp / "test.duckdb"
+        with (
+            patch.dict(
+                os.environ,
+                {
+                    "INTROSPECT_DB_PATH": str(db_path),
+                    "INTROSPECT_JSONL_GLOB": glob_pattern(tmp),
+                    "INTROSPECT_DAYS": "0",
+                },
+            ),
+            TestClient(app) as client,
+        ):
+            response = client.get(f"/sessions/{sid}?tab=cost")
+            assert response.status_code == 200
+            # No marker anchors rendered — the Cost tab must not produce any
+            # href to a message anchor when the session is below the minimum.
+            marker_prefix = f'href="/sessions/{sid}?tab=messages#msg-'
+            assert marker_prefix not in response.text
+
+
 def test_fetch_token_usage_dedup():
     """Direct unit test: deduped totals should equal a single message's usage."""
     from introspect.api.handlers._helpers import fetch_token_usage  # noqa: PLC0415

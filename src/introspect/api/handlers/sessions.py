@@ -289,6 +289,7 @@ def _build_messages_context(db, session_id: str) -> list[dict]:
     cur = db.execute(
         """
         SELECT
+            e.uuid,
             e.timestamp,
             e.kind,
             e.is_sidechain,
@@ -310,6 +311,7 @@ def _build_messages_context(db, session_id: str) -> list[dict]:
     )
     col_names = [d[0] for d in cur.description]
     parsed_messages: list[dict] = []
+    seen_uuids: set[str] = set()
     for row in cur.fetchall():
         rec = dict(zip(col_names, row, strict=True))
         kind = rec["kind"]
@@ -319,8 +321,17 @@ def _build_messages_context(db, session_id: str) -> list[dict]:
             else None
         )
         thinking_preview, thinking_has_more = _thinking_preview(rec["thinking_text"])
+        # Assistant turns expand to one row per content block (text, thinking,
+        # tool_use, etc.), all sharing one uuid. Only the first block in each
+        # turn gets the anchor id so DOM ids stay unique.
+        uuid_val = rec["uuid"] or ""
+        is_first = bool(uuid_val) and uuid_val not in seen_uuids
+        if uuid_val:
+            seen_uuids.add(uuid_val)
         parsed_messages.append(
             {
+                "uuid": uuid_val,
+                "is_first_block": is_first,
                 "timestamp": str(rec["timestamp"])[:19] if rec["timestamp"] else "",
                 "kind": kind,
                 "is_sidechain": bool(rec["is_sidechain"]),
@@ -427,13 +438,12 @@ def _classify_bucket(  # noqa: PLR0911
     return ("agent context", "Conversation")
 
 
-def _aggregate_per_model(rows: list[tuple]) -> tuple[list[dict], list[tuple], float]:
-    """Group rows by model, returning (per_model, cumulative_pts, total_cost)."""
+def _aggregate_per_model(rows: list[tuple]) -> tuple[list[dict], float]:
+    """Group rows by model, returning (per_model, total_cost)."""
     by_model: dict[str, dict] = {}
-    cumulative_pts: list[tuple] = []
     running = 0.0
     for cost_row in rows:
-        ts, _is_side, model = cost_row[0], cost_row[1], cost_row[2]
+        _ts, _is_side, model = cost_row[0], cost_row[1], cost_row[2]
         in_tok, out_tok, cr_tok, cc_tok, cc_5m, cc_1h = (
             int(v or 0) for v in cost_row[3:9]
         )
@@ -447,7 +457,6 @@ def _aggregate_per_model(rows: list[tuple]) -> tuple[list[dict], list[tuple], fl
             cache_creation_1h=cc_1h,
         )
         running += cost
-        cumulative_pts.append((str(ts), running))
         key = model or "(unknown)"
         bucket = by_model.setdefault(
             key,
@@ -474,7 +483,7 @@ def _aggregate_per_model(rows: list[tuple]) -> tuple[list[dict], list[tuple], fl
     per_model = sorted(by_model.values(), key=lambda d: d["cost_usd"], reverse=True)
     for entry in per_model:
         entry["cost"] = format_cost(entry["cost_usd"])
-    return per_model, cumulative_pts, running
+    return per_model, running
 
 
 def _aggregate_bloat(rows: list[tuple]) -> tuple[dict, dict]:
@@ -559,8 +568,7 @@ def _build_cost_context(db, session_id: str) -> dict:
         [session_id],
     ).fetchall()
 
-    per_model, cumulative_pts, total_cost = _aggregate_per_model(rows)
-    sparkline = _build_sparkline(cumulative_pts, total_cost)
+    per_model, total_cost = _aggregate_per_model(rows)
 
     # Note on the parent-user-message join: `u.message.content` is an array
     # of blocks (parallel-tool calls produce one tool_result per block).  We
@@ -568,7 +576,11 @@ def _build_cost_context(db, session_id: str) -> dict:
     # otherwise the outer LEFT JOIN's ON clause would silently drop the
     # tool_use_id whenever the result lived at index >= 1, mis-attributing
     # legitimate file reads as "human input".
-    bloat_rows = db.execute(
+    #
+    # This query drives both the bloat aggregator *and* the per-message
+    # cost chart — we pull every field both consumers need, then let the
+    # Python splitters pick the subset they care about.
+    attrib_rows = db.execute(
         """
         WITH amc AS (
             SELECT * FROM assistant_message_costs WHERE session_id = ?
@@ -607,8 +619,13 @@ def _build_cost_context(db, session_id: str) -> dict:
             GROUP BY amc_uuid
         )
         SELECT
+            amc.uuid,
+            amc.timestamp,
             amc.is_sidechain,
             amc.model,
+            amc.input_tokens,
+            amc.output_tokens,
+            amc.cache_read_tokens,
             amc.cache_creation_tokens AS cc_total,
             amc.cache_creation_5m,
             amc.cache_creation_1h,
@@ -623,7 +640,22 @@ def _build_cost_context(db, session_id: str) -> dict:
         [session_id],
     ).fetchall()
 
+    bloat_rows = [
+        (
+            row[2],  # is_sidechain
+            row[3],  # model
+            row[7],  # cc_total
+            row[8],  # cache_creation_5m
+            row[9],  # cache_creation_1h
+            row[10],  # user_block_type
+            row[11],  # tool_name
+            row[12],  # tool_input
+        )
+        for row in attrib_rows
+    ]
     bucket_totals, category_totals = _aggregate_bloat(bloat_rows)
+
+    chart = _build_chart_from_attrib(attrib_rows, total_cost)
     raw_tokens = sum(c["tokens"] for c in category_totals.values())
     total_bloat_tokens = raw_tokens or 1
     total_bloat_cost = sum(c["cost_usd"] for c in category_totals.values())
@@ -706,7 +738,7 @@ def _build_cost_context(db, session_id: str) -> dict:
         "per_model": per_model,
         "total_cost_usd": total_cost,
         "total_cost": format_cost(total_cost),
-        "sparkline": sparkline,
+        "chart": chart,
         "bloat_rollup": rollup,
         "bloat_rollup_totals": rollup_totals,
         "bloat_top_buckets": top_buckets_view,
@@ -717,53 +749,328 @@ def _build_cost_context(db, session_id: str) -> dict:
     }
 
 
-def _build_sparkline(points: list[tuple[str, float]], total_cost: float) -> dict:
-    """Bucket the running-cost series + render an inline-SVG polyline string.
+_CHART_WIDTH = 600
+_CHART_HEIGHT = 160
+_SPIKE_MIN_N = 6
+_SLOPE_MIN_N = 10
+_SPIKE_TOP_N = 3
+_SLOPE_TOP_N = 5
+_SPIKE_ABS_FLOOR = 0.01
+_SPIKE_MEDIAN_MULTIPLIER = 2
+_SLOPE_SIGMA_MULTIPLIER = 2
+_SLOPE_WINDOW = 5
+_SLOPE_DEDUPE_RADIUS = 3
 
-    Returns a dict with the SVG path data and metadata so the template can
-    render the chart without any JS lib.  ``messages`` is the raw API-call
-    count; ``points`` is the (possibly bucketed) sample count plotted.
+
+def _detect_inflection_points(
+    uuids: list[str],
+    inc_usd: list[float],
+    cum: list[float],
+) -> list[dict]:
+    """Spike + slope inflection detection on the raw per-message arrays.
+
+    Thresholds (locked per context.md):
+      * Spike: inc_usd[i] >= max($0.01, 2 * median(inc_usd)); top-3.
+      * Slope: delta(i) = cum[i] - cum[i-W] (W=5) >= 2 stdev of positive
+        deltas; top-5; de-duped +/-3 against spike indices.
+      * Minimum N: 10 for slope, 6 for spike.
     """
-    if not points:
+    n = len(inc_usd)
+    markers: list[dict] = []
+    spike_indices: set[int] = set()
+
+    if n >= _SPIKE_MIN_N:
+        sorted_inc = sorted(inc_usd)
+        mid = n // 2
+        median = (
+            sorted_inc[mid]
+            if n % 2 == 1
+            else 0.5 * (sorted_inc[mid - 1] + sorted_inc[mid])
+        )
+        threshold = max(_SPIKE_ABS_FLOOR, _SPIKE_MEDIAN_MULTIPLIER * median)
+        candidates = [(i, inc_usd[i]) for i in range(n) if inc_usd[i] >= threshold]
+        candidates.sort(key=lambda t: t[1], reverse=True)
+        for idx, inc in candidates[:_SPIKE_TOP_N]:
+            spike_indices.add(idx)
+            markers.append(
+                {
+                    "idx": idx,
+                    "uuid": uuids[idx],
+                    "kind": "spike",
+                    "inc_usd": inc,
+                    "cum_usd": cum[idx],
+                }
+            )
+
+    if n >= _SLOPE_MIN_N:
+        deltas: list[tuple[int, float]] = []
+        positive_deltas: list[float] = []
+        for i in range(_SLOPE_WINDOW, n):
+            delta = cum[i] - cum[i - _SLOPE_WINDOW]
+            deltas.append((i, delta))
+            if delta > 0:
+                positive_deltas.append(delta)
+        if positive_deltas:
+            mean_d = sum(positive_deltas) / len(positive_deltas)
+            var = sum((d - mean_d) ** 2 for d in positive_deltas) / len(positive_deltas)
+            sigma = math.sqrt(var)
+            threshold = _SLOPE_SIGMA_MULTIPLIER * sigma
+            # Filter + de-dupe against spikes
+            filtered = [
+                (i, d)
+                for i, d in deltas
+                if d >= threshold
+                and not any(abs(i - s) <= _SLOPE_DEDUPE_RADIUS for s in spike_indices)
+            ]
+            filtered.sort(key=lambda t: t[1], reverse=True)
+            for idx, _d in filtered[:_SLOPE_TOP_N]:
+                markers.append(
+                    {
+                        "idx": idx,
+                        "uuid": uuids[idx],
+                        "kind": "slope",
+                        "inc_usd": inc_usd[idx],
+                        "cum_usd": cum[idx],
+                    }
+                )
+
+    markers.sort(key=lambda m: m["idx"])
+    return markers
+
+
+def _bucket_series(
+    increments_by_series: dict[str, list[float]],
+    total_messages: int,
+) -> tuple[dict[str, list[float]], int]:
+    """Bucket per-series *increments* into ≤120 buckets, then cumsum.
+
+    Bucketing increments (not cumulatives) guarantees that series which sum
+    to the Total at every raw index also sum to the Total at every bucket —
+    no floating-point drift, stacked areas align exactly.
+
+    Returns (cumulative_by_series, bucket_size).
+    """
+    bucket_size = 1
+    if total_messages > _CUMULATIVE_RAW_THRESHOLD:
+        bucket_size = max(1, math.ceil(total_messages / _CUMULATIVE_MAX_BUCKETS))
+
+    result: dict[str, list[float]] = {}
+    for name, incs in increments_by_series.items():
+        # Bucket the increments: sum each chunk.
+        bucketed_incs: list[float] = []
+        for i in range(0, total_messages, bucket_size):
+            chunk = incs[i : i + bucket_size]
+            bucketed_incs.append(sum(chunk))
+        # Cumsum.
+        running = 0.0
+        cum: list[float] = []
+        for inc in bucketed_incs:
+            running += inc
+            cum.append(running)
+        result[name] = cum
+    return result, bucket_size
+
+
+def _polyline_from_series(
+    values: list[float], width: float, height: float, max_val: float
+) -> str:
+    """Render a list of cumulative values as an SVG polyline point string."""
+    if not values:
+        return ""
+    n = max(1, len(values) - 1)
+    scale = max_val if max_val > 0 else 1.0
+    coords: list[str] = []
+    for i, v in enumerate(values):
+        x = (i / n) * width if n else 0
+        y = height - (v / scale) * height
+        coords.append(f"{x:.1f},{y:.1f}")
+    return " ".join(coords)
+
+
+def _render_multi_chart(
+    uuids: list[str],
+    inc_usd: list[float],
+    is_sidechain_list: list[bool],
+    categories: list[str],
+    total_cost: float,
+) -> dict:
+    """Build the per-series stacked-area chart + marker overlay.
+
+    Per-message series are bucketed as *increments* (then cumsum'd) to keep
+    stacked series exactly summing to Total at every bucket.
+    """
+    n_messages = len(uuids)
+    if n_messages == 0:
         return {
-            "polyline": "",
-            "width": 0,
-            "height": 0,
+            "width": _CHART_WIDTH,
+            "height": _CHART_HEIGHT,
             "max": 0.0,
             "messages": 0,
             "points": 0,
+            "polylines": {
+                "total": "",
+                "main": "",
+                "sub": "",
+                "read": "",
+                "created": "",
+                "conversation": "",
+            },
+            "stack_pairs": {
+                "agent": [("main", "#3b5bdb"), ("sub", "#8a5ad0")],
+                "category": [
+                    ("read", "#c86b1a"),
+                    ("created", "#2e8b57"),
+                    ("conversation", "#5a6e9a"),
+                ],
+            },
+            "markers": [],
         }
 
-    total_messages = len(points)
-    if total_messages > _CUMULATIVE_RAW_THRESHOLD:
-        bucketed: list[tuple[str, float]] = []
-        # math.ceil keeps us within ≤_CUMULATIVE_MAX_BUCKETS buckets even
-        # for sizes that round down (e.g. 12_000 // 120 = 100 buckets).
-        bucket_size = max(1, math.ceil(total_messages / _CUMULATIVE_MAX_BUCKETS))
-        for i in range(0, total_messages, bucket_size):
-            chunk = points[i : i + bucket_size]
-            # The chunk endpoint is the running total at the end of the chunk.
-            bucketed.append((chunk[-1][0], chunk[-1][1]))
-        series = bucketed
-    else:
-        series = points
+    # Build raw per-series increments (parallel arrays).
+    main_inc = [0.0 if is_sidechain_list[i] else inc_usd[i] for i in range(n_messages)]
+    sub_inc = [inc_usd[i] if is_sidechain_list[i] else 0.0 for i in range(n_messages)]
+    read_inc = [
+        inc_usd[i] if categories[i] == "Read" else 0.0 for i in range(n_messages)
+    ]
+    created_inc = [
+        inc_usd[i] if categories[i] == "Created" else 0.0 for i in range(n_messages)
+    ]
+    convo_inc = [
+        inc_usd[i] if categories[i] == "Conversation" else 0.0
+        for i in range(n_messages)
+    ]
 
-    width, height = 600, 80
+    # Inflection detection on raw arrays.
+    raw_cum: list[float] = []
+    running = 0.0
+    for inc in inc_usd:
+        running += inc
+        raw_cum.append(running)
+    raw_markers = _detect_inflection_points(uuids, inc_usd, raw_cum)
+
+    # Bucket all series together so bucket_size is identical.
+    cumulatives, bucket_size = _bucket_series(
+        {
+            "total": inc_usd,
+            "main": main_inc,
+            "sub": sub_inc,
+            "read": read_inc,
+            "created": created_inc,
+            "conversation": convo_inc,
+        },
+        n_messages,
+    )
+    points = len(cumulatives["total"])
+
+    width, height = _CHART_WIDTH, _CHART_HEIGHT
     max_cost = total_cost if total_cost > 0 else 1.0
-    n = max(1, len(series) - 1)
-    coords = []
-    for i, (_, cost) in enumerate(series):
-        x = (i / n) * width if n else 0
-        y = height - (cost / max_cost) * height
-        coords.append(f"{x:.1f},{y:.1f}")
+
+    polylines = {
+        name: _polyline_from_series(series, width, height, max_cost)
+        for name, series in cumulatives.items()
+    }
+
+    # Translate raw marker indices to bucketed x-positions + recompute y on
+    # the bucketed total curve so markers land on the displayed Total line.
+    cum_total_bucketed = cumulatives["total"]
+    n_x = max(1, points - 1)
+    markers_out: list[dict] = []
+    for m in raw_markers:
+        raw_idx = m["idx"]
+        bucket_idx = raw_idx // bucket_size
+        if bucket_idx >= points:
+            bucket_idx = points - 1
+        x = (bucket_idx / n_x) * width if n_x else 0
+        y_val = cum_total_bucketed[bucket_idx] if cum_total_bucketed else 0.0
+        y = height - (y_val / max_cost) * height
+        markers_out.append(
+            {
+                "x": round(x, 1),
+                "y": round(y, 1),
+                "uuid": m["uuid"],
+                "kind": m["kind"],
+                "inc_cost": format_cost(m["inc_usd"]),
+                "cum_cost": format_cost(m["cum_usd"]),
+                "idx": raw_idx,
+            }
+        )
+
     return {
-        "polyline": " ".join(coords),
         "width": width,
         "height": height,
         "max": max_cost,
-        "messages": total_messages,
-        "points": len(series),
+        "messages": n_messages,
+        "points": points,
+        "polylines": polylines,
+        "stack_pairs": {
+            "agent": [("main", "#3b5bdb"), ("sub", "#8a5ad0")],
+            "category": [
+                ("read", "#c86b1a"),
+                ("created", "#2e8b57"),
+                ("conversation", "#5a6e9a"),
+            ],
+        },
+        "markers": markers_out,
     }
+
+
+def _build_chart_from_attrib(
+    attrib_rows: list[tuple],
+    total_cost: float,
+) -> dict:
+    """Extract per-message arrays from the attribution query and render chart."""
+    uuids: list[str] = []
+    inc_usd: list[float] = []
+    is_sidechain_list: list[bool] = []
+    categories: list[str] = []
+    for row in attrib_rows:
+        (
+            uuid,
+            _timestamp,
+            is_side,
+            model,
+            in_tok,
+            out_tok,
+            cr_tok,
+            cc_total,
+            cc_5m,
+            cc_1h,
+            user_block_type,
+            tool_name,
+            tool_input_raw,
+        ) = row
+        in_tok_i = int(in_tok or 0)
+        out_tok_i = int(out_tok or 0)
+        cr_tok_i = int(cr_tok or 0)
+        cc_total_i = int(cc_total or 0)
+        cc_5m_i = int(cc_5m or 0)
+        cc_1h_i = int(cc_1h or 0)
+        eff_5m = (
+            cc_total_i
+            if (cc_5m_i == 0 and cc_1h_i == 0 and cc_total_i > 0)
+            else cc_5m_i
+        )
+        cost = compute_cost_usd(
+            model=model,
+            input_tokens=in_tok_i,
+            output_tokens=out_tok_i,
+            cache_read_tokens=cr_tok_i,
+            cache_creation_5m=eff_5m,
+            cache_creation_1h=cc_1h_i,
+        )
+        _bucket, category = _classify_bucket(
+            tool_name=tool_name,
+            tool_input_raw=tool_input_raw,
+            user_block_type=user_block_type,
+        )
+        uuids.append(uuid)
+        inc_usd.append(cost)
+        is_sidechain_list.append(bool(is_side))
+        categories.append(category)
+
+    return _render_multi_chart(
+        uuids, inc_usd, is_sidechain_list, categories, total_cost
+    )
 
 
 _VALID_TABS = {"messages", "cost"}

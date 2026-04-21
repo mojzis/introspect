@@ -41,11 +41,68 @@
 
 <h2>Cumulative cost over time</h2>
 <div class="card">
-    {% if cost_ctx.sparkline.polyline %}
-    <svg viewBox="0 0 {{ cost_ctx.sparkline.width }} {{ cost_ctx.sparkline.height }}" width="100%" preserveAspectRatio="none" style="height:120px;display:block;">
-        <polyline fill="none" stroke="#3b5bdb" stroke-width="1.5" points="{{ cost_ctx.sparkline.polyline }}" />
-    </svg>
-    <p style="color:#888;margin:0.4rem 0 0;font-size:0.85rem;">{{ cost_ctx.sparkline.messages }} messages{% if cost_ctx.sparkline.points != cost_ctx.sparkline.messages %} (bucketed to {{ cost_ctx.sparkline.points }} points){% endif %} — peak {{ cost_ctx.total_cost }}</p>
+    {% if cost_ctx.chart.polylines.total %}
+    <div x-data="{ view: localStorage.getItem('introspect.costView') || 'total' }"
+         x-init="$watch('view', v => localStorage.setItem('introspect.costView', v))">
+        <div class="filter-bar" style="margin-bottom:0.6rem;">
+            <button type="button" class="tool-btn tool-btn-sm"
+                    :class="view === 'total' ? 'tool-btn-active' : ''"
+                    @click="view = 'total'">Total</button>
+            <button type="button" class="tool-btn tool-btn-sm"
+                    :class="view === 'agent' ? 'tool-btn-active' : ''"
+                    @click="view = 'agent'">By agent</button>
+            <button type="button" class="tool-btn tool-btn-sm"
+                    :class="view === 'category' ? 'tool-btn-active' : ''"
+                    @click="view = 'category'">By category</button>
+        </div>
+        <svg xmlns="http://www.w3.org/2000/svg"
+             viewBox="0 0 {{ cost_ctx.chart.width }} {{ cost_ctx.chart.height }}"
+             preserveAspectRatio="none"
+             style="width:100%;height:160px;display:block;">
+            <g x-show="view === 'total'" style="display:none;">
+                <polyline fill="none" stroke="#3b5bdb" stroke-width="1.5"
+                          points="{{ cost_ctx.chart.polylines.total }}" />
+            </g>
+            <g x-show="view === 'agent'" style="display:none;">
+                <polyline fill="none" stroke="#3b5bdb" stroke-width="1.5"
+                          points="{{ cost_ctx.chart.polylines.main }}" />
+                <polyline fill="none" stroke="#8a5ad0" stroke-width="1.5"
+                          points="{{ cost_ctx.chart.polylines.sub }}" />
+            </g>
+            <g x-show="view === 'category'" style="display:none;">
+                <polyline fill="none" stroke="#c86b1a" stroke-width="1.5"
+                          points="{{ cost_ctx.chart.polylines.read }}" />
+                <polyline fill="none" stroke="#2e8b57" stroke-width="1.5"
+                          points="{{ cost_ctx.chart.polylines.created }}" />
+                <polyline fill="none" stroke="#5a6e9a" stroke-width="1.5"
+                          points="{{ cost_ctx.chart.polylines.conversation }}" />
+            </g>
+            <g>
+                {% for mk in cost_ctx.chart.markers %}
+                <a href="/sessions/{{ session_id }}?tab=messages#msg-{{ mk.uuid }}">
+                    <circle cx="{{ mk.x }}" cy="{{ mk.y }}" r="4" fill="#fff"
+                            stroke="{% if mk.kind == 'spike' %}#c62828{% else %}#c0a000{% endif %}"
+                            stroke-width="2">
+                        <title>{{ mk.kind }} · inc {{ mk.inc_cost }} · cum {{ mk.cum_cost }}</title>
+                    </circle>
+                </a>
+                {% endfor %}
+            </g>
+        </svg>
+        <div style="margin:0.4rem 0 0;font-size:0.85rem;color:#555;display:flex;gap:1rem;flex-wrap:wrap;">
+            <span x-show="view === 'total'" style="display:none;"><span style="display:inline-block;width:10px;height:10px;background:#3b5bdb;margin-right:0.25rem;"></span>Total</span>
+            <span x-show="view === 'agent'" style="display:none;gap:1rem;">
+                <span><span style="display:inline-block;width:10px;height:10px;background:#3b5bdb;margin-right:0.25rem;"></span>Main</span>
+                <span style="margin-left:1rem;"><span style="display:inline-block;width:10px;height:10px;background:#8a5ad0;margin-right:0.25rem;"></span>Subagent</span>
+            </span>
+            <span x-show="view === 'category'" style="display:none;gap:1rem;">
+                <span><span style="display:inline-block;width:10px;height:10px;background:#c86b1a;margin-right:0.25rem;"></span>Read</span>
+                <span style="margin-left:1rem;"><span style="display:inline-block;width:10px;height:10px;background:#2e8b57;margin-right:0.25rem;"></span>Created</span>
+                <span style="margin-left:1rem;"><span style="display:inline-block;width:10px;height:10px;background:#5a6e9a;margin-right:0.25rem;"></span>Conversation</span>
+            </span>
+        </div>
+        <p style="color:#888;margin:0.35rem 0 0;font-size:0.85rem;">{{ cost_ctx.chart.messages }} messages{% if cost_ctx.chart.points != cost_ctx.chart.messages %} (bucketed to {{ cost_ctx.chart.points }} points){% endif %}</p>
+    </div>
     {% else %}
     <p>No cost data to chart.</p>
     {% endif %}

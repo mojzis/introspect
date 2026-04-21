@@ -23,7 +23,7 @@
 
     {% for msg in messages %}
     {%- set show_class = 'kind-' ~ msg.kind -%}
-    <div class="msg-row {{ show_class }}{% if msg.is_sidechain %} is-sidechain{% endif %}"
+    <div {% if msg.is_first_block and msg.uuid %}id="msg-{{ msg.uuid }}"{% endif %} class="msg-row {{ show_class }}{% if msg.is_sidechain %} is-sidechain{% endif %}"
          {% if msg.kind == 'agent_thinking' %}x-show="!hideThinking && !onlyHuman"{% endif %}
          {% if msg.kind == 'agent_tool_call' %}x-show="!hideTools && !onlyHuman"{% endif %}
          {% if msg.kind == 'agent_text' %}x-show="!onlyHuman"{% endif %}
