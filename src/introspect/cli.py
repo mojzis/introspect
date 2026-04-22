@@ -369,6 +369,33 @@ def materialize(
         conn.close()
 
 
+PORT_PROBE_ATTEMPTS = 20
+
+
+def _find_available_port(host: str, start_port: int, attempts: int) -> int | None:
+    """Return the first free port at or after `start_port`, or None if none found.
+
+    Only skips ports that are in use. Permission errors (e.g. privileged ports
+    below 1024 without capability) propagate so the user sees a real error
+    instead of silently ending up on a different port.
+    """
+    import errno  # noqa: PLC0415
+    import socket  # noqa: PLC0415
+
+    for candidate in range(start_port, start_port + attempts):
+        with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as sock:
+            sock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+            try:
+                sock.bind((host, candidate))
+            except OSError as e:
+                if e.errno == errno.EADDRINUSE:
+                    continue
+                raise
+            else:
+                return candidate
+    return None
+
+
 def _run_web_ui(
     host: str,
     port: int,
@@ -393,6 +420,21 @@ def _run_web_ui(
     except DatabaseLockedError as e:
         _print_lock_error(e.db_path)
         raise typer.Exit(code=1) from None
+
+    available = _find_available_port(host, port, PORT_PROBE_ATTEMPTS)
+    if available is None:
+        console.print(
+            f"[red]Error:[/red] Tried {PORT_PROBE_ATTEMPTS} ports starting at "
+            f"{port} on [cyan]{host}[/cyan]; none were free.\n"
+            "Stop whatever is holding those ports, or pass [cyan]--port[/cyan] "
+            "with a different starting value."
+        )
+        raise typer.Exit(code=1)
+    if available != port:
+        console.print(
+            f"[yellow]Port {port} is in use; using port {available} instead.[/yellow]"
+        )
+        port = available
 
     os.environ["INTROSPECT_DAYS"] = str(days)
     if no_resolve_projects:
