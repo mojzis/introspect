@@ -36,9 +36,6 @@ dev = [
     "beautifulsoup4",
 ]
 
-[tool.uv]
-exclude-newer = "2026-03-25T00:00:00Z"
-
 [tool.ruff]
 line-length = 88
 target-version = "py311"
