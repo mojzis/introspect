@@ -6,6 +6,13 @@ from pathlib import Path
 import duckdb
 
 from introspect.projects import resolve_project_map
+from introspect.sql_fragments import (
+    COMMAND_LIST_SUBQUERY,
+    FILE_READS_SUBQUERY,
+    FILE_WRITES_SUBQUERY,
+    SESSION_COST_SUBQUERY,
+    TOOL_COUNTS_SUBQUERY,
+)
 
 DEFAULT_DB_PATH = Path.home() / ".introspect" / "introspect.duckdb"
 DEFAULT_JSONL_GLOB = str(Path.home() / ".claude" / "projects" / "**" / "*.jsonl")
@@ -179,9 +186,9 @@ def materialize_views(
 
     _build_project_map(conn, resolve_projects=resolve_projects)
     _create_derived_views(conn, materialize=True)
-    _create_derived_indexes(conn)
+    _create_indexes(conn, _DERIVED_INDEXES)
     _create_session_stats(conn, materialize=True)
-    _create_session_stats_indexes(conn)
+    _create_indexes(conn, _SESSION_STATS_INDEXES)
 
 
 def _build_project_map(
@@ -245,6 +252,21 @@ def _create_views(conn: duckdb.DuckDBPyConnection, jsonl_glob: str) -> None:
     _create_session_stats(conn, materialize=False)
 
 
+def _create_relation(
+    conn: duckdb.DuckDBPyConnection, name: str, body: str, *, materialize: bool
+) -> None:
+    """Create ``name`` as a TABLE (materialized) or VIEW (lazy) over ``body``.
+
+    Single dispatch point for both ``_create_derived_views`` and
+    ``_create_session_stats`` so the materialized/lazy semantics can't drift
+    between callers.
+    """
+    if materialize:
+        conn.execute(f"CREATE TABLE {name} AS {body}")
+    else:
+        conn.execute(f"CREATE OR REPLACE VIEW {name} AS {body}")
+
+
 def _create_derived_views(
     conn: duckdb.DuckDBPyConnection, *, materialize: bool = False
 ) -> None:
@@ -257,10 +279,7 @@ def _create_derived_views(
     """
 
     def _make(name: str, body: str) -> None:
-        if materialize:
-            conn.execute(f"CREATE TABLE {name} AS {body}")
-        else:
-            conn.execute(f"CREATE OR REPLACE VIEW {name} AS {body}")
+        _create_relation(conn, name, body, materialize=materialize)
 
     # Logical sessions: one row per session with summary stats
     _make(
@@ -681,69 +700,46 @@ _SESSION_STATS_INDEXES = (
 )
 
 
-def _create_derived_indexes(conn: duckdb.DuckDBPyConnection) -> None:
-    """Create indexes on the materialized derived tables."""
-    for stmt in _DERIVED_INDEXES:
+def _create_indexes(
+    conn: duckdb.DuckDBPyConnection, statements: tuple[str, ...]
+) -> None:
+    """Execute a tuple of CREATE INDEX statements in order."""
+    for stmt in statements:
         conn.execute(stmt)
 
 
-def _create_session_stats_indexes(conn: duckdb.DuckDBPyConnection) -> None:
-    """Create indexes on the materialized session_stats table."""
-    for stmt in _SESSION_STATS_INDEXES:
-        conn.execute(stmt)
-
-
-def _session_stats_body() -> str:
-    """Return the SELECT body shared by the table and view forms of ``session_stats``.
-
-    The subquery constants live in ``introspect.api.handlers._helpers`` (next
-    to the rest of the listing-page query infrastructure); pulling them in at
-    module top level would invert the layering — ``db`` would depend on the
-    FastAPI handlers that depend on it. The function-local import keeps the
-    one source of truth without the cycle.
-    """
-    # Function-local import is intentional: avoids the
-    # ``db`` -> ``api.handlers._helpers`` -> ``db`` import cycle that a
-    # top-level import would create.
-    from introspect.api.handlers._helpers import (  # noqa: PLC0415
-        COMMAND_LIST_SUBQUERY,
-        FILE_READS_SUBQUERY,
-        FILE_WRITES_SUBQUERY,
-        SESSION_COST_SUBQUERY,
-        TOOL_COUNTS_SUBQUERY,
-    )
-
-    # Splices in five module-level SQL fragments (no user input); safe by
-    # construction.
-    return f"""
-        SELECT
-            ls.session_id,
-            ls.started_at,
-            ls.ended_at,
-            ls.duration,
-            ls.user_messages,
-            ls.assistant_messages,
-            ls.model,
-            ls.cwd,
-            ls.project,
-            ls.git_branch,
-            ls.entrypoint,
-            COALESCE(tc.tool_count, 0) AS tool_count,
-            COALESCE(fr_agg.files_read, 0) AS files_read,
-            COALESCE(fw_agg.files_edited, 0) AS files_edited,
-            COALESCE(fr_agg.files_read_only, 0) AS files_read_only,
-            COALESCE(fr_agg.files_outside, 0) AS files_outside,
-            fp.first_prompt,
-            cmd.commands,
-            sc.cost_usd
-        FROM logical_sessions ls
-        LEFT JOIN session_titles fp ON ls.session_id = fp.session_id
-        LEFT JOIN {TOOL_COUNTS_SUBQUERY} ON ls.session_id = tc.session_id
-        LEFT JOIN {FILE_READS_SUBQUERY} ON ls.session_id = fr_agg.session_id
-        LEFT JOIN {FILE_WRITES_SUBQUERY} ON ls.session_id = fw_agg.session_id
-        LEFT JOIN {COMMAND_LIST_SUBQUERY} ON ls.session_id = cmd.session_id
-        LEFT JOIN {SESSION_COST_SUBQUERY} ON ls.session_id = sc.session_id
-    """  # noqa: S608
+# SELECT body shared by the table and view forms of ``session_stats``.
+# Splices in five module-level SQL fragments (no user input); safe by
+# construction.
+_SESSION_STATS_BODY = f"""
+    SELECT
+        ls.session_id,
+        ls.started_at,
+        ls.ended_at,
+        ls.duration,
+        ls.user_messages,
+        ls.assistant_messages,
+        ls.model,
+        ls.cwd,
+        ls.project,
+        ls.git_branch,
+        ls.entrypoint,
+        COALESCE(tc.tool_count, 0) AS tool_count,
+        COALESCE(fr_agg.files_read, 0) AS files_read,
+        COALESCE(fw_agg.files_edited, 0) AS files_edited,
+        COALESCE(fr_agg.files_read_only, 0) AS files_read_only,
+        COALESCE(fr_agg.files_outside, 0) AS files_outside,
+        fp.first_prompt,
+        cmd.commands,
+        sc.cost_usd
+    FROM logical_sessions ls
+    LEFT JOIN session_titles fp ON ls.session_id = fp.session_id
+    LEFT JOIN {TOOL_COUNTS_SUBQUERY} ON ls.session_id = tc.session_id
+    LEFT JOIN {FILE_READS_SUBQUERY} ON ls.session_id = fr_agg.session_id
+    LEFT JOIN {FILE_WRITES_SUBQUERY} ON ls.session_id = fw_agg.session_id
+    LEFT JOIN {COMMAND_LIST_SUBQUERY} ON ls.session_id = cmd.session_id
+    LEFT JOIN {SESSION_COST_SUBQUERY} ON ls.session_id = sc.session_id
+"""  # noqa: S608
 
 
 def _create_session_stats(
@@ -754,8 +750,6 @@ def _create_session_stats(
     The SELECT body is shared so the listing-page query is identical in both
     materialized and lazy modes.
     """
-    body = _session_stats_body()
-    if materialize:
-        conn.execute(f"CREATE TABLE session_stats AS {body}")
-    else:
-        conn.execute(f"CREATE OR REPLACE VIEW session_stats AS {body}")
+    _create_relation(
+        conn, "session_stats", _SESSION_STATS_BODY, materialize=materialize
+    )

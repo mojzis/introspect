@@ -13,7 +13,6 @@ from introspect.search import ensure_search_corpus, fts_available
 
 from ._helpers import (
     OBVIOUS_COMMANDS_SQL,
-    SESSION_INFO_JOINS,
     SESSION_INFO_SELECT,
     SESSIONS_PAGE_SIZES,
     SESSIONS_PER_PAGE_DEFAULT,
@@ -299,7 +298,6 @@ async def sessions(  # noqa: PLR0913
         f"""
         SELECT {SESSION_INFO_SELECT}
         FROM session_stats ss
-        {SESSION_INFO_JOINS}
         {where}
         ORDER BY {sort_col} {sort_dir} {nulls}
         LIMIT ? OFFSET ?
