@@ -7,7 +7,7 @@
     <link rel="icon" type="image/svg+xml" href="/favicon.ico">
     <script src="https://unpkg.com/htmx.org@2.0.4"></script>
     <script defer src="https://unpkg.com/alpinejs@3.14.8/dist/cdn.min.js"></script>
-    <script src="https://cdn.plot.ly/plotly-2.35.2.min.js" charset="utf-8"></script>
+    <script src="https://cdn.plot.ly/plotly-3.5.0.min.js" charset="utf-8"></script>
     <style>
         * { box-sizing: border-box; margin: 0; padding: 0; }
         body { font-family: system-ui, -apple-system, sans-serif; background: #f5f5f5; color: #333; line-height: 1.5; }
@@ -85,6 +85,20 @@
         #loading-overlay.active { display: flex; }
         .spinner { width: 36px; height: 36px; border: 3px solid #e0e0e0; border-top-color: #1a1a2e; border-radius: 50%; animation: spin 0.7s linear infinite; }
         @keyframes spin { to { transform: rotate(360deg); } }
+        /* Plotly creates a hidden <svg id="js-plotly-tester"> appended
+           to <body> to measure text dimensions before laying out axis
+           titles and annotations. Without this rule it inherits body's
+           system-ui font; the inherited 16px system-ui displaces axis
+           titles and annotations relative to the 11px Georgia text the
+           chart actually renders, and after an HTMX swap the resulting
+           reserved space pushes axis titles past the SVG bounds.
+           Pinning the tester's font to match the tufte template keeps
+           measurements consistent. (Note: it's an ID, not a class.) */
+        #js-plotly-tester,
+        #js-plotly-tester text,
+        #js-plotly-tester tspan {
+            font-family: Georgia, 'Times New Roman', serif;
+        }
         .refresh-indicator { margin-left: auto; font-size: 0.8rem; color: #c0c0e0; display: flex; align-items: center; gap: 0.5rem; }
         .refresh-btn { padding: 0.2rem 0.6rem; font-size: 0.75rem; background: rgba(255,255,255,0.08); color: #e0e0ff; border: 1px solid rgba(255,255,255,0.15); border-radius: 4px; cursor: pointer; }
         .refresh-btn:hover { background: rgba(255,255,255,0.15); }
@@ -125,6 +139,65 @@
                 if (el) el.scrollIntoView({ behavior: 'smooth' });
             }
         });
+    </script>
+
+    <!-- Plotly chart bootstrap.
+         Fragments rendered into the page (initial load + HTMX swaps) carry
+         only the figure JSON in a <script type="application/json"> tag.
+         This block is the single source of truth that finds those tags
+         and initialises Plotly. By living in base.html (not in the
+         swappable fragment) it sidesteps the timing issues caused by
+         inline scripts running mid-swap. -->
+    <script>
+    (function () {
+        function initCostChart(el) {
+            // Skip charts that are already initialised — Plotly attaches
+            // ``_fullLayout`` once newPlot has run.
+            if (el._fullLayout) return;
+            var dataEl = document.getElementById(el.dataset.figureId);
+            if (!dataEl) return;
+            var fig = JSON.parse(dataEl.textContent);
+            fig.layout = fig.layout || {};
+            // Pin width to the current container so layout is computed
+            // once at the correct size; height comes from the data attr.
+            fig.layout.width = el.clientWidth;
+            fig.layout.height = parseInt(el.dataset.height || '360', 10);
+            Plotly.purge(el);
+            Plotly.newPlot(el, fig.data, fig.layout,
+                {displaylogo: false, displayModeBar: false}
+            ).then(function () {
+                if (el.dataset.onClick === 'hourly-drilldown') {
+                    var breakdown = el.dataset.breakdown || 'total';
+                    el.on('plotly_click', function (evt) {
+                        if (!evt || !evt.points || !evt.points.length) return;
+                        var rawX = evt.points[0].x;
+                        // Plotly may emit a Date or "YYYY-MM-DD HH:MM:SS";
+                        // slice to YYYY-MM-DD for the server's date regex.
+                        var day = (rawX instanceof Date)
+                            ? rawX.toISOString().slice(0, 10)
+                            : String(rawX).slice(0, 10);
+                        var url = '/cost-overview/breakdown/'
+                            + encodeURIComponent(day)
+                            + '?breakdown=' + encodeURIComponent(breakdown);
+                        htmx.ajax('GET', url, {
+                            target: '#hourly-cost-panel',
+                            swap: 'innerHTML'
+                        });
+                    });
+                }
+            });
+        }
+        function initAll(root) {
+            (root || document).querySelectorAll('.cost-chart').forEach(initCostChart);
+        }
+        document.addEventListener('DOMContentLoaded', function () { initAll(); });
+        // ``htmx:afterSettle`` fires after HTMX has finished swapping AND
+        // the browser has reconciled layout, so dimensions are stable
+        // when we measure the container.
+        document.body && document.body.addEventListener('htmx:afterSettle', function (evt) {
+            initAll(evt.target || document);
+        });
+    })();
     </script>
 </body>
 </html>
