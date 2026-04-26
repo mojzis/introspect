@@ -16,12 +16,12 @@ from fastapi import Request
 from fastapi.responses import HTMLResponse
 
 from introspect.api.handlers._helpers import templates
+from introspect.refresh import wait_for_refresh
 
-# Poll budgets for observing the background loop after setting the trigger.
-_WAIT_FOR_START_SECONDS = 0.5
-_WAIT_FOR_START_STEP = 0.05
+# Poll budget for observing the background loop after setting the trigger.
+# Kept short so the HTTP response stays snappy; the indicator may show
+# "refreshing…" if we give up early and the template polls /refresh-status.
 _WAIT_FOR_FINISH_SECONDS = 3.0
-_WAIT_FOR_FINISH_STEP = 0.1
 
 # Relative-time thresholds for :func:`format_relative`.
 _JUST_NOW_SECONDS = 30
@@ -82,9 +82,13 @@ def _render(
 
 
 def _current_indicator(request: Request) -> HTMLResponse:
-    """Render the indicator from current ``app.state`` — no side effects."""
+    """Render the indicator from current ``app.state`` — no side effects.
+
+    ``lifespan`` always sets ``refresh_trigger`` (to ``None`` when disabled),
+    so direct attribute access is safe here — no ``getattr`` fallback needed.
+    """
     state = request.app.state
-    trigger: asyncio.Event | None = getattr(state, "refresh_trigger", None)
+    trigger: asyncio.Event | None = state.refresh_trigger
     if trigger is None:
         return _render(
             request,
@@ -111,34 +115,8 @@ async def refresh_status(request: Request) -> HTMLResponse:
 
 async def refresh_now(request: Request) -> HTMLResponse:
     """POST /refresh — wake the background loop and re-render the indicator."""
-    state = request.app.state
-    # ``refresh_trigger`` is the only legitimately-optional attribute:
-    # ``lifespan`` omits it when ``INTROSPECT_REFRESH_INTERVAL_SECONDS <= 0``.
-    # ``refresh_in_progress`` and ``last_refreshed_at`` are always initialized.
-    trigger: asyncio.Event | None = getattr(state, "refresh_trigger", None)
-    if trigger is None:
-        return _current_indicator(request)
-
-    trigger.set()
-
-    # Wait briefly for the loop to pick up the trigger and flip the flag.
-    waited = 0.0
-    while waited < _WAIT_FOR_START_SECONDS:
-        if state.refresh_in_progress:
-            break
-        await asyncio.sleep(_WAIT_FOR_START_STEP)
-        waited += _WAIT_FOR_START_STEP
-
-    # If it started, wait for it to finish (short ceiling so the HTTP response
-    # stays snappy; indicator may show "refreshing…" if we give up early).
-    if state.refresh_in_progress:
-        waited = 0.0
-        while waited < _WAIT_FOR_FINISH_SECONDS:
-            if not state.refresh_in_progress:
-                break
-            await asyncio.sleep(_WAIT_FOR_FINISH_STEP)
-            waited += _WAIT_FOR_FINISH_STEP
-
-    # If the rebuild didn't finish inside the HTTP budget, render ``in_progress``
-    # and let the template poll ``/refresh-status`` until it flips.
+    # The handler ignores the helper's outcome; it just re-renders the
+    # indicator from current state. If the rebuild didn't finish inside the
+    # HTTP budget, the template polls ``/refresh-status`` until it flips.
+    await wait_for_refresh(request.app.state, finish_timeout=_WAIT_FOR_FINISH_SECONDS)
     return _current_indicator(request)

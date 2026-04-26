@@ -1,7 +1,10 @@
 """Tests for MCP tool functions."""
 
+import asyncio
 import tempfile
+import types
 from collections.abc import Iterator
+from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from unittest.mock import patch
 
@@ -9,12 +12,14 @@ import duckdb
 import pytest
 
 from introspect.db import materialize_views
+from introspect.mcp import refresh_bridge
 from introspect.mcp.tools import (
     _SQL_CELL_MAX,
     _SQL_ROW_CAP,
     describe_schema,
     get_session,
     recent_sessions,
+    refresh_data,
     run_sql,
     search_conversations,
     tool_failures,
@@ -355,3 +360,151 @@ def test_search_conversations_rejects_invalid_since(patched_mcp_db: None):
 
     assert "Error" in result
     assert "since" in result
+
+
+@pytest.fixture
+def clear_refresh_bridge() -> Iterator[None]:
+    """Ensure tests don't leak app state into the module-level bridge."""
+    refresh_bridge.set_state(None)
+    try:
+        yield
+    finally:
+        refresh_bridge.set_state(None)
+
+
+@pytest.mark.usefixtures("clear_refresh_bridge")
+def test_refresh_data_no_server():
+    """refresh_data reports unavailable when no FastAPI lifespan registered state."""
+    result = asyncio.run(refresh_data())
+
+    assert "unavailable" in result.lower()
+
+
+@pytest.mark.usefixtures("clear_refresh_bridge")
+def test_refresh_data_disabled():
+    """refresh_data reports disabled when the trigger is None."""
+
+    async def go() -> str:
+        fake_state = types.SimpleNamespace(
+            refresh_trigger=None,
+            refresh_in_progress=False,
+            last_refreshed_at=None,
+        )
+        refresh_bridge.set_state(fake_state)
+        return await refresh_data()
+
+    result = asyncio.run(go())
+
+    assert "disabled" in result.lower()
+
+
+@pytest.mark.usefixtures("clear_refresh_bridge")
+def test_refresh_data_no_change_needed():
+    """When the loop wakes but mtimes are unchanged, returns no-op message."""
+
+    async def go() -> tuple[str, asyncio.Event]:
+        trigger = asyncio.Event()
+        fake_state = types.SimpleNamespace(
+            refresh_trigger=trigger,
+            refresh_in_progress=False,
+            last_refreshed_at=datetime.now(UTC),
+        )
+        refresh_bridge.set_state(fake_state)
+        result = await refresh_data()
+        return result, trigger
+
+    result, trigger = asyncio.run(go())
+
+    assert "No refresh needed" in result
+    # The tool must have set the trigger so the background loop wakes early.
+    assert trigger.is_set()
+
+
+@pytest.mark.usefixtures("clear_refresh_bridge")
+def test_refresh_data_completes():
+    """refresh_data waits for the background rebuild and reports completion."""
+
+    async def go() -> str:
+        trigger = asyncio.Event()
+        fake_state = types.SimpleNamespace(
+            refresh_trigger=trigger,
+            refresh_in_progress=False,
+            last_refreshed_at=datetime.now(UTC) - timedelta(hours=1),
+        )
+        refresh_bridge.set_state(fake_state)
+
+        async def simulated_loop() -> None:
+            await trigger.wait()
+            trigger.clear()
+            fake_state.refresh_in_progress = True
+            await asyncio.sleep(0.1)
+            fake_state.last_refreshed_at = datetime.now(UTC)
+            fake_state.refresh_in_progress = False
+
+        loop_task = asyncio.create_task(simulated_loop())
+        try:
+            return await refresh_data()
+        finally:
+            await loop_task
+
+    result = asyncio.run(go())
+
+    assert "Refresh complete" in result
+
+
+@pytest.mark.usefixtures("clear_refresh_bridge")
+def test_refresh_data_still_running(monkeypatch: pytest.MonkeyPatch):
+    """When the rebuild exceeds the wait budget, report ``still running``."""
+    # Squeeze the finish budget so the test doesn't actually wait 30 seconds.
+    monkeypatch.setattr("introspect.mcp.tools.REFRESH_TIMEOUT", 0.2)
+
+    async def go() -> str:
+        trigger = asyncio.Event()
+        fake_state = types.SimpleNamespace(
+            refresh_trigger=trigger,
+            refresh_in_progress=False,
+            last_refreshed_at=datetime.now(UTC) - timedelta(hours=1),
+        )
+        refresh_bridge.set_state(fake_state)
+
+        async def simulated_slow_loop() -> None:
+            await trigger.wait()
+            trigger.clear()
+            fake_state.refresh_in_progress = True
+            # Stay "in progress" longer than the squeezed finish budget so
+            # `refresh_data` gives up and reports STILL_RUNNING.
+            await asyncio.sleep(1.0)
+            fake_state.refresh_in_progress = False
+
+        loop_task = asyncio.create_task(simulated_slow_loop())
+        try:
+            return await refresh_data()
+        finally:
+            await loop_task
+
+    result = asyncio.run(go())
+
+    assert "still running" in result.lower()
+
+
+@pytest.mark.usefixtures("clear_refresh_bridge")
+def test_refresh_bridge_rejects_double_registration():
+    """Registering a second non-None state without an intervening clear raises."""
+    fake_state = types.SimpleNamespace(
+        refresh_trigger=None,
+        refresh_in_progress=False,
+        last_refreshed_at=None,
+    )
+    refresh_bridge.set_state(fake_state)
+
+    other_state = types.SimpleNamespace(
+        refresh_trigger=None,
+        refresh_in_progress=False,
+        last_refreshed_at=None,
+    )
+    with pytest.raises(RuntimeError, match="already has a registered state"):
+        refresh_bridge.set_state(other_state)
+
+    # Clearing first allows re-registration.
+    refresh_bridge.set_state(None)
+    refresh_bridge.set_state(other_state)

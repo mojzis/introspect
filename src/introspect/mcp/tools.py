@@ -8,6 +8,8 @@ from datetime import datetime
 import duckdb
 
 from introspect.db import DEFAULT_DB_PATH, get_read_connection
+from introspect.mcp import refresh_bridge
+from introspect.refresh import RefreshOutcome, wait_for_refresh
 from introspect.search import ensure_search_corpus, fts_search
 
 _VALID_ROLES = {"user", "assistant"}
@@ -17,6 +19,11 @@ _VALID_ROLES = {"user", "assistant"}
 _SQL_CELL_MAX = 200
 # Hard cap on run_sql rows regardless of caller's `limit` argument.
 _SQL_ROW_CAP = 500
+
+# Generous compared to the HTTP refresh handler — MCP callers tolerate
+# longer waits than a browser HTMX swap. Module-level so tests can shrink it
+# without waiting half a minute on the STILL_RUNNING branch.
+REFRESH_TIMEOUT = 30.0
 
 
 def search_conversations(  # noqa: PLR0913
@@ -328,6 +335,58 @@ def describe_schema() -> str:
         lines.extend(f"  {col}" for col in by_table[table_name])
         lines.append("")
     return "\n".join(lines).rstrip()
+
+
+async def refresh_data() -> str:
+    """Trigger an immediate rebuild of the materialized DB from JSONL files.
+
+    The server normally rescans every 10 minutes by default
+    (``INTROSPECT_REFRESH_INTERVAL_SECONDS``, in seconds). Call this when
+    you need to observe events from the very recent past — e.g. a session
+    that just ended. The rebuild only runs when JSONL files actually
+    changed, so calling this on an unchanged filesystem is a fast no-op.
+
+    Returns a status string describing what happened.
+    """
+    state = refresh_bridge.get_state()
+    if state is None:
+        return (
+            "Manual refresh unavailable: introspect is not running as a server. "
+            "Start `introspect serve` to enable refresh."
+        )
+
+    result = await wait_for_refresh(state, finish_timeout=REFRESH_TIMEOUT)
+
+    match result.outcome:
+        case RefreshOutcome.DISABLED:
+            return (
+                "Auto-refresh is disabled "
+                "(INTROSPECT_REFRESH_INTERVAL_SECONDS=0); "
+                "manual refresh unavailable."
+            )
+        case RefreshOutcome.COMPLETED:
+            # COMPLETED only fires when last_refreshed_at advanced to a non-None
+            # value (see wait_for_refresh); the ``or "?"`` is defensive against
+            # future contract drift, not a real branch under correct inputs.
+            ts = (
+                result.last_refreshed_at.isoformat()
+                if result.last_refreshed_at
+                else "?"
+            )
+            return f"Refresh complete. Last refreshed at {ts}."
+        case RefreshOutcome.STILL_RUNNING:
+            return (
+                f"Refresh started but did not complete within "
+                f"{int(REFRESH_TIMEOUT)} seconds; still running."
+            )
+        case RefreshOutcome.UNCHANGED:
+            return "No refresh needed: JSONL files unchanged since last refresh."
+        case _:
+            # Defensive: future variants of RefreshOutcome must update this
+            # match. Raising rather than returning a vague string surfaces the
+            # gap loudly at runtime if static checks miss it.
+            msg = f"unhandled refresh outcome: {result.outcome}"
+            raise RuntimeError(msg)
 
 
 def tool_failures(command_prefix: str = "", limit: int = 20) -> str:

@@ -19,6 +19,7 @@ from introspect.db import (
     connect_writable,
     materialize_views,
 )
+from introspect.mcp.refresh_bridge import set_state as set_mcp_refresh_state
 from introspect.mcp.server import create_mcp_server
 from introspect.refresh import refresh_loop
 from introspect.search import build_search_corpus
@@ -44,6 +45,9 @@ async def lifespan(app: FastAPI):
     app.state.read_conn = duckdb.connect(str(db_path), read_only=True)
     app.state.last_refreshed_at = datetime.now(UTC)
     app.state.refresh_in_progress = False
+    # Always set the attribute (None when disabled) so callers can check
+    # ``state.refresh_trigger is None`` instead of falling back to ``getattr``.
+    app.state.refresh_trigger = None
 
     refresh_task: asyncio.Task[None] | None = None
     if interval > 0:
@@ -69,10 +73,12 @@ async def lifespan(app: FastAPI):
             break
     # Rebuild middleware stack to pick up the new mount
     app.middleware_stack = app.build_middleware_stack()
+    set_mcp_refresh_state(app.state)
     async with mcp_server.session_manager.run():
         try:
             yield
         finally:
+            set_mcp_refresh_state(None)
             if refresh_task is not None:
                 refresh_task.cancel()
                 with contextlib.suppress(asyncio.CancelledError):
