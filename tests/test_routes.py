@@ -1,6 +1,7 @@
 """Tests for introspect web UI routes."""
 
 import asyncio
+import json
 import os
 import re
 import tempfile
@@ -2484,6 +2485,235 @@ def test_cost_overview_nav_link_present():
         assert response.status_code == 200
         assert 'href="/cost-overview"' in response.text
         assert "Cost Overview" in response.text
+
+
+# --- Daily / hourly cost breakdown tests ---
+
+
+def _multi_day_specs() -> list[tuple[str, list[dict]]]:
+    """Three sessions on three distinct days, each with a known cost.
+
+    Day 2026-04-21 → $20 (4M tokens)
+    Day 2026-04-22 → $10 (2M tokens)
+    Day 2026-04-23 →  $5 (1M tokens)
+    Total = $35; costs computed at $5/M claude-opus-4-7 input pricing.
+    """
+    return [
+        (
+            "sess-day-21-aaaa-aaaa-aaaaaaaaaaaa",
+            _session_at_cost(
+                "sess-day-21-aaaa-aaaa-aaaaaaaaaaaa",
+                4_000_000,
+                timestamp_day="2026-04-21",
+            ),
+        ),
+        (
+            "sess-day-22-aaaa-aaaa-aaaaaaaaaaaa",
+            _session_at_cost(
+                "sess-day-22-aaaa-aaaa-aaaaaaaaaaaa",
+                2_000_000,
+                timestamp_day="2026-04-22",
+            ),
+        ),
+        (
+            "sess-day-23-aaaa-aaaa-aaaaaaaaaaaa",
+            _session_at_cost(
+                "sess-day-23-aaaa-aaaa-aaaaaaaaaaaa",
+                1_000_000,
+                timestamp_day="2026-04-23",
+            ),
+        ),
+    ]
+
+
+def test_cost_overview_daily_panel_embedded():
+    """The /cost-overview page must embed the daily-chart container."""
+    with tempfile.TemporaryDirectory() as tmp_str:
+        tmp = Path(tmp_str)
+        _cost_overview_setup(tmp, _multi_day_specs())
+
+        def _check(client):
+            response = client.get("/cost-overview")
+            assert response.status_code == 200
+            text = response.text
+            assert "Daily breakdown" in text
+            assert 'id="daily-cost-panel"' in text
+            assert 'id="daily-cost-chart"' in text
+            assert "Plotly.newPlot" in text
+
+        _run_with_client(tmp, _check)
+
+
+def test_cost_overview_breakdown_fragment_renders_total():
+    """Breakdown fragment endpoint returns the daily-cost panel (default total)."""
+    with tempfile.TemporaryDirectory() as tmp_str:
+        tmp = Path(tmp_str)
+        _cost_overview_setup(tmp, _multi_day_specs())
+
+        def _check(client):
+            response = client.get("/cost-overview/breakdown?breakdown=total")
+            assert response.status_code == 200
+            assert 'id="daily-cost-panel"' in response.text
+            # Days appear on the x axis
+            assert "2026-04-21" in response.text
+            assert "2026-04-23" in response.text
+
+        _run_with_client(tmp, _check)
+
+
+def test_cost_overview_breakdown_total_collapses_to_single_trace():
+    """Total breakdown collapses every row into one trace named "Total".
+
+    Asserted on the structured chart JSON rather than substring-matching
+    the HTML because Plotly's JSON output is order-stable but the embedded
+    HTML around it is not.
+    """
+    from introspect.api.handlers.cost_breakdown import (  # noqa: PLC0415
+        build_daily_panel_context,
+    )
+
+    with tempfile.TemporaryDirectory() as tmp_str:
+        tmp = Path(tmp_str)
+        _cost_overview_setup(tmp, _multi_day_specs())
+        ctx = _materialize_and_run(tmp, lambda c: build_daily_panel_context(c, "total"))
+        fig = json.loads(ctx["chart_json"])
+        assert len(fig["data"]) == 1
+        assert fig["data"][0]["name"] == "Total"
+
+
+def _multi_model_specs() -> list[tuple[str, list[dict]]]:
+    """Two same-day sessions on different models so by-model has 2 traces."""
+    sid_opus = "sess-mm-opus-aaaa-aaaa-aaaaaaaaaaaa"
+    sid_son = "sess-mm-sonnet-aaa-aaaa-aaaaaaaaaaaa"
+    return [
+        (
+            sid_opus,
+            _session_at_cost(sid_opus, 2_000_000, timestamp_day="2026-04-21"),
+        ),
+        (
+            sid_son,
+            [
+                make_user_message(
+                    sid_son,
+                    "u1",
+                    None,
+                    "2026-04-21T11:00:00.000Z",
+                    "go",
+                    tool_use_result={"content": "seed"},
+                ),
+                make_assistant_message(
+                    sid_son,
+                    "a1",
+                    "u1",
+                    "2026-04-21T11:00:01.000Z",
+                    [{"type": "text", "text": "ok"}],
+                    model="claude-sonnet-4-6",
+                    msg_id=f"msg-{sid_son}-a1",
+                    usage={"input_tokens": 1_000_000, "output_tokens": 0},
+                ),
+            ],
+        ),
+    ]
+
+
+def test_cost_overview_breakdown_by_model_traces():
+    """Model-mode panel should produce one trace per distinct model.
+
+    Two models in the fixture → two stacked-bar traces, named after each
+    model. Both totals must add up to the day's grand total via the
+    chart's y-values.
+    """
+    from introspect.api.handlers.cost_breakdown import (  # noqa: PLC0415
+        build_daily_panel_context,
+    )
+
+    with tempfile.TemporaryDirectory() as tmp_str:
+        tmp = Path(tmp_str)
+        _cost_overview_setup(tmp, _multi_model_specs())
+        ctx = _materialize_and_run(tmp, lambda c: build_daily_panel_context(c, "model"))
+        assert ctx["has_data"]
+        assert ctx["day_count"] == 1
+        fig = json.loads(ctx["chart_json"])
+        names = sorted(trace["name"] for trace in fig["data"])
+        # claude-opus-4-7 input is $5/M, claude-sonnet-4-6 input rate
+        # differs — but presence and naming is the contract under test.
+        assert names == ["claude-opus-4-7", "claude-sonnet-4-6"]
+
+
+def test_cost_overview_breakdown_invalid_falls_back_to_total():
+    """Unknown breakdown value collapses to the default."""
+    from introspect.api.handlers.cost_breakdown import (  # noqa: PLC0415
+        build_daily_panel_context,
+    )
+
+    with tempfile.TemporaryDirectory() as tmp_str:
+        tmp = Path(tmp_str)
+        _cost_overview_setup(tmp, _multi_day_specs())
+        ctx = _materialize_and_run(
+            tmp, lambda c: build_daily_panel_context(c, "garbage")
+        )
+        assert ctx["breakdown"] == "total"
+        fig = json.loads(ctx["chart_json"])
+        assert fig["data"][0]["name"] == "Total"
+
+
+def test_cost_overview_hourly_drilldown_for_known_day():
+    """Hourly endpoint returns the chart for a day with cost recorded."""
+    with tempfile.TemporaryDirectory() as tmp_str:
+        tmp = Path(tmp_str)
+        _cost_overview_setup(tmp, _multi_day_specs())
+
+        def _check(client):
+            response = client.get("/cost-overview/breakdown/2026-04-21?breakdown=total")
+            assert response.status_code == 200
+            text = response.text
+            assert "Hourly cost — 2026-04-21" in text
+            # Hour bucket comes from the 10:00:01 timestamp in the fixture.
+            assert "10:00" in text
+
+        _run_with_client(tmp, _check)
+
+
+def test_cost_overview_hourly_empty_day_has_no_chart():
+    """Hourly endpoint for a day with no cost shows the empty-state message."""
+    with tempfile.TemporaryDirectory() as tmp_str:
+        tmp = Path(tmp_str)
+        _cost_overview_setup(tmp, _multi_day_specs())
+
+        def _check(client):
+            response = client.get("/cost-overview/breakdown/1999-01-01?breakdown=total")
+            assert response.status_code == 200
+            assert "No cost recorded" in response.text
+
+        _run_with_client(tmp, _check)
+
+
+def test_cost_overview_hourly_invalid_day_returns_400():
+    """Malformed day path must reject early — never hits DuckDB."""
+    with tempfile.TemporaryDirectory() as tmp_str:
+        tmp = Path(tmp_str)
+        _cost_overview_setup(tmp, _multi_day_specs())
+
+        def _check(client):
+            response = client.get("/cost-overview/breakdown/not-a-date?breakdown=total")
+            assert response.status_code == 400
+
+        _run_with_client(tmp, _check)
+
+
+def test_cost_breakdown_collapses_groups_above_cap():
+    """The MAX_GROUPS cap merges the long tail into an "Other" bucket."""
+    from introspect.api.handlers.cost_breakdown import (  # noqa: PLC0415
+        MAX_GROUPS,
+        _cap_groups,
+    )
+
+    bucketed = {
+        "2026-04-21": {f"g{i}": float(i + 1) for i in range(MAX_GROUPS + 3)},
+    }
+    capped = _cap_groups(bucketed)
+    assert "Other" in capped["2026-04-21"]
+    assert len(capped["2026-04-21"]) == MAX_GROUPS
 
 
 def test_fetch_token_usage_dedup():

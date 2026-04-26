@@ -3,6 +3,12 @@
 {% block content %}
 <h1>Cost Overview</h1>
 
+<h2>Daily breakdown</h2>
+<div class="card">
+    {% include "_daily_cost_panel.html" %}
+    <div id="hourly-cost-panel" style="margin-top:1rem;"></div>
+</div>
+
 <div class="card">
     <h2>Where the money goes</h2>
     {% if pareto.total_session_count %}

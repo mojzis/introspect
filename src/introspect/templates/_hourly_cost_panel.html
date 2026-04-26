@@ -1,0 +1,21 @@
+{# Hourly-cost panel fragment loaded by HTMX after a daily-bar click. #}
+<div>
+    <h3 style="margin-bottom:0.4rem;">Hourly cost — {{ day }}</h3>
+    {% if has_data %}
+    <p style="color:#888;font-size:0.82rem;margin:0 0 0.5rem;">
+        {{ total_cost }} on {{ day }}.
+    </p>
+    <div id="hourly-cost-chart-{{ day }}" style="width:100%;min-height:320px;"></div>
+    <script type="application/json" id="hourly-cost-chart-data-{{ day }}">{{ chart_json|safe }}</script>
+    <script>
+    (function () {
+        var raw = document.getElementById('hourly-cost-chart-data-{{ day }}').textContent;
+        var fig = JSON.parse(raw);
+        var el = document.getElementById('hourly-cost-chart-{{ day }}');
+        Plotly.newPlot(el, fig.data, fig.layout, {responsive: true, displaylogo: false});
+    })();
+    </script>
+    {% else %}
+    <p>No cost recorded for {{ day }}.</p>
+    {% endif %}
+</div>
