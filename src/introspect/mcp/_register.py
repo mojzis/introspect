@@ -14,6 +14,7 @@ def register_tools(mcp: FastMCP) -> None:
         describe_schema,
         get_session,
         recent_sessions,
+        refresh_data,
         run_sql,
         search_conversations,
         tool_failures,
@@ -25,3 +26,4 @@ def register_tools(mcp: FastMCP) -> None:
     mcp.tool()(tool_failures)
     mcp.tool()(run_sql)
     mcp.tool()(describe_schema)
+    mcp.tool()(refresh_data)

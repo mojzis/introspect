@@ -7,9 +7,11 @@ import contextlib
 import glob
 import logging
 import os
+from dataclasses import dataclass
 from datetime import UTC, datetime
+from enum import Enum
 from pathlib import Path
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Protocol
 
 import duckdb
 
@@ -20,6 +22,83 @@ if TYPE_CHECKING:
     from fastapi import FastAPI
 
 log = logging.getLogger(__name__)
+
+
+class RefreshState(Protocol):
+    """Contract between :func:`refresh_loop` (writer) and :func:`wait_for_refresh`
+    (reader). FastAPI's ``app.state`` satisfies this after :mod:`api.main` sets
+    the three attributes during startup.
+    """
+
+    refresh_trigger: asyncio.Event | None
+    refresh_in_progress: bool
+    last_refreshed_at: datetime | None
+
+
+class RefreshOutcome(Enum):
+    """Result classes for :func:`wait_for_refresh`."""
+
+    DISABLED = "disabled"  # No trigger configured (auto-refresh off).
+    UNCHANGED = "unchanged"  # Loop woke but JSONL files were unchanged.
+    COMPLETED = "completed"  # Rebuild finished within the wait budget.
+    STILL_RUNNING = "still_running"  # Started but did not finish in time.
+
+
+@dataclass(frozen=True)
+class RefreshResult:
+    outcome: RefreshOutcome
+    last_refreshed_at: datetime | None
+
+
+# Internal poll cadence — kept private because callers tune *budgets*, not
+# step granularity. Two phases: a brief one to detect that the loop picked up
+# the trigger, then a longer one to wait for completion.
+_START_TIMEOUT = 0.5
+_START_STEP = 0.05
+_FINISH_STEP = 0.1
+
+
+async def wait_for_refresh(
+    state: RefreshState,
+    *,
+    finish_timeout: float = 3.0,
+) -> RefreshResult:
+    """Set the refresh trigger and wait until the background loop finishes.
+
+    Returns one of four outcomes based on what the loop did:
+
+    * ``DISABLED`` — no trigger on ``state`` (auto-refresh is off).
+    * ``UNCHANGED`` — loop woke but JSONL mtimes were unchanged; no rebuild ran.
+    * ``COMPLETED`` — rebuild finished within ``finish_timeout``.
+    * ``STILL_RUNNING`` — rebuild started but did not finish in time.
+    """
+    if state.refresh_trigger is None:
+        return RefreshResult(RefreshOutcome.DISABLED, state.last_refreshed_at)
+
+    last_before = state.last_refreshed_at
+    state.refresh_trigger.set()
+
+    waited = 0.0
+    while waited < _START_TIMEOUT:
+        if state.refresh_in_progress:
+            break
+        await asyncio.sleep(_START_STEP)
+        waited += _START_STEP
+
+    if state.refresh_in_progress:
+        waited = 0.0
+        while waited < finish_timeout:
+            if not state.refresh_in_progress:
+                break
+            await asyncio.sleep(_FINISH_STEP)
+            waited += _FINISH_STEP
+
+    last_after = state.last_refreshed_at
+    if last_after != last_before and last_after is not None:
+        return RefreshResult(RefreshOutcome.COMPLETED, last_after)
+    if state.refresh_in_progress:
+        return RefreshResult(RefreshOutcome.STILL_RUNNING, last_after)
+    return RefreshResult(RefreshOutcome.UNCHANGED, last_after)
 
 
 def newest_mtime(jsonl_glob: str) -> float:

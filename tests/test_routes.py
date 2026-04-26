@@ -2528,11 +2528,10 @@ def test_post_refresh_sets_trigger_and_renders_fragment():
 
 
 def test_post_refresh_disabled_when_interval_zero():
-    """With no trigger on app.state, POST /refresh renders the disabled label."""
+    """With trigger=None on app.state, POST /refresh renders the disabled label."""
     with tempfile.TemporaryDirectory() as tmp, _patched_client(Path(tmp)) as client:
-        # Make sure no trigger is installed.
-        if hasattr(app.state, "refresh_trigger"):
-            delattr(app.state, "refresh_trigger")
+        # Lifespan always sets the attribute; ``None`` models interval==0.
+        app.state.refresh_trigger = None
         response = client.post("/refresh")
         assert response.status_code == 200
         assert "auto-refresh off" in response.text
