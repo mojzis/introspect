@@ -84,8 +84,17 @@ def _write_sample_jsonl(tmp_dir: Path) -> Path:
     return write_jsonl(tmp_dir, SID, lines)
 
 
-def test_views_created():
-    """Test that all views are created successfully."""
+_DERIVED_RELATION_NAMES = (
+    "logical_sessions",
+    "tool_calls",
+    "conversation_turns",
+    "session_titles",
+    "session_stats",
+)
+
+
+def test_lazy_creates_views():
+    """Lazy ``get_connection`` path backs derived names with VIEWs."""
     with tempfile.TemporaryDirectory() as tmp:
         tmp_path = Path(tmp)
         _write_sample_jsonl(tmp_path)
@@ -94,18 +103,47 @@ def test_views_created():
         glob_pat = glob_pattern(tmp_path)
         conn = get_connection(db_path, glob_pat)
 
-        # Check views exist
-        views = conn.execute("""
-            SELECT table_name FROM information_schema.tables
-            WHERE table_type = 'VIEW'
-        """).fetchall()
-        view_names = {v[0] for v in views}
-        assert "raw_messages" in view_names
-        assert "logical_sessions" in view_names
-        assert "tool_calls" in view_names
-        assert "conversation_turns" in view_names
-        assert "session_titles" in view_names
-        conn.close()
+        try:
+            rows = conn.execute("""
+                SELECT table_name, table_type FROM information_schema.tables
+            """).fetchall()
+            type_by_name = dict(rows)
+            # raw_messages is also a VIEW in lazy mode.
+            assert type_by_name.get("raw_messages") == "VIEW"
+            for name in _DERIVED_RELATION_NAMES:
+                assert type_by_name.get(name) == "VIEW", (
+                    f"expected lazy path to back {name} as VIEW, got "
+                    f"{type_by_name.get(name)!r}"
+                )
+        finally:
+            conn.close()
+
+
+def test_materialize_creates_tables():
+    """``materialize_views`` backs the same derived names with BASE TABLEs."""
+    with tempfile.TemporaryDirectory() as tmp:
+        tmp_path = Path(tmp)
+        _write_sample_jsonl(tmp_path)
+
+        db_path = tmp_path / "test.duckdb"
+        glob_pat = glob_pattern(tmp_path)
+        conn = duckdb.connect(str(db_path))
+        try:
+            materialize_views(conn, glob_pat)
+
+            rows = conn.execute("""
+                SELECT table_name, table_type FROM information_schema.tables
+            """).fetchall()
+            type_by_name = dict(rows)
+            # raw_messages becomes a BASE TABLE under materialize_views.
+            assert type_by_name.get("raw_messages") == "BASE TABLE"
+            for name in _DERIVED_RELATION_NAMES:
+                assert type_by_name.get(name) == "BASE TABLE", (
+                    f"expected materialized path to back {name} as BASE "
+                    f"TABLE, got {type_by_name.get(name)!r}"
+                )
+        finally:
+            conn.close()
 
 
 def test_raw_messages():

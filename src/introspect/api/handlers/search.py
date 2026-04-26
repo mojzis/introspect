@@ -8,7 +8,6 @@ from introspect.search import ensure_search_corpus, fts_available, fts_search
 from ._helpers import (
     _EMPTY_SESSION_INFO,
     DEFAULT_PAGE_SIZE,
-    SESSION_INFO_JOINS,
     SESSION_INFO_SELECT,
     conn,
     parent,
@@ -37,9 +36,8 @@ async def search(request: Request, q: str, page: int = 1) -> HTMLResponse:
             rows = db.execute(
                 f"""
                 SELECT {SESSION_INFO_SELECT}
-                FROM logical_sessions ls
-                {SESSION_INFO_JOINS}
-                WHERE ls.session_id IN ({placeholders})
+                FROM session_stats ss
+                WHERE ss.session_id IN ({placeholders})
             """,  # noqa: S608
                 session_ids,
             ).fetchall()

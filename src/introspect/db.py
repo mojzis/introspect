@@ -6,6 +6,13 @@ from pathlib import Path
 import duckdb
 
 from introspect.projects import resolve_project_map
+from introspect.sql_fragments import (
+    COMMAND_LIST_SUBQUERY,
+    FILE_READS_SUBQUERY,
+    FILE_WRITES_SUBQUERY,
+    SESSION_COST_SUBQUERY,
+    TOOL_COUNTS_SUBQUERY,
+)
 
 DEFAULT_DB_PATH = Path.home() / ".introspect" / "introspect.duckdb"
 DEFAULT_JSONL_GLOB = str(Path.home() / ".claude" / "projects" / "**" / "*.jsonl")
@@ -136,6 +143,7 @@ def materialize_views(
 
     # Drop everything to avoid table/view name conflicts
     for name in (
+        "session_stats",
         "message_commands",
         "session_titles",
         "conversation_turns",
@@ -177,7 +185,10 @@ def materialize_views(
     conn.execute("CREATE INDEX idx_rm_timestamp ON raw_messages(timestamp)")
 
     _build_project_map(conn, resolve_projects=resolve_projects)
-    _create_derived_views(conn)
+    _create_derived_views(conn, materialize=True)
+    _create_indexes(conn, _DERIVED_INDEXES)
+    _create_session_stats(conn, materialize=True)
+    _create_indexes(conn, _SESSION_STATS_INDEXES)
 
 
 def _build_project_map(
@@ -238,13 +249,42 @@ def _create_views(conn: duckdb.DuckDBPyConnection, jsonl_glob: str) -> None:
     """)
 
     _create_derived_views(conn)
+    _create_session_stats(conn, materialize=False)
 
 
-def _create_derived_views(conn: duckdb.DuckDBPyConnection) -> None:
-    """Create views that depend on raw_messages (works with both tables and views)."""
+def _create_relation(
+    conn: duckdb.DuckDBPyConnection, name: str, body: str, *, materialize: bool
+) -> None:
+    """Create ``name`` as a TABLE (materialized) or VIEW (lazy) over ``body``.
+
+    Single dispatch point for both ``_create_derived_views`` and
+    ``_create_session_stats`` so the materialized/lazy semantics can't drift
+    between callers.
+    """
+    if materialize:
+        conn.execute(f"CREATE TABLE {name} AS {body}")
+    else:
+        conn.execute(f"CREATE OR REPLACE VIEW {name} AS {body}")
+
+
+def _create_derived_views(
+    conn: duckdb.DuckDBPyConnection, *, materialize: bool = False
+) -> None:
+    """Create derived structures over raw_messages.
+
+    When ``materialize=True`` they are created as TABLEs (suitable for the
+    on-disk DB built by the background refresh).  When False (the lazy path
+    used by ``_create_views``) they are created as VIEWs.  The SELECT bodies
+    are identical in both modes.
+    """
+
+    def _make(name: str, body: str) -> None:
+        _create_relation(conn, name, body, materialize=materialize)
+
     # Logical sessions: one row per session with summary stats
-    conn.execute("""
-        CREATE OR REPLACE VIEW logical_sessions AS
+    _make(
+        "logical_sessions",
+        """
         SELECT
             rm.session_id,
             MIN(rm.timestamp) AS started_at,
@@ -269,7 +309,8 @@ def _create_derived_views(conn: duckdb.DuckDBPyConnection) -> None:
         FROM raw_messages rm
         LEFT JOIN project_map pm ON rm.cwd = pm.cwd
         GROUP BY rm.session_id
-    """)
+        """,
+    )
 
     # Per-assistant-message token usage, deduplicated by message.id.
     #
@@ -281,8 +322,9 @@ def _create_derived_views(conn: duckdb.DuckDBPyConnection) -> None:
     #
     # `DISTINCT ON` is supported by DuckDB; the ORDER BY in the same SELECT
     # makes "earliest copy wins" deterministic.
-    conn.execute("""
-        CREATE OR REPLACE VIEW assistant_message_costs AS
+    _make(
+        "assistant_message_costs",
+        """
         SELECT DISTINCT ON (json_extract_string(message, '$.id'))
             session_id,
             uuid,
@@ -315,12 +357,14 @@ def _create_derived_views(conn: duckdb.DuckDBPyConnection) -> None:
         WHERE type = 'assistant'
           AND json_extract_string(message, '$.id') IS NOT NULL
         ORDER BY json_extract_string(message, '$.id'), timestamp
-    """)
+        """,
+    )
 
     # Tool calls: assistant tool_use content blocks joined with results.
     # Unnests all content blocks so multi-tool messages are captured.
-    conn.execute("""
-        CREATE OR REPLACE VIEW tool_calls AS
+    _make(
+        "tool_calls",
+        """
         WITH uses AS (
             SELECT
                 m.session_id,
@@ -383,13 +427,15 @@ def _create_derived_views(conn: duckdb.DuckDBPyConnection) -> None:
             age(r.result_at, u.called_at) AS execution_time,
         FROM uses u
         LEFT JOIN results r ON u.tool_use_id = r.tool_use_id
-    """)
+        """,
+    )
 
     # Enriched per-block view: one row per content block, classified into a
     # 'kind' that the session detail page dispatches on. Unnests content blocks
     # so an assistant message with text + thinking + 2 tool_use yields 4 rows.
-    conn.execute("""
-        CREATE OR REPLACE VIEW session_messages_enriched AS
+    _make(
+        "session_messages_enriched",
+        """
         WITH blocks AS (
             SELECT
                 m.session_id,
@@ -487,11 +533,13 @@ def _create_derived_views(conn: duckdb.DuckDBPyConnection) -> None:
             block_tool_use_id AS tool_use_id,
             block_tool_input AS tool_input,
         FROM unified
-    """)
+        """,
+    )
 
     # Conversation turns: human/assistant pairs
-    conn.execute("""
-        CREATE OR REPLACE VIEW conversation_turns AS
+    _make(
+        "conversation_turns",
+        """
         WITH ordered AS (
             SELECT
                 session_id,
@@ -522,11 +570,13 @@ def _create_derived_views(conn: duckdb.DuckDBPyConnection) -> None:
                 ELSE json_extract_string(message, '$.content[0].text')
             END AS content_text,
         FROM ordered
-    """)
+        """,
+    )
 
     # Session titles: first meaningful user prompt per session
-    conn.execute("""
-        CREATE OR REPLACE VIEW session_titles AS
+    _make(
+        "session_titles",
+        """
         SELECT session_id, first_prompt FROM (
             SELECT
                 session_id,
@@ -558,11 +608,13 @@ def _create_derived_views(conn: duckdb.DuckDBPyConnection) -> None:
                   ''
               ) NOT LIKE '<local-command-caveat>%'
         ) sub WHERE rn = 1
-    """)
+        """,
+    )
 
     # Commands: extract <command-name>...</command-name> tags from user messages.
-    conn.execute("""
-        CREATE OR REPLACE VIEW message_commands AS
+    _make(
+        "message_commands",
+        """
         WITH msg_text AS (
             SELECT session_id, uuid, timestamp,
                    regexp_extract_all(
@@ -579,11 +631,13 @@ def _create_derived_views(conn: duckdb.DuckDBPyConnection) -> None:
                unnest(cmds) AS command
         FROM msg_text
         WHERE len(cmds) > 0
-    """)
+        """,
+    )
 
     # File reads: one row per Read tool call with extracted file_path.
-    conn.execute("""
-        CREATE OR REPLACE VIEW file_reads AS
+    _make(
+        "file_reads",
+        """
         SELECT
             tc.session_id,
             tc.tool_use_id,
@@ -592,11 +646,13 @@ def _create_derived_views(conn: duckdb.DuckDBPyConnection) -> None:
         FROM tool_calls tc
         WHERE tc.tool_name = 'Read'
           AND json_extract_string(tc.tool_input, '$.file_path') IS NOT NULL
-    """)
+        """,
+    )
 
     # File writes: one row per write tool call with extracted file_path.
-    conn.execute("""
-        CREATE OR REPLACE VIEW file_writes AS
+    _make(
+        "file_writes",
+        """
         SELECT
             tc.session_id,
             tc.tool_use_id,
@@ -612,4 +668,88 @@ def _create_derived_views(conn: duckdb.DuckDBPyConnection) -> None:
               json_extract_string(tc.tool_input, '$.file_path'),
               json_extract_string(tc.tool_input, '$.notebook_path')
           ) IS NOT NULL
-    """)
+        """,
+    )
+
+
+_DERIVED_INDEXES = (
+    "CREATE INDEX idx_lsess_started ON logical_sessions(started_at)",
+    "CREATE INDEX idx_lsess_project ON logical_sessions(project)",
+    "CREATE INDEX idx_lsess_model ON logical_sessions(model)",
+    "CREATE INDEX idx_lsess_branch ON logical_sessions(git_branch)",
+    "CREATE INDEX idx_tcalls_session ON tool_calls(session_id)",
+    "CREATE INDEX idx_tcalls_tooluseid ON tool_calls(tool_use_id)",
+    "CREATE INDEX idx_amc_session ON assistant_message_costs(session_id)",
+    "CREATE INDEX idx_amc_uuid ON assistant_message_costs(uuid)",
+    "CREATE INDEX idx_sme_session ON session_messages_enriched(session_id)",
+    "CREATE INDEX idx_sme_tooluseid ON session_messages_enriched(tool_use_id)",
+    "CREATE INDEX idx_freads_session ON file_reads(session_id)",
+    "CREATE INDEX idx_fwrites_session ON file_writes(session_id)",
+    "CREATE INDEX idx_mcmds_session ON message_commands(session_id)",
+    "CREATE INDEX idx_mcmds_command ON message_commands(command)",
+    "CREATE INDEX idx_stitles_session ON session_titles(session_id)",
+)
+
+
+_SESSION_STATS_INDEXES = (
+    "CREATE INDEX idx_sstats_started ON session_stats(started_at)",
+    "CREATE INDEX idx_sstats_project ON session_stats(project)",
+    "CREATE INDEX idx_sstats_model ON session_stats(model)",
+    "CREATE INDEX idx_sstats_branch ON session_stats(git_branch)",
+    "CREATE INDEX idx_sstats_cost ON session_stats(cost_usd)",
+)
+
+
+def _create_indexes(
+    conn: duckdb.DuckDBPyConnection, statements: tuple[str, ...]
+) -> None:
+    """Execute a tuple of CREATE INDEX statements in order."""
+    for stmt in statements:
+        conn.execute(stmt)
+
+
+# SELECT body shared by the table and view forms of ``session_stats``.
+# Splices in five module-level SQL fragments (no user input); safe by
+# construction.
+_SESSION_STATS_BODY = f"""
+    SELECT
+        ls.session_id,
+        ls.started_at,
+        ls.ended_at,
+        ls.duration,
+        ls.user_messages,
+        ls.assistant_messages,
+        ls.model,
+        ls.cwd,
+        ls.project,
+        ls.git_branch,
+        ls.entrypoint,
+        COALESCE(tc.tool_count, 0) AS tool_count,
+        COALESCE(fr_agg.files_read, 0) AS files_read,
+        COALESCE(fw_agg.files_edited, 0) AS files_edited,
+        COALESCE(fr_agg.files_read_only, 0) AS files_read_only,
+        COALESCE(fr_agg.files_outside, 0) AS files_outside,
+        fp.first_prompt,
+        cmd.commands,
+        sc.cost_usd
+    FROM logical_sessions ls
+    LEFT JOIN session_titles fp ON ls.session_id = fp.session_id
+    LEFT JOIN {TOOL_COUNTS_SUBQUERY} ON ls.session_id = tc.session_id
+    LEFT JOIN {FILE_READS_SUBQUERY} ON ls.session_id = fr_agg.session_id
+    LEFT JOIN {FILE_WRITES_SUBQUERY} ON ls.session_id = fw_agg.session_id
+    LEFT JOIN {COMMAND_LIST_SUBQUERY} ON ls.session_id = cmd.session_id
+    LEFT JOIN {SESSION_COST_SUBQUERY} ON ls.session_id = sc.session_id
+"""  # noqa: S608
+
+
+def _create_session_stats(
+    conn: duckdb.DuckDBPyConnection, *, materialize: bool
+) -> None:
+    """Create the ``session_stats`` rollup as a TABLE or VIEW.
+
+    The SELECT body is shared so the listing-page query is identical in both
+    materialized and lazy modes.
+    """
+    _create_relation(
+        conn, "session_stats", _SESSION_STATS_BODY, materialize=materialize
+    )

@@ -103,6 +103,12 @@
         .refresh-btn { padding: 0.2rem 0.6rem; font-size: 0.75rem; background: rgba(255,255,255,0.08); color: #e0e0ff; border: 1px solid rgba(255,255,255,0.15); border-radius: 4px; cursor: pointer; }
         .refresh-btn:hover { background: rgba(255,255,255,0.15); }
         .refresh-btn[disabled] { opacity: 0.5; cursor: default; }
+        .refresh-muted { transition: opacity 0.2s ease; }
+        .refresh-flash { color: #7be0a3; font-weight: 600; animation: refreshFlash 0.6s ease-out; display: inline-block; }
+        @keyframes refreshFlash {
+            0%   { opacity: 0; transform: translateY(-3px); }
+            100% { opacity: 1; transform: translateY(0); }
+        }
     </style>
 </head>
 <body>
@@ -124,10 +130,18 @@
         {% block content %}{% endblock %}
     </div>
     <script>
-        document.addEventListener('htmx:beforeRequest', function() {
+        // Refresh polls hit /refresh-status frequently; suppressing the
+        // overlay for them keeps the page from flickering during a rebuild.
+        function isRefreshRequest(evt) {
+            var path = evt.detail && evt.detail.requestConfig && evt.detail.requestConfig.path;
+            return typeof path === 'string' && path.indexOf('/refresh') === 0;
+        }
+        document.addEventListener('htmx:beforeRequest', function(evt) {
+            if (isRefreshRequest(evt)) return;
             document.getElementById('loading-overlay').classList.add('active');
         });
-        document.addEventListener('htmx:afterRequest', function() {
+        document.addEventListener('htmx:afterRequest', function(evt) {
+            if (isRefreshRequest(evt)) return;
             document.getElementById('loading-overlay').classList.remove('active');
         });
         document.addEventListener('htmx:historyRestore', function() {

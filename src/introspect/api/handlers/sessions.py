@@ -13,7 +13,6 @@ from introspect.search import ensure_search_corpus, fts_available
 
 from ._helpers import (
     OBVIOUS_COMMANDS_SQL,
-    SESSION_INFO_JOINS,
     SESSION_INFO_SELECT,
     SESSIONS_PAGE_SIZES,
     SESSIONS_PER_PAGE_DEFAULT,
@@ -246,18 +245,18 @@ async def sessions(  # noqa: PLR0913
     where_clauses: list[str] = []
     params: list[str | int] = []
     if model.strip():
-        where_clauses.append("ls.model = ?")
+        where_clauses.append("ss.model = ?")
         params.append(model.strip())
     if project.strip():
-        where_clauses.append("ls.project = ?")
+        where_clauses.append("ss.project = ?")
         params.append(project.strip())
     if branch.strip():
-        where_clauses.append("ls.git_branch = ?")
+        where_clauses.append("ss.git_branch = ?")
         params.append(branch.strip())
     if command.strip():
         where_clauses.append(
             "EXISTS (SELECT 1 FROM message_commands mc"
-            " WHERE mc.session_id = ls.session_id AND mc.command = ?)"
+            " WHERE mc.session_id = ss.session_id AND mc.command = ?)"
         )
         params.append(command.strip())
     search_query = q.strip()
@@ -268,13 +267,13 @@ async def sessions(  # noqa: PLR0913
                 "EXISTS (SELECT 1 FROM (SELECT *, "
                 "fts_main_search_corpus.match_bm25(rowid, ?) AS score "
                 "FROM search_corpus) sc "
-                "WHERE sc.session_id = ls.session_id AND sc.score IS NOT NULL)"
+                "WHERE sc.session_id = ss.session_id AND sc.score IS NOT NULL)"
             )
             params.append(search_query)
         else:
             where_clauses.append(
                 "EXISTS (SELECT 1 FROM search_corpus sc"
-                " WHERE sc.session_id = ls.session_id"
+                " WHERE sc.session_id = ss.session_id"
                 " AND sc.content_text ILIKE ?)"
             )
             params.append(f"%{search_query}%")
@@ -283,7 +282,7 @@ async def sessions(  # noqa: PLR0913
 
     # Count with filters
     total = db.execute(
-        f"SELECT COUNT(*) FROM logical_sessions ls {where}",  # noqa: S608
+        f"SELECT COUNT(*) FROM session_stats ss {where}",  # noqa: S608
         params,
     ).fetchone()[0]
     total_pages = max(1, math.ceil(total / page_size))
@@ -298,8 +297,7 @@ async def sessions(  # noqa: PLR0913
     rows = db.execute(
         f"""
         SELECT {SESSION_INFO_SELECT}
-        FROM logical_sessions ls
-        {SESSION_INFO_JOINS}
+        FROM session_stats ss
         {where}
         ORDER BY {sort_col} {sort_dir} {nulls}
         LIMIT ? OFFSET ?

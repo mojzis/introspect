@@ -5,11 +5,13 @@ import json
 import os
 import re
 import tempfile
+import time
 from contextlib import contextmanager
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from unittest.mock import patch
 
+import duckdb
 import pytest
 from fastapi.testclient import TestClient
 
@@ -2970,3 +2972,360 @@ def test_refresh_indicator_label_has_no_date():
             for attr in ("refresh_trigger", "refresh_in_progress", "last_refreshed_at"):
                 if hasattr(app.state, attr):
                     delattr(app.state, attr)
+
+
+def test_post_refresh_with_window_updates_app_state():
+    """POST /refresh with window=7 should make 7 the selected option."""
+    with tempfile.TemporaryDirectory() as tmp, _patched_client(Path(tmp)) as client:
+        trigger = asyncio.Event()
+        app.state.refresh_trigger = trigger
+        app.state.refresh_in_progress = False
+        app.state.last_refreshed_at = datetime.now(UTC)
+        app.state.refresh_window = "30"
+        try:
+            response = client.post("/refresh", data={"window": "7"})
+            assert response.status_code == 200
+            assert app.state.refresh_window == "7"
+            assert '<option value="7" selected>7 days</option>' in response.text
+            # The other tokens must NOT be marked selected.
+            assert '<option value="30" selected' not in response.text
+            assert '<option value="1" selected' not in response.text
+            assert '<option value="month" selected' not in response.text
+        finally:
+            for attr in (
+                "refresh_trigger",
+                "refresh_in_progress",
+                "last_refreshed_at",
+                "refresh_window",
+            ):
+                if hasattr(app.state, attr):
+                    delattr(app.state, attr)
+
+
+def test_post_refresh_invalid_window_keeps_current():
+    """An invalid window token is ignored — sticky choice survives."""
+    with tempfile.TemporaryDirectory() as tmp, _patched_client(Path(tmp)) as client:
+        app.state.refresh_trigger = asyncio.Event()
+        app.state.refresh_in_progress = False
+        app.state.last_refreshed_at = datetime.now(UTC)
+        app.state.refresh_window = "7"
+        try:
+            response = client.post("/refresh", data={"window": "bogus"})
+            assert response.status_code == 200
+            assert app.state.refresh_window == "7"
+            assert '<option value="7" selected>7 days</option>' in response.text
+        finally:
+            for attr in (
+                "refresh_trigger",
+                "refresh_in_progress",
+                "last_refreshed_at",
+                "refresh_window",
+            ):
+                if hasattr(app.state, attr):
+                    delattr(app.state, attr)
+
+
+def test_refresh_status_includes_picker():
+    """GET /refresh-status must render the window picker with all four options."""
+    with tempfile.TemporaryDirectory() as tmp, _patched_client(Path(tmp)) as client:
+        app.state.refresh_trigger = asyncio.Event()
+        app.state.refresh_in_progress = False
+        app.state.last_refreshed_at = datetime.now(UTC)
+        app.state.refresh_window = "month"
+        try:
+            response = client.get("/refresh-status")
+            assert response.status_code == 200
+            text = response.text
+            assert '<select name="window"' in text
+            assert ">Today<" in text
+            assert ">7 days<" in text
+            assert ">30 days<" in text
+            assert ">This month<" in text
+            assert '<option value="month" selected>This month</option>' in text
+        finally:
+            for attr in (
+                "refresh_trigger",
+                "refresh_in_progress",
+                "last_refreshed_at",
+                "refresh_window",
+            ):
+                if hasattr(app.state, attr):
+                    delattr(app.state, attr)
+
+
+def test_post_refresh_returns_immediately_without_waiting():
+    """POST /refresh must not block waiting for the rebuild to finish.
+
+    Sets the trigger and returns the current indicator state in one shot —
+    the polling fragment is responsible for catching completion. Asserts the
+    response arrives well under the old 3-second wait budget even with the
+    in-progress flag stuck on.
+    """
+    with tempfile.TemporaryDirectory() as tmp, _patched_client(Path(tmp)) as client:
+        trigger = asyncio.Event()
+        app.state.refresh_trigger = trigger
+        app.state.refresh_in_progress = True  # Loop "stuck" — handler must not wait.
+        app.state.last_refreshed_at = datetime.now(UTC)
+        app.state.refresh_started_at = datetime.now(UTC)
+        try:
+            start = time.monotonic()
+            response = client.post("/refresh")
+            elapsed = time.monotonic() - start
+            assert response.status_code == 200
+            assert elapsed < 0.5, f"POST /refresh blocked for {elapsed:.2f}s"
+            assert trigger.is_set()
+            assert "refreshing" in response.text
+        finally:
+            for attr in (
+                "refresh_trigger",
+                "refresh_in_progress",
+                "last_refreshed_at",
+                "refresh_started_at",
+            ):
+                if hasattr(app.state, attr):
+                    delattr(app.state, attr)
+
+
+def test_refresh_status_poll_delay_tightens_with_elapsed_time():
+    """The hx-trigger delay shrinks (3s → 500ms) as the rebuild runs longer."""
+    with tempfile.TemporaryDirectory() as tmp, _patched_client(Path(tmp)) as client:
+        app.state.refresh_trigger = asyncio.Event()
+        app.state.refresh_in_progress = True
+        app.state.last_refreshed_at = datetime.now(UTC)
+        try:
+            for elapsed_seconds, expected_ms in (
+                (0.0, 3000),
+                (3.0, 2000),
+                (5.0, 1000),
+                (10.0, 500),
+            ):
+                app.state.refresh_started_at = datetime.now(UTC) - timedelta(
+                    seconds=elapsed_seconds,
+                )
+                response = client.get("/refresh-status")
+                assert response.status_code == 200
+                assert f"load delay:{expected_ms}ms" in response.text, (
+                    f"expected {expected_ms}ms delay at elapsed={elapsed_seconds}s, "
+                    f"got: {response.text}"
+                )
+        finally:
+            for attr in (
+                "refresh_trigger",
+                "refresh_in_progress",
+                "last_refreshed_at",
+                "refresh_started_at",
+            ):
+                if hasattr(app.state, attr):
+                    delattr(app.state, attr)
+
+
+def test_refresh_status_shows_completion_flash():
+    """Polled status flipping to done with a fresh timestamp renders the ✓ flash."""
+    with tempfile.TemporaryDirectory() as tmp, _patched_client(Path(tmp)) as client:
+        app.state.refresh_trigger = asyncio.Event()
+        app.state.refresh_in_progress = False
+        app.state.last_refreshed_at = datetime.now(UTC)
+        app.state.refresh_started_at = datetime.now(UTC) - timedelta(seconds=2)
+        try:
+            response = client.get("/refresh-status")
+            assert response.status_code == 200
+            assert "refresh-flash" in response.text
+            assert "refreshed" in response.text
+            # Polling stops once the flash is shown — no load-delay trigger remains.
+            # (The window picker still has hx-trigger="change", which is unrelated.)
+            assert "load delay:" not in response.text
+        finally:
+            for attr in (
+                "refresh_trigger",
+                "refresh_in_progress",
+                "last_refreshed_at",
+                "refresh_started_at",
+            ):
+                if hasattr(app.state, attr):
+                    delattr(app.state, attr)
+
+
+def test_base_html_include_does_not_render_flash():
+    """A normal page render (not a polling response) must not trigger the flash."""
+    with tempfile.TemporaryDirectory() as tmp, _patched_client(Path(tmp)) as client:
+        # Even with a brand-new last_refreshed_at, the base.html include path
+        # has notify undefined and must default to no flash. The CSS class
+        # name itself appears in the <style> block — check for the rendered
+        # span and the literal "refreshed" label instead.
+        response = client.get("/")
+        assert response.status_code == 200
+        assert 'class="refresh-flash"' not in response.text
+        assert "&check; refreshed" not in response.text
+
+
+def test_window_to_days_month(monkeypatch):
+    """``window_to_days('month')`` matches days-since-start-of-current-month.
+
+    Pinning ``datetime.now`` removes the microsecond-window flake that would
+    otherwise occur if the test crosses a UTC midnight between the two calls.
+    """
+    from introspect import refresh as refresh_mod  # noqa: PLC0415
+
+    fixed = datetime(2026, 4, 26, tzinfo=UTC)
+
+    class _FakeDT:
+        @staticmethod
+        def now(tz=None):
+            return fixed if tz is None else fixed.astimezone(tz)
+
+    monkeypatch.setattr(refresh_mod, "datetime", _FakeDT)
+    assert refresh_mod.window_to_days("month") == 26
+
+
+def test_window_to_days_simple_tokens():
+    """``window_to_days`` returns the literal int for fixed tokens."""
+    from introspect.refresh import window_to_days  # noqa: PLC0415
+
+    assert window_to_days("1") == 1
+    assert window_to_days("7") == 7
+    assert window_to_days("30") == 30
+
+
+def _setup_marker_swap(db_path: Path, sidecar: Path) -> tuple[str, str]:
+    """Add a marker table to ``db_path`` and a sidecar copy with a different row.
+
+    Returns ``(live_marker, sidecar_marker)`` so the caller can assert which
+    inode a cursor was reading from.
+    """
+    import shutil  # noqa: PLC0415
+
+    live_marker, sidecar_marker = "live", "swapped"
+    live_conn = duckdb.connect(str(db_path))
+    try:
+        live_conn.execute("CREATE TABLE swap_marker(label VARCHAR)")
+        live_conn.execute("INSERT INTO swap_marker VALUES (?)", [live_marker])
+    finally:
+        live_conn.close()
+    shutil.copy(str(db_path), str(sidecar))
+    side_conn = duckdb.connect(str(sidecar))
+    try:
+        side_conn.execute("DELETE FROM swap_marker")
+        side_conn.execute("INSERT INTO swap_marker VALUES (?)", [sidecar_marker])
+    finally:
+        side_conn.close()
+    return live_marker, sidecar_marker
+
+
+def _run_swap_on_thread(db_path: Path, sidecar: Path) -> None:
+    """Run ``_swap_in`` on a thread, mirroring ``asyncio.to_thread`` from the loop."""
+    import threading  # noqa: PLC0415
+
+    from introspect.refresh import _swap_in  # noqa: PLC0415
+
+    swap_done = threading.Event()
+
+    def do_swap() -> None:
+        _swap_in(db_path, sidecar)
+        swap_done.set()
+
+    t = threading.Thread(target=do_swap)
+    t.start()
+    t.join(timeout=2.0)
+    assert swap_done.is_set(), "swap thread did not finish"
+
+
+def test_swap_during_in_flight_cursor_does_not_500():
+    """A swap *while* a cursor is mid-query must not surface as a 500.
+
+    Reproduces the original bug shape: a request opens a connection, starts a
+    query, the file is replaced under it, and the cursor must still complete
+    successfully because per-request connections hold the old inode open via
+    a live file descriptor. After the cursor closes, fresh connections see
+    the *new* swapped DB.
+
+    The sidecar is a full copy of the materialized DB plus a marker table
+    with a different value, so we can assert that the in-flight cursor
+    returned the *pre-swap* row (proving it held the old inode) and that a
+    fresh post-swap connection returns the *post-swap* row (proving the
+    swap actually replaced the file).
+    """
+    with tempfile.TemporaryDirectory() as tmp, _patched_client(Path(tmp)) as client:
+        # Issue one normal request first to ensure middleware/state are warm.
+        assert client.get("/sessions").status_code == 200
+
+        db_path = Path(app.state.db_path)
+        sidecar = db_path.with_name(db_path.name + ".next")
+        live_marker, sidecar_marker = _setup_marker_swap(db_path, sidecar)
+
+        # Open a long-lived read-only connection mimicking what the middleware
+        # hands a request, and *start* a query so the cursor holds an open
+        # handle on the old inode while the swap fires.
+        long_lived = duckdb.connect(str(db_path), read_only=True)
+        try:
+            cursor = long_lived.execute("SELECT label FROM swap_marker")
+            _run_swap_on_thread(db_path, sidecar)
+            rows = cursor.fetchall()
+            assert rows == [(live_marker,)], (
+                f"in-flight cursor saw {rows!r}; expected pre-swap row"
+            )
+        finally:
+            long_lived.close()
+
+        # A fresh connection opened *after* the swap must see the new data,
+        # proving the swap actually replaced the file the path resolves to.
+        post_swap = duckdb.connect(str(db_path), read_only=True)
+        try:
+            post_rows = post_swap.execute("SELECT label FROM swap_marker").fetchall()
+        finally:
+            post_swap.close()
+        assert post_rows == [(sidecar_marker,)], (
+            f"post-swap connection saw {post_rows!r}; expected swapped row"
+        )
+
+        # The middleware path (which opens its own per-request connection)
+        # must keep working against the swapped DB without 500ing.
+        assert client.get("/sessions").status_code == 200
+
+
+def test_per_request_connection_no_shared_read_conn():
+    """``app.state`` should no longer carry a shared ``read_conn``."""
+    with tempfile.TemporaryDirectory() as tmp, _patched_client(Path(tmp)) as client:
+        # Issue a request to confirm the middleware path works.
+        response = client.get("/sessions")
+        assert response.status_code == 200
+        assert not hasattr(app.state, "read_conn")
+        assert hasattr(app.state, "db_path")
+
+
+def test_lifespan_rejects_invalid_refresh_window_env(caplog):
+    """An invalid ``INTROSPECT_REFRESH_WINDOW`` env var falls back to default.
+
+    Without validation, a typo would leave ``app.state.refresh_window`` set
+    to garbage, breaking the picker (no option renders ``selected``) and
+    causing ``_compute_days`` to disagree with ``window_to_days`` about the
+    fallback. Lifespan must coerce invalid input to ``DEFAULT_WINDOW``.
+    """
+    import logging  # noqa: PLC0415
+
+    from introspect.refresh import DEFAULT_WINDOW  # noqa: PLC0415
+
+    _write_sample_jsonl_path = tempfile.TemporaryDirectory()
+    try:
+        tmp = Path(_write_sample_jsonl_path.name)
+        _write_sample_jsonl(tmp)
+        db_path = tmp / "test.duckdb"
+        with (
+            patch.dict(
+                os.environ,
+                {
+                    "INTROSPECT_DB_PATH": str(db_path),
+                    "INTROSPECT_JSONL_GLOB": glob_pattern(tmp),
+                    "INTROSPECT_REFRESH_WINDOW": "garbage",
+                    "INTROSPECT_REFRESH_INTERVAL_SECONDS": "0",
+                },
+            ),
+            caplog.at_level(logging.WARNING, logger="introspect.api.main"),
+            TestClient(app) as client,
+        ):
+            assert client.get("/sessions").status_code == 200
+            assert app.state.refresh_window == DEFAULT_WINDOW
+            assert any(
+                "Invalid INTROSPECT_REFRESH_WINDOW" in r.message for r in caplog.records
+            )
+    finally:
+        _write_sample_jsonl_path.cleanup()
