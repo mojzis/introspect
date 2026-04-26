@@ -32,6 +32,10 @@ from ._helpers import (
     parent,
     templates,
 )
+from .cost_breakdown import (
+    DEFAULT_BREAKDOWN,
+    build_daily_panel_context,
+)
 
 # Pareto cumulative-cost cutoff — sessions are kept until their *previous*
 # row's cumulative share crosses this fraction (so the row that tips the
@@ -56,6 +60,7 @@ async def cost_overview(request: Request) -> HTMLResponse:
     subagent_split = _build_subagent_split(db, cost_rows)
     huge_reads_split = _build_huge_reads_split(db, cost_rows)
     skill_split = _build_skill_split(db, cost_rows)
+    daily_panel = build_daily_panel_context(db, DEFAULT_BREAKDOWN)
 
     return templates.TemplateResponse(
         request,
@@ -66,6 +71,7 @@ async def cost_overview(request: Request) -> HTMLResponse:
             "subagent_split": subagent_split,
             "huge_reads_split": huge_reads_split,
             "skill_split": skill_split,
+            **daily_panel,
         },
     )
 

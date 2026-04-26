@@ -11,6 +11,11 @@ from introspect.api.handlers._helpers import (
     SESSIONS_SORT_DEFAULT,
 )
 from introspect.api.handlers.bash import bash as _bash
+from introspect.api.handlers.cost_breakdown import (
+    DEFAULT_BREAKDOWN as _COST_DEFAULT_BREAKDOWN,
+)
+from introspect.api.handlers.cost_breakdown import daily_panel as _cost_daily_panel
+from introspect.api.handlers.cost_breakdown import hourly_panel as _cost_hourly_panel
 from introspect.api.handlers.cost_overview import cost_overview as _cost_overview
 from introspect.api.handlers.dashboard import dashboard as _dashboard
 from introspect.api.handlers.mcps import mcps as _mcps
@@ -131,6 +136,23 @@ async def stats(request: Request):
 @router.get("/cost-overview", response_class=HTMLResponse)
 async def cost_overview(request: Request):
     return await _cost_overview(request)
+
+
+@router.get("/cost-overview/breakdown", response_class=HTMLResponse)
+async def cost_daily_panel(
+    request: Request,
+    breakdown: str = Query(_COST_DEFAULT_BREAKDOWN),
+):
+    return await _cost_daily_panel(request, breakdown)
+
+
+@router.get("/cost-overview/breakdown/{day}", response_class=HTMLResponse)
+async def cost_hourly_panel(
+    request: Request,
+    day: str,
+    breakdown: str = Query(_COST_DEFAULT_BREAKDOWN),
+):
+    return await _cost_hourly_panel(request, day, breakdown)
 
 
 @router.post("/refresh", response_class=HTMLResponse)

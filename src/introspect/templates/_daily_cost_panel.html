@@ -1,0 +1,53 @@
+{# Daily-cost panel fragment.
+
+   Targeted by HTMX swaps when the breakdown selector changes, so this
+   template is rendered standalone (no {% extends %}). The wrapping <div>
+   is what HTMX replaces; the <script> below executes on every swap and
+   re-binds the click handler to the freshly-injected chart div.
+
+   The Plotly figure JSON is delivered through a non-executing
+   <script type="application/json"> tag — that way a literal "</script>"
+   inside any future trace name (e.g. a project string) can't break out
+   of the surrounding inline script.
+#}
+<div id="daily-cost-panel">
+    <div class="filter-bar" style="margin-bottom:0.6rem;">
+        <span style="color:#666;font-size:0.85rem;">Break down by:</span>
+        {% for opt in breakdown_options %}
+        <a class="tool-btn tool-btn-sm{% if opt == breakdown %} tool-btn-active{% endif %}"
+           hx-get="/cost-overview/breakdown?breakdown={{ opt }}"
+           hx-target="#daily-cost-panel"
+           hx-swap="outerHTML">{{ opt }}</a>
+        {% endfor %}
+        {% if has_data %}
+        <span style="margin-left:auto;color:#888;font-size:0.85rem;">
+            {{ total_cost }} across {{ day_count }} day{{ '' if day_count == 1 else 's' }}
+        </span>
+        {% endif %}
+    </div>
+
+    {% if has_data %}
+    <div id="daily-cost-chart" style="width:100%;min-height:360px;"></div>
+    <p style="color:#888;font-size:0.78rem;margin-top:0.3rem;">
+        Tip: click any bar to drill into hourly cost for that day.
+    </p>
+    <script type="application/json" id="daily-cost-chart-data">{{ chart_json|safe }}</script>
+    <script>
+    (function () {
+        var raw = document.getElementById('daily-cost-chart-data').textContent;
+        var fig = JSON.parse(raw);
+        var el = document.getElementById('daily-cost-chart');
+        Plotly.newPlot(el, fig.data, fig.layout, {responsive: true, displaylogo: false}).then(function () {
+            el.on('plotly_click', function (evt) {
+                if (!evt || !evt.points || !evt.points.length) return;
+                var day = evt.points[0].x;
+                var url = '/cost-overview/breakdown/' + encodeURIComponent(day) + '?breakdown=' + encodeURIComponent({{ breakdown|tojson }});
+                htmx.ajax('GET', url, {target: '#hourly-cost-panel', swap: 'innerHTML'});
+            });
+        });
+    })();
+    </script>
+    {% else %}
+    <p>No cost data yet.</p>
+    {% endif %}
+</div>
