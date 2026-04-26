@@ -167,6 +167,21 @@ def _group_totals(bucketed: dict[str, dict[str, float]]) -> dict[str, float]:
     return totals
 
 
+def _fold_into_other(
+    bucketed: dict[str, dict[str, float]],
+    keep: set[str],
+) -> dict[str, dict[str, float]]:
+    """Rewrite ``bucketed`` folding any group not in ``keep`` into "Other"."""
+    out: dict[str, dict[str, float]] = {}
+    for bucket, groups in bucketed.items():
+        new_groups: dict[str, float] = {}
+        for group, cost in groups.items():
+            target = group if group in keep else "Other"
+            new_groups[target] = new_groups.get(target, 0.0) + cost
+        out[bucket] = new_groups
+    return out
+
+
 def _cap_groups(
     bucketed: dict[str, dict[str, float]],
     max_groups: int = MAX_GROUPS,
@@ -183,14 +198,32 @@ def _cap_groups(
     keep = {
         g for g, _ in sorted(totals.items(), key=lambda kv: -kv[1])[: max_groups - 1]
     }
-    out: dict[str, dict[str, float]] = {}
-    for bucket, groups in bucketed.items():
-        new_groups: dict[str, float] = {}
-        for group, cost in groups.items():
-            target = group if group in keep else "Other"
-            new_groups[target] = new_groups.get(target, 0.0) + cost
-        out[bucket] = new_groups
-    return out
+    return _fold_into_other(bucketed, keep)
+
+
+def _canonical_color_map(
+    db: duckdb.DuckDBPyConnection, breakdown: str
+) -> dict[str, str]:
+    """Map ``{group: hex_color}`` derived from the all-days aggregate.
+
+    Both daily and hourly panels feed traces through this map so a project
+    (or model) keeps the same colour wherever it appears. The canonical set
+    is also the keep-set: any sub-period group missing from it is folded
+    into "Other" before rendering, so the hourly chart can never surface a
+    project name (or colour) the daily chart didn't already show.
+
+    Returns ``{}`` for the ``"total"`` breakdown — only one trace, so
+    Plotly's first-palette-colour default is fine.
+    """
+    if breakdown == "total":
+        return {}
+    rows = _fetch_aggregated(db, bucket_expr="CAST(timestamp AS DATE)")
+    bucketed = _cap_groups(_collapse_to_breakdown(rows, breakdown))
+    ordered = [
+        g for g, _ in sorted(_group_totals(bucketed).items(), key=lambda kv: -kv[1])
+    ]
+    palette = nolegend.QUALITATIVE.colorway
+    return {group: palette[i % len(palette)] for i, group in enumerate(ordered)}
 
 
 def _build_figure(
@@ -198,8 +231,15 @@ def _build_figure(
     *,
     breakdown: str,
     x_title: str,
+    color_map: dict[str, str] | None = None,
 ) -> go.Figure:
-    """Build a stacked bar chart from ``{bucket: {group: cost}}`` data."""
+    """Build a stacked bar chart from ``{bucket: {group: cost}}`` data.
+
+    ``color_map`` pins each group to a hex colour by name. When supplied,
+    Plotly's palette-by-trace-order assignment is bypassed so the same
+    project (or model) renders identically across panels that have
+    different stacking orders or group subsets.
+    """
     _ensure_template()
     buckets = sorted(bucketed.keys())
     # Order groups by total descending so the largest sits at the bottom of
@@ -212,14 +252,15 @@ def _build_figure(
     fig = go.Figure()
     for group in ordered_groups:
         ys = [bucketed.get(b, {}).get(group, 0.0) for b in buckets]
-        fig.add_trace(
-            go.Bar(
-                name=group,
-                x=buckets,
-                y=ys,
-                hovertemplate=f"<b>%{{x}}</b><br>{group}: $%{{y:.2f}}<extra></extra>",
-            )
-        )
+        bar_kwargs: dict[str, Any] = {
+            "name": group,
+            "x": buckets,
+            "y": ys,
+            "hovertemplate": f"<b>%{{x}}</b><br>{group}: $%{{y:.2f}}<extra></extra>",
+        }
+        if color_map and group in color_map:
+            bar_kwargs["marker_color"] = color_map[group]
+        fig.add_trace(go.Bar(**bar_kwargs))
 
     # No legend — segment identity comes from direct annotations on top
     # groups (see ``_compute_top_group_annotations``) plus colour.
@@ -331,8 +372,15 @@ def _build_panel_context(  # noqa: PLR0913
         where_sql=where_sql,
         params=params,
     )
-    bucketed = _cap_groups(_collapse_to_breakdown(rows, bd))
-    fig = _build_figure(bucketed, breakdown=bd, x_title=x_title)
+    color_map = _canonical_color_map(db, bd)
+    bucketed = _collapse_to_breakdown(rows, bd)
+    if color_map:
+        # Fold using the canonical keep-set so the hourly view can't introduce
+        # a group name the daily view collapsed into "Other".
+        bucketed = _fold_into_other(bucketed, set(color_map))
+    else:
+        bucketed = _cap_groups(bucketed)
+    fig = _build_figure(bucketed, breakdown=bd, x_title=x_title, color_map=color_map)
     total_cost = sum(_group_totals(bucketed).values())
     base_context = {
         "chart_json": fig.to_json(),
