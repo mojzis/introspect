@@ -32,6 +32,7 @@ async def lifespan(app: FastAPI):
     jsonl_glob = os.environ.get("INTROSPECT_JSONL_GLOB", DEFAULT_JSONL_GLOB)
     days = int(os.environ.get("INTROSPECT_DAYS", "10"))
     interval = float(os.environ.get("INTROSPECT_REFRESH_INTERVAL_SECONDS", "600"))
+    refresh_window = os.environ.get("INTROSPECT_REFRESH_WINDOW", "30")
     db_path.parent.mkdir(parents=True, exist_ok=True)
     conn = connect_writable(db_path)
     resolve_projects = os.environ.get("INTROSPECT_RESOLVE_PROJECTS", "1") != "0"
@@ -41,8 +42,12 @@ async def lifespan(app: FastAPI):
     finally:
         conn.close()
 
-    # Open a shared read-only connection for request handling
-    app.state.read_conn = duckdb.connect(str(db_path), read_only=True)
+    # Persist config on app.state so middleware can open per-request connections
+    # (avoids the swap-during-query 500 caused by a shared read connection).
+    app.state.db_path = db_path
+    app.state.days = days
+    app.state.refresh_window = refresh_window
+    app.state.last_built_days = days
     app.state.last_refreshed_at = datetime.now(UTC)
     app.state.refresh_in_progress = False
     # Always set the attribute (None when disabled) so callers can check
@@ -83,7 +88,6 @@ async def lifespan(app: FastAPI):
                 refresh_task.cancel()
                 with contextlib.suppress(asyncio.CancelledError):
                     await refresh_task
-            app.state.read_conn.close()
 
 
 app = FastAPI(title="Introspect", lifespan=lifespan)
@@ -91,14 +95,14 @@ app = FastAPI(title="Introspect", lifespan=lifespan)
 
 @app.middleware("http")
 async def db_middleware(request: Request, call_next):
-    """Attach a DuckDB cursor to each request from the shared connection."""
-    read_conn = getattr(request.app.state, "read_conn", None)
-    if read_conn is not None:
-        request.state.conn = read_conn.cursor()
-    else:
-        # Fallback for tests or when lifespan hasn't run
-        db_path = getattr(request.app.state, "db_path", DEFAULT_DB_PATH)
-        request.state.conn = duckdb.connect(str(db_path))
+    """Open a fresh read-only DuckDB connection per request.
+
+    Per-request connections decouple in-flight queries from the background
+    refresh: ``_swap_in`` is now just ``os.replace`` and never closes a
+    connection out from under a live cursor.
+    """
+    db_path = getattr(request.app.state, "db_path", DEFAULT_DB_PATH)
+    request.state.conn = duckdb.connect(str(db_path), read_only=True)
     try:
         response = await call_next(request)
     finally:

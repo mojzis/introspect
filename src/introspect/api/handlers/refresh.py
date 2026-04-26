@@ -3,8 +3,8 @@
 The handler returns the ``_refresh_indicator.html`` fragment (HTMX swaps it
 into ``#refresh-state``). If auto-refresh is disabled (no trigger on
 ``app.state``), the fragment renders a muted "auto-refresh off" label. The
-rebuild still only happens when mtimes changed — the trigger just wakes the
-loop early.
+rebuild still only happens when mtimes changed (or the window changed) —
+the trigger just wakes the loop early.
 """
 
 from __future__ import annotations
@@ -16,7 +16,12 @@ from fastapi import Request
 from fastapi.responses import HTMLResponse
 
 from introspect.api.handlers._helpers import templates
-from introspect.refresh import wait_for_refresh
+from introspect.refresh import (
+    DEFAULT_WINDOW,
+    VALID_WINDOWS,
+    wait_for_refresh,
+    window_to_days,  # noqa: F401  # re-exported for back-compat / external use
+)
 
 # Poll budget for observing the background loop after setting the trigger.
 # Kept short so the HTTP response stays snappy; the indicator may show
@@ -68,6 +73,7 @@ def _render(
     disabled: bool,
     in_progress: bool,
     last_refreshed_at: datetime | None,
+    window: str,
 ) -> HTMLResponse:
     return templates.TemplateResponse(
         request,
@@ -77,8 +83,15 @@ def _render(
             "in_progress": in_progress,
             "last_refreshed_at": last_refreshed_at,
             "relative": format_relative(last_refreshed_at),
+            "window": window,
         },
     )
+
+
+def _current_window(request: Request) -> str:
+    """Read the current window token from ``app.state``, defaulting to ``"30"``."""
+    value = getattr(request.app.state, "refresh_window", DEFAULT_WINDOW)
+    return value or DEFAULT_WINDOW
 
 
 def _current_indicator(request: Request) -> HTMLResponse:
@@ -89,18 +102,21 @@ def _current_indicator(request: Request) -> HTMLResponse:
     """
     state = request.app.state
     trigger: asyncio.Event | None = state.refresh_trigger
+    window = _current_window(request)
     if trigger is None:
         return _render(
             request,
             disabled=True,
             in_progress=False,
             last_refreshed_at=None,
+            window=window,
         )
     return _render(
         request,
         disabled=False,
         in_progress=bool(state.refresh_in_progress),
         last_refreshed_at=state.last_refreshed_at,
+        window=window,
     )
 
 
@@ -114,7 +130,16 @@ async def refresh_status(request: Request) -> HTMLResponse:
 
 
 async def refresh_now(request: Request) -> HTMLResponse:
-    """POST /refresh — wake the background loop and re-render the indicator."""
+    """POST /refresh — wake the background loop and re-render the indicator.
+
+    Accepts an optional ``window`` form field. Valid values
+    (``"1" / "7" / "30" / "month"``) update ``app.state.refresh_window``;
+    invalid or missing input keeps the existing sticky choice.
+    """
+    form = await request.form()
+    submitted = form.get("window")
+    if isinstance(submitted, str) and submitted in VALID_WINDOWS:
+        request.app.state.refresh_window = submitted
     # The handler ignores the helper's outcome; it just re-renders the
     # indicator from current state. If the rebuild didn't finish inside the
     # HTTP budget, the template polls ``/refresh-status`` until it flips.

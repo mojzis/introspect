@@ -60,14 +60,12 @@ def _build_initial_db(db_path: Path, jsonl_glob: str) -> None:
         conn.close()
 
 
-def _fake_app(
-    read_conn: duckdb.DuckDBPyConnection | None = None,
-) -> types.SimpleNamespace:
+def _fake_app() -> types.SimpleNamespace:
     return types.SimpleNamespace(
         state=types.SimpleNamespace(
-            read_conn=read_conn,
             refresh_in_progress=False,
             last_refreshed_at=None,
+            last_built_days=0,
         )
     )
 
@@ -136,8 +134,7 @@ def test_refresh_rebuilds_and_swaps_on_change(tmp_path: Path) -> None:
     _write_session(tmp_path, "sess-first", subdir="proj-a")
     _build_initial_db(db_path, jsonl_glob)
 
-    read_conn = duckdb.connect(str(db_path), read_only=True)
-    app = _fake_app(read_conn)
+    app = _fake_app()
 
     async def run() -> None:
         task = asyncio.create_task(
@@ -154,7 +151,7 @@ def test_refresh_rebuilds_and_swaps_on_change(tmp_path: Path) -> None:
         try:
             # No change yet - loop should not rebuild.
             await asyncio.sleep(0.2)
-            assert app.state.read_conn is read_conn
+            assert app.state.last_refreshed_at is None
 
             # Ensure a strictly greater mtime for the new file.
             current_latest = newest_mtime(jsonl_glob)
@@ -167,9 +164,9 @@ def test_refresh_rebuilds_and_swaps_on_change(tmp_path: Path) -> None:
             # Wait long enough for at least one refresh cycle.
             for _ in range(40):
                 await asyncio.sleep(0.1)
-                if app.state.read_conn is not read_conn:
+                if app.state.last_refreshed_at is not None:
                     break
-            assert app.state.read_conn is not read_conn
+            assert app.state.last_refreshed_at is not None
         finally:
             task.cancel()
             with pytest.raises(asyncio.CancelledError):
@@ -177,15 +174,19 @@ def test_refresh_rebuilds_and_swaps_on_change(tmp_path: Path) -> None:
 
     asyncio.run(run())
 
-    session_ids = {
-        row[0]
-        for row in app.state.read_conn.execute(
-            "SELECT DISTINCT session_id FROM raw_messages"
-        ).fetchall()
-    }
+    # Open a fresh read-only connection against the post-swap inode.
+    fresh = duckdb.connect(str(db_path), read_only=True)
+    try:
+        session_ids = {
+            row[0]
+            for row in fresh.execute(
+                "SELECT DISTINCT session_id FROM raw_messages"
+            ).fetchall()
+        }
+    finally:
+        fresh.close()
     assert "sess-first" in session_ids
     assert "sess-second" in session_ids
-    app.state.read_conn.close()
 
 
 def test_refresh_survives_rebuild_error(
@@ -258,7 +259,8 @@ def test_refresh_wakes_on_trigger(tmp_path: Path) -> None:
     """Setting the trigger event should cause the loop to rebuild promptly.
 
     Interval is 10 s so a naive ``asyncio.sleep(interval)`` would never swap
-    in time; if we see the swap inside ~1.5 s, the trigger wiring works.
+    in time; if we see ``last_refreshed_at`` move inside ~5 s, the trigger
+    wiring works.
     """
     jsonl_glob = glob_pattern(tmp_path)
     db_path = tmp_path / "db.duckdb"
@@ -266,8 +268,7 @@ def test_refresh_wakes_on_trigger(tmp_path: Path) -> None:
     _write_session(tmp_path, "sess-trig-a", subdir="proj-a")
     _build_initial_db(db_path, jsonl_glob)
 
-    read_conn = duckdb.connect(str(db_path), read_only=True)
-    app = _fake_app(read_conn)
+    app = _fake_app()
     trigger = asyncio.Event()
 
     async def run() -> None:
@@ -303,16 +304,17 @@ def test_refresh_wakes_on_trigger(tmp_path: Path) -> None:
             # swap came from the trigger, not the timeout.
             for _ in range(100):
                 await asyncio.sleep(0.05)
-                if app.state.read_conn is not read_conn:
+                if app.state.last_refreshed_at is not None:
                     break
-            assert app.state.read_conn is not read_conn, "trigger did not cause a swap"
+            assert app.state.last_refreshed_at is not None, (
+                "trigger did not cause a refresh"
+            )
         finally:
             task.cancel()
             with pytest.raises(asyncio.CancelledError):
                 await task
 
     asyncio.run(run())
-    app.state.read_conn.close()
 
 
 def test_last_refreshed_at_updates_after_swap(tmp_path: Path) -> None:
@@ -325,8 +327,7 @@ def test_last_refreshed_at_updates_after_swap(tmp_path: Path) -> None:
     _write_session(tmp_path, "sess-lr-a", subdir="proj-a")
     _build_initial_db(db_path, jsonl_glob)
 
-    read_conn = duckdb.connect(str(db_path), read_only=True)
-    app = _fake_app(read_conn)
+    app = _fake_app()
     before = datetime.now(UTC)
     app.state.last_refreshed_at = before
 
@@ -355,9 +356,8 @@ def test_last_refreshed_at_updates_after_swap(tmp_path: Path) -> None:
 
             for _ in range(40):
                 await asyncio.sleep(0.1)
-                if app.state.read_conn is not read_conn:
+                if app.state.last_refreshed_at != before:
                     break
-            assert app.state.read_conn is not read_conn
             assert app.state.last_refreshed_at > before
         finally:
             task.cancel()
@@ -365,7 +365,6 @@ def test_last_refreshed_at_updates_after_swap(tmp_path: Path) -> None:
                 await task
 
     asyncio.run(run())
-    app.state.read_conn.close()
 
 
 def test_refresh_clears_in_progress_on_error(

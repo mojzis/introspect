@@ -4,9 +4,9 @@
     - as an HTMX fragment from POST /refresh and GET /refresh-status
       (uses handler-passed vars)
 
-  The handler always passes `disabled`, `in_progress`, `relative`. For the
-  base.html include path we fall back to reading request.app.state directly
-  and computing `relative` via the `format_relative` Jinja global.
+  The handler always passes `disabled`, `in_progress`, `relative`, `window`.
+  For the base.html include path we fall back to reading request.app.state
+  directly and computing `relative` via the `format_relative` Jinja global.
 
   While `in_progress` is truthy, the span self-polls GET /refresh-status so
   the "refreshing…" label flips to "Last refreshed …" once the background
@@ -17,6 +17,7 @@
 {% set _in_progress = in_progress if in_progress is defined else (_state.refresh_in_progress|default(false)) %}
 {% set _last = last_refreshed_at if last_refreshed_at is defined else _state.last_refreshed_at|default(none) %}
 {% set _relative = relative if relative is defined else format_relative(_last) %}
+{% set _window = window if window is defined else (_state.refresh_window|default("30")) %}
 <span id="refresh-state" class="refresh-indicator"
       {%- if _in_progress and not _disabled %} hx-get="/refresh-status" hx-trigger="load delay:800ms" hx-target="#refresh-state" hx-swap="outerHTML"{% endif %}>
     {% if _disabled %}
@@ -27,11 +28,27 @@
         {% else %}
             <span class="refresh-muted">Last refreshed {{ _relative }}</span>
         {% endif %}
-        <button class="refresh-btn"
-                hx-post="/refresh"
-                hx-target="#refresh-state"
-                hx-swap="outerHTML"
-                hx-disabled-elt="this"
-                {% if _in_progress %}disabled{% endif %}>Refresh now</button>
+        <form class="refresh-form"
+              hx-post="/refresh"
+              hx-target="#refresh-state"
+              hx-swap="outerHTML"
+              hx-disabled-elt="find button"
+              style="display:inline">
+            <select name="window"
+                    class="refresh-window"
+                    hx-post="/refresh"
+                    hx-target="#refresh-state"
+                    hx-swap="outerHTML"
+                    hx-trigger="change"
+                    {% if _in_progress %}disabled{% endif %}>
+                <option value="1"{% if _window == "1" %} selected{% endif %}>Today</option>
+                <option value="7"{% if _window == "7" %} selected{% endif %}>7 days</option>
+                <option value="30"{% if _window == "30" %} selected{% endif %}>30 days</option>
+                <option value="month"{% if _window == "month" %} selected{% endif %}>This month</option>
+            </select>
+            <button class="refresh-btn"
+                    type="submit"
+                    {% if _in_progress %}disabled{% endif %}>Refresh now</button>
+        </form>
     {% endif %}
 </span>
