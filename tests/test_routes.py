@@ -2539,7 +2539,12 @@ def test_cost_overview_daily_panel_embedded():
             assert "Daily breakdown" in text
             assert 'id="daily-cost-panel"' in text
             assert 'id="daily-cost-chart"' in text
-            assert "Plotly.newPlot" in text
+            # Data attributes the base.html bootstrap reads to wire the
+            # chart up — drilldown click handler + breakdown for URL.
+            assert 'class="cost-chart"' in text
+            assert 'data-figure-id="daily-cost-chart-data"' in text
+            assert 'data-on-click="hourly-drilldown"' in text
+            assert '<script type="application/json"' in text
 
         _run_with_client(tmp, _check)
 
@@ -2638,6 +2643,142 @@ def test_cost_overview_breakdown_by_model_traces():
         # claude-opus-4-7 input is $5/M, claude-sonnet-4-6 input rate
         # differs — but presence and naming is the contract under test.
         assert names == ["claude-opus-4-7", "claude-sonnet-4-6"]
+
+
+@pytest.mark.parametrize("breakdown", ["total", "model", "project"])
+def test_cost_overview_breakdown_hides_legend(breakdown):
+    """Chart never renders a legend — segment identity is in hover."""
+    from introspect.api.handlers.cost_breakdown import (  # noqa: PLC0415
+        build_daily_panel_context,
+    )
+
+    with tempfile.TemporaryDirectory() as tmp_str:
+        tmp = Path(tmp_str)
+        _cost_overview_setup(tmp, _multi_model_specs())
+        ctx = _materialize_and_run(
+            tmp, lambda c: build_daily_panel_context(c, breakdown)
+        )
+        fig = json.loads(ctx["chart_json"])
+        assert fig["layout"]["showlegend"] is False
+        if breakdown == "model":
+            # Confirms the multi-series path still produces ≥2 traces — the
+            # original regression was a legend appearing on multi-series
+            # charts, so a single-trace pass would not exercise it.
+            assert len(fig["data"]) >= 2
+
+
+@pytest.mark.parametrize("breakdown", ["total", "model", "project"])
+def test_cost_overview_breakdown_uses_closest_hovermode(breakdown):
+    """Hover label must anchor to the segment under the cursor (closest mode).
+
+    ``"x"`` and ``"x unified"`` both position relative to the plot area
+    and rendered detached from the chart in our short stacked-bar layout
+    — ``"closest"`` is the only mode that keeps the popup on the bar.
+    """
+    from introspect.api.handlers.cost_breakdown import (  # noqa: PLC0415
+        build_daily_panel_context,
+    )
+
+    with tempfile.TemporaryDirectory() as tmp_str:
+        tmp = Path(tmp_str)
+        _cost_overview_setup(tmp, _multi_model_specs())
+        ctx = _materialize_and_run(
+            tmp, lambda c: build_daily_panel_context(c, breakdown)
+        )
+        fig = json.loads(ctx["chart_json"])
+        assert fig["layout"]["hovermode"] == "closest"
+
+
+def test_compute_top_group_annotations_skips_below_threshold():
+    """Groups under LABEL_MIN_SHARE are not annotated."""
+    from introspect.api.handlers.cost_breakdown import (  # noqa: PLC0415
+        LABEL_MIN_SHARE,
+        _compute_top_group_annotations,
+    )
+
+    # "tiny" sits at ~1% of the grand total — well under the 4% threshold.
+    bucketed = {
+        "2026-04-09": {"big": 100.0, "tiny": 1.0},
+        "2026-04-10": {"big": 80.0, "tiny": 0.5},
+    }
+    ordered = ["big", "tiny"]
+    grand_total = sum(sum(g.values()) for g in bucketed.values())
+    assert 1.0 / grand_total < LABEL_MIN_SHARE  # sanity: fixture below threshold
+
+    anns = _compute_top_group_annotations(bucketed, ordered_groups=ordered)
+    labels = {a["text"] for a in anns}
+    assert labels == {"big"}
+
+
+def test_compute_top_group_annotations_caps_at_top_n():
+    """At most LABEL_TOP_N groups get direct labels."""
+    from introspect.api.handlers.cost_breakdown import (  # noqa: PLC0415
+        LABEL_TOP_N,
+        _compute_top_group_annotations,
+    )
+
+    # Six equal-sized groups, all above the share threshold (≈16.7% each).
+    groups = [f"g{i}" for i in range(6)]
+    bucketed = {"2026-04-09": dict.fromkeys(groups, 10.0)}
+    anns = _compute_top_group_annotations(bucketed, ordered_groups=groups)
+    assert len(anns) == LABEL_TOP_N
+    assert {a["text"] for a in anns} == set(groups[:LABEL_TOP_N])
+
+
+def test_compute_top_group_annotations_centre_y_matches_stack_offset():
+    """Centre-y of a labelled segment equals cumulative-below + value/2."""
+    from introspect.api.handlers.cost_breakdown import (  # noqa: PLC0415
+        _compute_top_group_annotations,
+    )
+
+    # ordered_groups = ["a", "b", "c"]: stack is a (bottom) → b → c (top).
+    # On 2026-04-10 the values are a=10, b=20, c=5; "b" peaks here, so its
+    # centre is at 10 + 20/2 = 20.
+    bucketed = {
+        "2026-04-09": {"a": 50.0, "b": 5.0, "c": 1.0},
+        "2026-04-10": {"a": 10.0, "b": 20.0, "c": 5.0},
+    }
+    anns = _compute_top_group_annotations(bucketed, ordered_groups=["a", "b", "c"])
+    by_group = {a["text"]: a for a in anns}
+    assert by_group["b"]["x"] == "2026-04-10"
+    assert by_group["b"]["y"] == 20.0
+
+
+def test_cost_overview_breakdown_annotates_top_groups():
+    """Multi-series chart direct-labels the top groups at their peak bucket."""
+    from introspect.api.handlers.cost_breakdown import (  # noqa: PLC0415
+        build_daily_panel_context,
+    )
+
+    with tempfile.TemporaryDirectory() as tmp_str:
+        tmp = Path(tmp_str)
+        _cost_overview_setup(tmp, _multi_model_specs())
+        ctx = _materialize_and_run(tmp, lambda c: build_daily_panel_context(c, "model"))
+        fig = json.loads(ctx["chart_json"])
+        annotations = fig["layout"].get("annotations") or []
+        # Filter to annotations pinned to data coordinates — these are the
+        # group labels we add (the tufte template's annotation defaults
+        # don't add any of their own).
+        labels = {ann.get("text") for ann in annotations if ann.get("xref") == "x"}
+        # Both fixture models exceed the 4% share threshold so both must
+        # appear as direct labels.
+        assert {"claude-opus-4-7", "claude-sonnet-4-6"} <= labels
+
+
+def test_cost_overview_breakdown_total_has_no_annotations():
+    """Single-series chart adds no group labels (nothing to direct-label)."""
+    from introspect.api.handlers.cost_breakdown import (  # noqa: PLC0415
+        build_daily_panel_context,
+    )
+
+    with tempfile.TemporaryDirectory() as tmp_str:
+        tmp = Path(tmp_str)
+        _cost_overview_setup(tmp, _multi_day_specs())
+        ctx = _materialize_and_run(tmp, lambda c: build_daily_panel_context(c, "total"))
+        fig = json.loads(ctx["chart_json"])
+        annotations = fig["layout"].get("annotations") or []
+        labelled = [ann for ann in annotations if ann.get("xref") == "x"]
+        assert labelled == []
 
 
 def test_cost_overview_breakdown_invalid_falls_back_to_total():

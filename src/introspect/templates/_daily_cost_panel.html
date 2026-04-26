@@ -1,14 +1,15 @@
 {# Daily-cost panel fragment.
 
-   Targeted by HTMX swaps when the breakdown selector changes, so this
-   template is rendered standalone (no {% extends %}). The wrapping <div>
-   is what HTMX replaces; the <script> below executes on every swap and
-   re-binds the click handler to the freshly-injected chart div.
+   Targeted by HTMX swaps when the breakdown selector changes. The
+   wrapping <div> is what HTMX replaces; the chart inside is initialised
+   by the bootstrap script in base.html (which listens for
+   ``htmx:afterSettle``), keyed off the ``.cost-chart`` class and
+   ``data-figure-id`` attribute. No executable JS in this fragment — that
+   way the swap can't fire chart init mid-settle.
 
    The Plotly figure JSON is delivered through a non-executing
-   <script type="application/json"> tag — that way a literal "</script>"
-   inside any future trace name (e.g. a project string) can't break out
-   of the surrounding inline script.
+   <script type="application/json"> tag — a literal "</script>" inside a
+   future trace name can't break out of an outer script.
 #}
 <div id="daily-cost-panel">
     <div class="filter-bar" style="margin-bottom:0.6rem;">
@@ -27,26 +28,17 @@
     </div>
 
     {% if has_data %}
-    <div id="daily-cost-chart" style="width:100%;min-height:360px;"></div>
+    <div id="daily-cost-chart"
+         class="cost-chart"
+         style="width:100%;min-height:360px;"
+         data-figure-id="daily-cost-chart-data"
+         data-height="360"
+         data-breakdown="{{ breakdown }}"
+         data-on-click="hourly-drilldown"></div>
     <p style="color:#888;font-size:0.78rem;margin-top:0.3rem;">
         Tip: click any bar to drill into hourly cost for that day.
     </p>
     <script type="application/json" id="daily-cost-chart-data">{{ chart_json|safe }}</script>
-    <script>
-    (function () {
-        var raw = document.getElementById('daily-cost-chart-data').textContent;
-        var fig = JSON.parse(raw);
-        var el = document.getElementById('daily-cost-chart');
-        Plotly.newPlot(el, fig.data, fig.layout, {responsive: true, displaylogo: false}).then(function () {
-            el.on('plotly_click', function (evt) {
-                if (!evt || !evt.points || !evt.points.length) return;
-                var day = evt.points[0].x;
-                var url = '/cost-overview/breakdown/' + encodeURIComponent(day) + '?breakdown=' + encodeURIComponent({{ breakdown|tojson }});
-                htmx.ajax('GET', url, {target: '#hourly-cost-panel', swap: 'innerHTML'});
-            });
-        });
-    })();
-    </script>
     {% else %}
     <p>No cost data yet.</p>
     {% endif %}

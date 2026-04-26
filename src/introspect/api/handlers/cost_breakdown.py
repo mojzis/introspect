@@ -34,12 +34,23 @@ from ._helpers import conn, format_cost, parent, templates
 ALLOWED_BREAKDOWNS: tuple[str, ...] = ("total", "model", "project")
 DEFAULT_BREAKDOWN = "total"
 
-# Hard ceiling on traces per chart. Stacked bars stop adding meaning past
-# 8-ish series; the long tail is folded into "Other" so the legend stays
-# readable. Setting MAX_GROUPS = N means at most ``N - 1`` real groups
-# plus an "Other" trace once the tail kicks in (so the rendered legend is
-# never larger than ``MAX_GROUPS``).
+# --- Chart visual contract ---------------------------------------------
+# Hard ceiling on traces per chart. Stacked bars stop conveying segment
+# identity past ~8 colours (identity is delivered through the
+# hovertemplate, since the chart has no legend), and the tufte palette
+# runs out of perceptually distinct hues around the same point. The long
+# tail is folded into "Other" so any bucket has at most ``MAX_GROUPS``
+# distinct stacks.
 MAX_GROUPS = 8
+
+# Direct-label at most this many groups so the labels themselves stay
+# uncluttered — the rest are still distinguishable by colour and hover.
+LABEL_TOP_N = 4
+
+# Skip annotating segments smaller than this fraction of the chart's
+# grand total. Tiny labels with arrows sticking into bigger neighbours
+# look noisy and don't help identification.
+LABEL_MIN_SHARE = 0.04
 
 # Single-element list lets us flip the flag without a ``global`` statement
 # (and without exposing a settable module attribute).
@@ -186,7 +197,6 @@ def _build_figure(
     bucketed: dict[str, dict[str, float]],
     *,
     breakdown: str,
-    title: str,
     x_title: str,
 ) -> go.Figure:
     """Build a stacked bar chart from ``{bucket: {group: cost}}`` data."""
@@ -198,6 +208,7 @@ def _build_figure(
         g for g, _ in sorted(_group_totals(bucketed).items(), key=lambda kv: -kv[1])
     ]
 
+    multi_series = breakdown != "total"
     fig = go.Figure()
     for group in ordered_groups:
         ys = [bucketed.get(b, {}).get(group, 0.0) for b in buckets]
@@ -206,22 +217,97 @@ def _build_figure(
                 name=group,
                 x=buckets,
                 y=ys,
-                hovertemplate=(f"<b>%{{x}}</b><br>{group}: $%{{y:.2f}}<extra></extra>"),
+                hovertemplate=f"<b>%{{x}}</b><br>{group}: $%{{y:.2f}}<extra></extra>",
             )
         )
 
-    multi_series = breakdown != "total"
+    # No legend — segment identity comes from direct annotations on top
+    # groups (see ``_compute_top_group_annotations``) plus colour.
+    # ``hovermode="closest"`` is the only mode whose tooltip is anchored
+    # to the segment under the cursor; ``"x"`` and ``"x unified"`` both
+    # position relative to the plot area (not the cursor) and rendered
+    # detached from short stacked-bar charts in practice.
+    # No internal title — the surrounding card already has a ``<h2>``,
+    # and the redundant in-chart title pushed the plot area down enough
+    # to throw off hover hit-testing on the bottom row of bars.
     fig.update_layout(
         template="tufte",
-        title=title,
         barmode="stack" if multi_series else "group",
-        showlegend=multi_series,
+        showlegend=False,
+        hovermode="closest",
         xaxis_title=x_title,
         yaxis_title="USD",
         height=360,
-        margin={"l": 60, "r": 30, "t": 50, "b": 60},
+        margin={"l": 60, "r": 30, "t": 20, "b": 60},
     )
+    if multi_series:
+        annotations = _compute_top_group_annotations(
+            bucketed, ordered_groups=ordered_groups
+        )
+        for ann in annotations:
+            fig.add_annotation(**ann)
     return fig
+
+
+def _compute_top_group_annotations(
+    bucketed: dict[str, dict[str, float]],
+    *,
+    ordered_groups: list[str],
+) -> list[dict[str, Any]]:
+    """Build annotation kwargs for the top groups' peak segments.
+
+    Pure helper — returns the list of ``add_annotation`` kwargs so the
+    placement arithmetic (peak bucket, cumulative-below offset, segment
+    centre) is unit-testable without parsing a Plotly figure.
+
+    ``ordered_groups`` must match the trace stacking order in
+    :func:`_build_figure` (largest total first → bottom of stack), so
+    the cumulative offsets here line up with the rendered stacks.
+    """
+    totals = _group_totals(bucketed)
+    grand_total = sum(totals.values())
+    if grand_total <= 0:
+        return []
+    label_threshold = grand_total * LABEL_MIN_SHARE
+    top_groups = ordered_groups[:LABEL_TOP_N]
+
+    out: list[dict[str, Any]] = []
+    for group in top_groups:
+        peak_bucket, peak_value, bucket_groups = max(
+            ((b, g.get(group, 0.0), g) for b, g in bucketed.items()),
+            key=lambda bvg: bvg[1],
+        )
+        if peak_value < label_threshold:
+            continue
+        # Cumulative height of stacked segments below this one — matches
+        # the trace add-order in _build_figure (bottom-to-top by total).
+        below = 0.0
+        for og in ordered_groups:
+            if og == group:
+                break
+            below += bucket_groups.get(og, 0.0)
+        center_y = below + peak_value / 2
+        # Plain in-segment label — no arrow. The arrowed variant rendered
+        # detached from the chart in some layouts (likely a tufte-template
+        # / stacked-bar / showarrow quirk we couldn't pin down). Pinning
+        # the label to the segment centre with ``showarrow=False`` removes
+        # the offset / axref / ayref machinery entirely.
+        out.append(
+            {
+                "x": peak_bucket,
+                "y": center_y,
+                "xref": "x",
+                "yref": "y",
+                "xanchor": "center",
+                "yanchor": "middle",
+                "text": group,
+                "showarrow": False,
+                "font": {"size": 10, "color": "#ffffff"},
+                "bgcolor": "rgba(0,0,0,0.45)",
+                "borderpad": 3,
+            }
+        )
+    return out
 
 
 def _build_panel_context(  # noqa: PLR0913
@@ -229,7 +315,6 @@ def _build_panel_context(  # noqa: PLR0913
     *,
     breakdown: str,
     bucket_expr: str,
-    title: str,
     x_title: str,
     where_sql: str = "",
     params: tuple[Any, ...] = (),
@@ -247,7 +332,7 @@ def _build_panel_context(  # noqa: PLR0913
         params=params,
     )
     bucketed = _cap_groups(_collapse_to_breakdown(rows, bd))
-    fig = _build_figure(bucketed, breakdown=bd, title=title, x_title=x_title)
+    fig = _build_figure(bucketed, breakdown=bd, x_title=x_title)
     total_cost = sum(_group_totals(bucketed).values())
     base_context = {
         "chart_json": fig.to_json(),
@@ -271,7 +356,6 @@ def build_daily_panel_context(
         db,
         breakdown=breakdown,
         bucket_expr="CAST(timestamp AS DATE)",
-        title="Cost per day",
         x_title="Day",
     )
     base["breakdown_options"] = list(ALLOWED_BREAKDOWNS)
@@ -289,7 +373,6 @@ def _build_hourly_panel_context(
         db,
         breakdown=breakdown,
         bucket_expr="strftime(date_trunc('hour', timestamp::TIMESTAMP), '%H:00')",
-        title=f"Cost per hour — {day_str}",
         x_title="Hour (UTC)",
         where_sql="WHERE CAST(timestamp AS DATE) = ?",
         params=(day_str,),
