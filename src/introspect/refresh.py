@@ -37,9 +37,11 @@ def window_to_days(window: str) -> int:
     """Convert a window token to a positive ``days`` value for ``materialize_views``.
 
     * ``"1"`` / ``"7"`` / ``"30"`` -> the literal int.
-    * ``"month"`` -> days since the first of the current calendar month
-      (inclusive of today). On the 1st returns ``1``.
-    * Anything else -> ``30`` (defensive; the handler pre-validates input).
+    * ``"month"`` -> days since the first of the current UTC calendar month
+      (inclusive of today). On the 1st returns ``1``. UTC matches the
+      timezone used by ``materialize_views``' day filter.
+    * Anything else -> the ``DEFAULT_WINDOW`` days value (defensive; the
+      handler and lifespan both pre-validate input).
     """
     if window in _FIXED_WINDOW_DAYS:
         return _FIXED_WINDOW_DAYS[window]
@@ -176,11 +178,13 @@ def _swap_in(db_path: Path, sidecar: Path) -> None:
 def _compute_days(state: RefreshState, default: int) -> int:
     """Resolve the days-window value from ``state.refresh_window``.
 
-    Falls back to ``default`` if the state attribute is missing or the token
-    isn't recognised.
+    Falls back to ``default`` only when the state attribute is missing
+    entirely. An invalid token is delegated to :func:`window_to_days`, which
+    returns the ``DEFAULT_WINDOW`` days value — matching the lifespan's
+    invalid-env fallback so the two code paths agree.
     """
     window = getattr(state, "refresh_window", None)
-    if not isinstance(window, str) or window not in VALID_WINDOWS:
+    if not isinstance(window, str):
         return default
     return window_to_days(window)
 
@@ -240,8 +244,12 @@ async def refresh_loop(  # noqa: PLR0913
                     resolve_projects,
                 )
                 await asyncio.to_thread(_swap_in, db_path, sidecar)
-                app.state.last_refreshed_at = datetime.now(UTC)
+                # Record the post-swap window first so a freak exception on
+                # the timestamp assignment can't leave state thinking the DB
+                # still holds the previous window's data and force a needless
+                # rebuild on the next tick.
                 app.state.last_built_days = current_days
+                app.state.last_refreshed_at = datetime.now(UTC)
             finally:
                 app.state.refresh_in_progress = False
             last_mtime = current

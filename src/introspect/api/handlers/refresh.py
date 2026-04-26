@@ -20,7 +20,6 @@ from introspect.refresh import (
     DEFAULT_WINDOW,
     VALID_WINDOWS,
     wait_for_refresh,
-    window_to_days,  # noqa: F401  # re-exported for back-compat / external use
 )
 
 # Poll budget for observing the background loop after setting the trigger.
