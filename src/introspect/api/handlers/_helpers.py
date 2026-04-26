@@ -25,22 +25,22 @@ templates = Jinja2Templates(directory=str(TEMPLATE_DIR))
 SESSIONS_PER_PAGE_DEFAULT = 50
 SESSIONS_PAGE_SIZES = [25, 50, 100, 200]
 
-# Allowed sort columns for sessions page
+# Allowed sort columns for sessions page (resolved against session_stats ss).
 SESSIONS_SORT_COLS = {
-    "started_at": "ls.started_at",
-    "duration": "ls.duration",
-    "user_msgs": "ls.user_messages",
-    "asst_msgs": "ls.assistant_messages",
-    "tool_calls": "tc.tool_count",
-    "model": "ls.model",
-    "project": "ls.project",
-    "branch": "ls.git_branch",
-    "title": "fp.first_prompt",
-    "files_read": "fr_agg.files_read",
-    "files_edited": "fw_agg.files_edited",
-    "files_read_only": "fr_agg.files_read_only",
-    "files_outside": "fr_agg.files_outside",
-    "cost": "sc.cost_usd",
+    "started_at": "ss.started_at",
+    "duration": "ss.duration",
+    "user_msgs": "ss.user_messages",
+    "asst_msgs": "ss.assistant_messages",
+    "tool_calls": "ss.tool_count",
+    "model": "ss.model",
+    "project": "ss.project",
+    "branch": "ss.git_branch",
+    "title": "ss.first_prompt",
+    "files_read": "ss.files_read",
+    "files_edited": "ss.files_edited",
+    "files_read_only": "ss.files_read_only",
+    "files_outside": "ss.files_outside",
+    "cost": "ss.cost_usd",
 }
 SESSIONS_SORT_DEFAULT = "started_at"
 
@@ -285,35 +285,31 @@ def format_duration(total_seconds: float) -> str:
     return f"{secs // 60}:{secs % 60:02d}"
 
 
-# Columns selected by SESSION_INFO_SELECT (positional).
+# Columns selected by SESSION_INFO_SELECT (positional, resolved against
+# the ``session_stats ss`` rollup table/view).
 SESSION_INFO_SELECT = """
-    ls.session_id,
-    ls.started_at,
-    ls.ended_at,
-    ls.duration,
-    ls.user_messages,
-    ls.assistant_messages,
-    ls.model,
-    ls.project,
-    ls.git_branch,
-    fp.first_prompt,
-    COALESCE(tc.tool_count, 0) AS tool_count,
-    COALESCE(fr_agg.files_read, 0) AS files_read,
-    COALESCE(fw_agg.files_edited, 0) AS files_edited,
-    COALESCE(fr_agg.files_read_only, 0) AS files_read_only,
-    COALESCE(fr_agg.files_outside, 0) AS files_outside,
-    cmd.commands,
-    sc.cost_usd
+    ss.session_id,
+    ss.started_at,
+    ss.ended_at,
+    ss.duration,
+    ss.user_messages,
+    ss.assistant_messages,
+    ss.model,
+    ss.project,
+    ss.git_branch,
+    ss.first_prompt,
+    ss.tool_count,
+    ss.files_read,
+    ss.files_edited,
+    ss.files_read_only,
+    ss.files_outside,
+    ss.commands,
+    ss.cost_usd
 """
 
-SESSION_INFO_JOINS = f"""
-    LEFT JOIN session_titles fp ON ls.session_id = fp.session_id
-    LEFT JOIN {TOOL_COUNTS_SUBQUERY} ON ls.session_id = tc.session_id
-    LEFT JOIN {FILE_READS_SUBQUERY} ON ls.session_id = fr_agg.session_id
-    LEFT JOIN {FILE_WRITES_SUBQUERY} ON ls.session_id = fw_agg.session_id
-    LEFT JOIN {COMMAND_LIST_SUBQUERY} ON ls.session_id = cmd.session_id
-    LEFT JOIN {SESSION_COST_SUBQUERY} ON ls.session_id = sc.session_id
-"""
+# All per-session aggregates already live in ``session_stats``; no further
+# joins are needed for the listing query.
+SESSION_INFO_JOINS = ""
 
 _EMPTY_SESSION_INFO: dict[str, object] = {
     "date": "",

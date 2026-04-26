@@ -37,9 +37,9 @@ async def search(request: Request, q: str, page: int = 1) -> HTMLResponse:
             rows = db.execute(
                 f"""
                 SELECT {SESSION_INFO_SELECT}
-                FROM logical_sessions ls
+                FROM session_stats ss
                 {SESSION_INFO_JOINS}
-                WHERE ls.session_id IN ({placeholders})
+                WHERE ss.session_id IN ({placeholders})
             """,  # noqa: S608
                 session_ids,
             ).fetchall()

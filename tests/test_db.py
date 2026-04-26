@@ -85,7 +85,7 @@ def _write_sample_jsonl(tmp_dir: Path) -> Path:
 
 
 def test_views_created():
-    """Test that all views are created successfully."""
+    """Test that all derived names exist (as VIEW or BASE TABLE)."""
     with tempfile.TemporaryDirectory() as tmp:
         tmp_path = Path(tmp)
         _write_sample_jsonl(tmp_path)
@@ -94,17 +94,20 @@ def test_views_created():
         glob_pat = glob_pattern(tmp_path)
         conn = get_connection(db_path, glob_pat)
 
-        # Check views exist
-        views = conn.execute("""
+        # The lazy / materialized paths back these names with different
+        # storage types (VIEW vs BASE TABLE); the test only cares that the
+        # query target exists.
+        names = conn.execute("""
             SELECT table_name FROM information_schema.tables
-            WHERE table_type = 'VIEW'
+            WHERE table_type IN ('VIEW', 'BASE TABLE')
         """).fetchall()
-        view_names = {v[0] for v in views}
-        assert "raw_messages" in view_names
-        assert "logical_sessions" in view_names
-        assert "tool_calls" in view_names
-        assert "conversation_turns" in view_names
-        assert "session_titles" in view_names
+        present = {n[0] for n in names}
+        assert "raw_messages" in present
+        assert "logical_sessions" in present
+        assert "tool_calls" in present
+        assert "conversation_turns" in present
+        assert "session_titles" in present
+        assert "session_stats" in present
         conn.close()
 
 
