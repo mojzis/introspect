@@ -70,6 +70,7 @@ async def lifespan(app: FastAPI):
     app.state.last_built_days = days
     app.state.last_refreshed_at = datetime.now(UTC)
     app.state.refresh_in_progress = False
+    app.state.refresh_started_at = None
     # Always set the attribute (None when disabled) so callers can check
     # ``state.refresh_trigger is None`` instead of falling back to ``getattr``.
     app.state.refresh_trigger = None

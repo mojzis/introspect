@@ -5,6 +5,7 @@ import json
 import os
 import re
 import tempfile
+import time
 from contextlib import contextmanager
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
@@ -2909,6 +2910,111 @@ def test_refresh_status_includes_picker():
             ):
                 if hasattr(app.state, attr):
                     delattr(app.state, attr)
+
+
+def test_post_refresh_returns_immediately_without_waiting():
+    """POST /refresh must not block waiting for the rebuild to finish.
+
+    Sets the trigger and returns the current indicator state in one shot —
+    the polling fragment is responsible for catching completion. Asserts the
+    response arrives well under the old 3-second wait budget even with the
+    in-progress flag stuck on.
+    """
+    with tempfile.TemporaryDirectory() as tmp, _patched_client(Path(tmp)) as client:
+        trigger = asyncio.Event()
+        app.state.refresh_trigger = trigger
+        app.state.refresh_in_progress = True  # Loop "stuck" — handler must not wait.
+        app.state.last_refreshed_at = datetime.now(UTC)
+        app.state.refresh_started_at = datetime.now(UTC)
+        try:
+            start = time.monotonic()
+            response = client.post("/refresh")
+            elapsed = time.monotonic() - start
+            assert response.status_code == 200
+            assert elapsed < 0.5, f"POST /refresh blocked for {elapsed:.2f}s"
+            assert trigger.is_set()
+            assert "refreshing" in response.text
+        finally:
+            for attr in (
+                "refresh_trigger",
+                "refresh_in_progress",
+                "last_refreshed_at",
+                "refresh_started_at",
+            ):
+                if hasattr(app.state, attr):
+                    delattr(app.state, attr)
+
+
+def test_refresh_status_poll_delay_tightens_with_elapsed_time():
+    """The hx-trigger delay shrinks (3s → 500ms) as the rebuild runs longer."""
+    with tempfile.TemporaryDirectory() as tmp, _patched_client(Path(tmp)) as client:
+        app.state.refresh_trigger = asyncio.Event()
+        app.state.refresh_in_progress = True
+        app.state.last_refreshed_at = datetime.now(UTC)
+        try:
+            for elapsed_seconds, expected_ms in (
+                (0.0, 3000),
+                (3.0, 2000),
+                (5.0, 1000),
+                (10.0, 500),
+            ):
+                app.state.refresh_started_at = datetime.now(UTC) - timedelta(
+                    seconds=elapsed_seconds,
+                )
+                response = client.get("/refresh-status")
+                assert response.status_code == 200
+                assert f"load delay:{expected_ms}ms" in response.text, (
+                    f"expected {expected_ms}ms delay at elapsed={elapsed_seconds}s, "
+                    f"got: {response.text}"
+                )
+        finally:
+            for attr in (
+                "refresh_trigger",
+                "refresh_in_progress",
+                "last_refreshed_at",
+                "refresh_started_at",
+            ):
+                if hasattr(app.state, attr):
+                    delattr(app.state, attr)
+
+
+def test_refresh_status_shows_completion_flash():
+    """Polled status flipping to done with a fresh timestamp renders the ✓ flash."""
+    with tempfile.TemporaryDirectory() as tmp, _patched_client(Path(tmp)) as client:
+        app.state.refresh_trigger = asyncio.Event()
+        app.state.refresh_in_progress = False
+        app.state.last_refreshed_at = datetime.now(UTC)
+        app.state.refresh_started_at = datetime.now(UTC) - timedelta(seconds=2)
+        try:
+            response = client.get("/refresh-status")
+            assert response.status_code == 200
+            assert "refresh-flash" in response.text
+            assert "refreshed" in response.text
+            # Polling stops once the flash is shown — no load-delay trigger remains.
+            # (The window picker still has hx-trigger="change", which is unrelated.)
+            assert "load delay:" not in response.text
+        finally:
+            for attr in (
+                "refresh_trigger",
+                "refresh_in_progress",
+                "last_refreshed_at",
+                "refresh_started_at",
+            ):
+                if hasattr(app.state, attr):
+                    delattr(app.state, attr)
+
+
+def test_base_html_include_does_not_render_flash():
+    """A normal page render (not a polling response) must not trigger the flash."""
+    with tempfile.TemporaryDirectory() as tmp, _patched_client(Path(tmp)) as client:
+        # Even with a brand-new last_refreshed_at, the base.html include path
+        # has notify undefined and must default to no flash. The CSS class
+        # name itself appears in the <style> block — check for the rendered
+        # span and the literal "refreshed" label instead.
+        response = client.get("/")
+        assert response.status_code == 200
+        assert 'class="refresh-flash"' not in response.text
+        assert "&check; refreshed" not in response.text
 
 
 def test_window_to_days_month(monkeypatch):

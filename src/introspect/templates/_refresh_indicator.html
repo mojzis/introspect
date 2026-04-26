@@ -18,13 +18,17 @@
 {% set _last = last_refreshed_at if last_refreshed_at is defined else _state.last_refreshed_at|default(none) %}
 {% set _relative = relative if relative is defined else format_relative(_last) %}
 {% set _window = window if window is defined else (_state.refresh_window|default("30")) %}
+{% set _poll_delay_ms = poll_delay_ms if poll_delay_ms is defined else 1000 %}
+{% set _notify = notify if notify is defined else false %}
 <span id="refresh-state" class="refresh-indicator"
-      {%- if _in_progress and not _disabled %} hx-get="/refresh-status" hx-trigger="load delay:800ms" hx-target="#refresh-state" hx-swap="outerHTML"{% endif %}>
+      {%- if _in_progress and not _disabled %} hx-get="/refresh-status" hx-trigger="load delay:{{ _poll_delay_ms }}ms" hx-target="#refresh-state" hx-swap="outerHTML"{% endif %}>
     {% if _disabled %}
         <span class="refresh-muted">auto-refresh off</span>
     {% else %}
         {% if _in_progress %}
             <span class="refresh-muted">refreshing&hellip;</span>
+        {% elif _notify %}
+            <span class="refresh-flash">&check; refreshed</span>
         {% else %}
             <span class="refresh-muted">Last refreshed {{ _relative }}</span>
         {% endif %}

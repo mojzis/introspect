@@ -59,6 +59,7 @@ class RefreshState(Protocol):
 
     refresh_trigger: asyncio.Event | None
     refresh_in_progress: bool
+    refresh_started_at: datetime | None
     last_refreshed_at: datetime | None
     refresh_window: str
     last_built_days: int
@@ -230,10 +231,21 @@ async def refresh_loop(  # noqa: PLR0913
             current_days = _compute_days(app.state, days)
             # Skip when nothing changed AND the window matches the last build.
             # A manual wake with a new window forces a rebuild even on an
-            # idle filesystem.
+            # idle filesystem. The handler may have optimistically flipped
+            # ``refresh_in_progress`` true on POST so the polling fragment
+            # always starts; clear it here so a no-op tick doesn't leave the
+            # indicator polling forever.
             if current <= last_mtime and not _window_changed(app.state, current_days):
+                # The handler may have optimistically flipped these true on
+                # POST so the polling fragment always starts. Clear them on
+                # a no-op tick so the indicator doesn't poll forever.
+                # last_refreshed_at intentionally stays put — nothing was
+                # refreshed, so the UI honestly reverts to the prior value.
+                app.state.refresh_in_progress = False
+                app.state.refresh_started_at = None
                 continue
             log.info("JSONL changed; rebuilding materialized DB")
+            app.state.refresh_started_at = datetime.now(UTC)
             app.state.refresh_in_progress = True
             try:
                 await asyncio.to_thread(
@@ -252,6 +264,7 @@ async def refresh_loop(  # noqa: PLR0913
                 app.state.last_refreshed_at = datetime.now(UTC)
             finally:
                 app.state.refresh_in_progress = False
+                app.state.refresh_started_at = None
             last_mtime = current
             log.info("refresh complete")
         except asyncio.CancelledError:
