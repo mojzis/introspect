@@ -2844,6 +2844,64 @@ def test_cost_overview_hourly_invalid_day_returns_400():
         _run_with_client(tmp, _check)
 
 
+def test_hourly_chart_colors_match_daily_chart():
+    """Each group's bar color must match between the daily and hourly panels.
+
+    Otherwise a project blue in the monthly bar can render as orange (or
+    fold differently) when the user drills into its day, which is visually
+    disorienting because the colour-to-identity mapping silently flips.
+    """
+    from introspect.api.handlers.cost_breakdown import (  # noqa: PLC0415
+        _build_hourly_panel_context,
+        build_daily_panel_context,
+    )
+
+    with tempfile.TemporaryDirectory() as tmp_str:
+        tmp = Path(tmp_str)
+        _cost_overview_setup(tmp, _multi_model_specs())
+
+        def _both(c):
+            return (
+                build_daily_panel_context(c, "model"),
+                _build_hourly_panel_context(c, "2026-04-21", "model"),
+            )
+
+        daily_ctx, hourly_ctx = _materialize_and_run(tmp, _both)
+        daily_fig = json.loads(daily_ctx["chart_json"])
+        hourly_fig = json.loads(hourly_ctx["chart_json"])
+
+        daily_colors = {
+            trace["name"]: trace.get("marker", {}).get("color")
+            for trace in daily_fig["data"]
+        }
+        hourly_colors = {
+            trace["name"]: trace.get("marker", {}).get("color")
+            for trace in hourly_fig["data"]
+        }
+        # Multi-series sanity: at least two groups, otherwise a same-colour
+        # accident would still pass.
+        assert len(daily_colors) >= 2
+        assert len(hourly_colors) >= 2
+        for group, color in hourly_colors.items():
+            assert color is not None, f"{group} has no pinned colour"
+            assert color == daily_colors[group], (
+                f"{group}: daily={daily_colors[group]!r} hourly={color!r}"
+            )
+
+
+def test_canonical_color_map_returns_empty_for_total():
+    """Single-series 'total' breakdown needs no map — Plotly's default suffices."""
+    from introspect.api.handlers.cost_breakdown import (  # noqa: PLC0415
+        _canonical_color_map,
+    )
+
+    with tempfile.TemporaryDirectory() as tmp_str:
+        tmp = Path(tmp_str)
+        _cost_overview_setup(tmp, _multi_day_specs())
+        result = _materialize_and_run(tmp, lambda c: _canonical_color_map(c, "total"))
+        assert result == {}
+
+
 def test_cost_breakdown_collapses_groups_above_cap():
     """The MAX_GROUPS cap merges the long tail into an "Other" bucket."""
     from introspect.api.handlers.cost_breakdown import (  # noqa: PLC0415
