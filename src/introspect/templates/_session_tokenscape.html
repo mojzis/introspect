@@ -7,14 +7,14 @@
 <div class="card">
     <h2>Where the cost went · session tokenscape</h2>
     <p style="color:#666;margin:0 0 0.6rem;">
-        Each band is one piece of context (a file read, a user message, the system prompt) drawn from the turn it arrived to the turn it was discarded. Width = persistence; height = its share of that turn's input tokens. Bars sum to <code>input_tokens + cache_read_tokens</code> from the API. Vertical lines mark cache events: <strong style="color:#666;">/compact</strong> truncates history, <strong style="color:#a08000;">5m gap</strong> rebuilds the cache (same content, billed again).
+        Each rectangle is one piece of context — a file read, a user message, the system prompt — drawn from the turn it arrived to the turn it was discarded. <strong>Area = cost</strong>: width is how many turns it persisted, height is its share of that turn's input tokens. Long-lived big reads dominate the bill. Vertical markers: <strong style="color:#555;">/compact</strong> truncates history; <strong style="color:#a08000;">5m gap</strong> rebuilds the cache (same content, billed again).
     </p>
     <div id="session-tokenscape-chart"
          class="cost-chart"
          data-figure-id="session-tokenscape-data"
          data-modebar="hover"
-         data-height="440"
-         style="width:100%;min-height:440px;"></div>
+         data-height="500"
+         style="width:100%;min-height:500px;"></div>
     <script type="application/json" id="session-tokenscape-data">{{ tokenscape_ctx.figure_json|safe }}</script>
     <p style="color:#888;margin:0.6rem 0 0;font-size:0.85rem;">
         {{ tokenscape_ctx.turn_count }} assistant turns

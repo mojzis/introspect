@@ -1882,9 +1882,9 @@ def test_session_tokenscape_tab_streamgraph_shape():
         assert response.status_code == 200
         text = response.text
         assert 'id="session-tokenscape-data"' in text
-        # Streamgraph uses Scatter with stackgroup="one" — assert on the
-        # serialised stackgroup so a regression to bars stands out.
-        assert '"stackgroup": "one"' in text or '"stackgroup":"one"' in text
+        # Stacked-bar layout — assert on barmode so a regression to
+        # area/streamgraph stands out.
+        assert '"barmode": "stack"' in text or '"barmode":"stack"' in text
 
 
 def test_tokenscape_classify():

@@ -1679,21 +1679,27 @@ def _build_chart_from_attrib(
 # * /compact — total context drops sharply, history collapses into a
 #   summary. Bands reset.
 
-_TOKENSCAPE_TOP_READS = 5
-# Colour family for tool_result bands. The most expensive read gets
-# the brightest coral; lesser reads fade through into a muted grey.
-_TOKENSCAPE_READ_COLORS = (
-    "#e3a08c",
-    "#e9b3a3",
-    "#eec5b9",
-    "#f1d3ca",
-    "#e6d7d0",
-)
-_TOKENSCAPE_OTHER_READ_COLOR = "#d8c8c0"
-_TOKENSCAPE_CATEGORY_COLORS = {
-    "system": "#b8b3a3",
-    "user": "#7fbef0",
-    "assistant_text": "#bda6e6",
+_TOKENSCAPE_TOP_READS = 6
+# One fill colour per content kind — identity comes from hover and
+# inline labels, not from a rainbow of band colours. Borders are a
+# darker variant of the fill so adjacent same-kind slabs stay distinct.
+_TOKENSCAPE_KIND_FILL = {
+    "system": "#cdc7b8",
+    "user": "#a8c8e8",
+    "assistant_text": "#c0b6e0",
+    "tool_result": "#e8a896",
+}
+_TOKENSCAPE_KIND_BORDER = {
+    "system": "#8f8772",
+    "user": "#5a8ec0",
+    "assistant_text": "#7a6cb0",
+    "tool_result": "#b8654a",
+}
+_TOKENSCAPE_KIND_LEGEND_LABEL = {
+    "system": "system",
+    "user": "user",
+    "assistant_text": "assistant text",
+    "tool_result": "tool result",
 }
 # Drop ratios for distinguishing /compact (truncates) from a 5-min
 # cache TTL break (rebuilds same context) — see module-doc above.
@@ -1706,6 +1712,9 @@ _TOKENSCAPE_COMPACT_MIN_DROP = 5_000
 _TOKENSCAPE_TTL_BREAK_MIN_GAP_SECONDS = 4 * 60 + 30
 _TOKENSCAPE_TTL_BREAK_CACHE_DROP_RATIO = 0.5
 _TOKENSCAPE_TTL_BREAK_MIN_CACHE = 5_000
+# Minimum persistence in turns for a tool_result to qualify as the
+# "dominant slab" eligible for the multi-line inline caption.
+_TOKENSCAPE_DOMINANT_MIN_PERSISTENCE = 4
 
 
 def _tokenscape_classify(kind: str | None) -> str | None:
@@ -1947,25 +1956,30 @@ def _render_tokenscape_streamgraph(  # noqa: PLR0912, PLR0915
     turns: list[dict],
     events: list[dict],
 ) -> tuple[str, list[dict]]:
-    """Render the stacked-area streamgraph + return top-reads metadata."""
+    """Render the stepped stacked-area chart + return top-reads metadata.
+
+    The shape here is deliberate: ``line_shape='hv'`` turns each band
+    into a crisp rectangle, so a long-lived big read reads as a single
+    visible slab instead of a slanted polygon. Identity comes from
+    inline labels on the largest slabs and a four-colour legend at the
+    bottom — colour is by content kind, not by individual band.
+    """
     n_turns = len(turns)
     if n_turns == 0:
         return "", []
 
-    # Solve system baseline at turn 1 from the gap between the API
-    # context total and content blocks active at turn 1.
-    turn1_blocks = [b for b in blocks if b["arrival_turn"] == 1]
-    turn1_chars = sum(b["char_count"] for b in turn1_blocks) or 1
-    api_context_t1 = turns[0]["api_context"]
-    # We don't know exact chars/token, but ~4 chars/token is a
-    # reasonable proxy for English+code. Whatever's left over after
-    # accounting for message content is the system prompt + tool
-    # definitions baseline. Negative gap (tiny turn 1) clamps to 0.
-    estimated_content_tokens = turn1_chars / 4.0
-    system_tokens = max(0, api_context_t1 - estimated_content_tokens)
+    # Segment turns by /compact events. Each segment gets its own
+    # system baseline; post-compact baselines absorb the synthetic
+    # summary message so the chart shows a single fat khaki slab
+    # rather than a giant misclassified user band.
+    compact_turns = [e["turn"] for e in events if e["kind"] == "compact"]
+    segments: list[tuple[int, int]] = []
+    seg_start = 1
+    for ct in compact_turns:
+        segments.append((seg_start, ct - 1))
+        seg_start = ct
+    segments.append((seg_start, n_turns))
 
-    # Rank tool_result blocks by char_count x persisted_turns to pick
-    # the top N for individual bands. Smaller reads aggregate.
     read_blocks = [b for b in blocks if b["category"] == "tool_result"]
     for b in read_blocks:
         persisted = max(1, (b["end_turn"] or 1) - b["arrival_turn"] + 1)
@@ -1975,11 +1989,23 @@ def _render_tokenscape_streamgraph(  # noqa: PLR0912, PLR0915
     named = read_blocks[:_TOKENSCAPE_TOP_READS]
     other_reads = read_blocks[_TOKENSCAPE_TOP_READS:]
 
-    # --- Per-turn band heights ---
-    # For each turn, sum char_count of every active block per band-id.
-    # band-ids: 'system', 'user', 'assistant_text', 'other_reads', or
-    # the index of a named read block.
-    def _band_id(b: dict) -> str | int:
+    # In segments after the first, the largest block arriving on the
+    # segment's first turn is the compact summary. Folding it into the
+    # system baseline matches what the user feels: the previous
+    # conversation has been compressed into a single piece of context.
+    absorbed_block_ids: set[int] = set()
+    seg_baseline_label: dict[int, str] = {0: "system + tool defs"}
+    for seg_idx, (s_start, _s_end) in enumerate(segments):
+        if seg_idx == 0:
+            continue
+        seg_baseline_label[seg_idx] = "compact summary"
+        first_blocks = [b for b in blocks if b["arrival_turn"] == s_start]
+        if first_blocks:
+            absorbed_block_ids.add(id(max(first_blocks, key=lambda b: b["char_count"])))
+
+    def _band_id(b: dict) -> str:
+        if id(b) in absorbed_block_ids:
+            return "system"
         if b["category"] == "user":
             return "user"
         if b["category"] == "assistant_text":
@@ -1988,74 +2014,140 @@ def _render_tokenscape_streamgraph(  # noqa: PLR0912, PLR0915
             return f"read_{named.index(b)}"
         return "other_reads"
 
-    band_order = (
-        ["system", "user", "assistant_text"]
-        + [f"read_{i}" for i in range(len(named))]
-        + (["other_reads"] if other_reads else [])
-    )
-    band_chars: dict[str | int, list[float]] = {
-        bid: [0.0] * n_turns for bid in band_order
+    band_order: list[str] = ["system", "user", "assistant_text"]
+    band_order += [f"read_{i}" for i in range(len(named))]
+    if other_reads:
+        band_order.append("other_reads")
+    band_kind: dict[str, str] = {
+        "system": "system",
+        "user": "user",
+        "assistant_text": "assistant_text",
+        "other_reads": "tool_result",
     }
+    for i in range(len(named)):
+        band_kind[f"read_{i}"] = "tool_result"
 
+    # Per-band CONSTANT height across the band's lifetime. The whole
+    # point of the chart is rectangles — heights cannot float per turn
+    # or the slabs slope and lose their identity. We solve a single
+    # global chars→tokens factor so the chart's y-axis stays in the
+    # same magnitude as api_context, then hold each band fixed at
+    # `chars * factor`.
+    band_height: dict[str, float] = dict.fromkeys(band_order, 0.0)
+    for b in blocks:
+        bid = _band_id(b)
+        if bid == "system":
+            continue
+        band_height[bid] = band_height.get(bid, 0.0) + b["char_count"]
+
+    # Per-segment system baseline (constant within a segment).
+    system_per_turn: list[float] = [0.0] * n_turns
+    seg_baseline_value: dict[int, float] = {}
+    for seg_idx, (s_start, s_end) in enumerate(segments):
+        first_turn = s_start
+        first_blocks = [
+            b
+            for b in blocks
+            if b["arrival_turn"] == first_turn and id(b) not in absorbed_block_ids
+        ]
+        first_chars = sum(b["char_count"] for b in first_blocks)
+        api_context_first = turns[first_turn - 1]["api_context"]
+        baseline = max(0.0, api_context_first - first_chars / 4.0)
+        baseline = max(baseline, min(api_context_first, 1000.0))
+        seg_baseline_value[seg_idx] = baseline
+        for t in range(s_start, s_end + 1):
+            if 1 <= t <= n_turns:
+                system_per_turn[t - 1] = baseline
+
+    # Solve the chars-to-tokens factor: pick the turn with the largest
+    # api_context, fit non-system bands' total chars at that turn to
+    # api_context minus baseline. This anchors the chart's peak to a
+    # plausible token total without per-turn rescaling.
+    peak_turn_idx = max(range(n_turns), key=lambda i: turns[i]["api_context"])
+    active_chars_at_peak = sum(
+        band_height[_band_id(b)]
+        for b in blocks
+        if b["arrival_turn"] <= peak_turn_idx + 1 <= (b["end_turn"] or n_turns)
+        and _band_id(b) != "system"
+    )
+    # `band_height` is per band, but blocks belonging to the same
+    # band share that key. Recompute properly: sum chars of blocks
+    # whose band is active at the peak turn.
+    active_chars_at_peak = sum(
+        b["char_count"]
+        for b in blocks
+        if b["arrival_turn"] <= peak_turn_idx + 1 <= (b["end_turn"] or n_turns)
+        and id(b) not in absorbed_block_ids
+    )
+    target_at_peak = max(
+        1.0, turns[peak_turn_idx]["api_context"] - system_per_turn[peak_turn_idx]
+    )
+    chars_to_tokens = target_at_peak / max(1.0, active_chars_at_peak)
+
+    # Apply the global factor to each band.
+    for bid in band_order:
+        if bid == "system":
+            continue
+        band_height[bid] *= chars_to_tokens
+
+    band_tokens: dict[str, list[float]] = {bid: [0.0] * n_turns for bid in band_order}
     for b in blocks:
         bid = _band_id(b)
         if bid == "system":
             continue
         end = b["end_turn"] or n_turns
+        # The band is the SAME height every turn it's active. If
+        # multiple blocks share a band (e.g. several user messages),
+        # they additively raise the band height for the overlapping
+        # turns — but each individual contribution is still a flat
+        # rectangle.
+        per_block_h = b["char_count"] * chars_to_tokens
         for t in range(b["arrival_turn"], end + 1):
             if 1 <= t <= n_turns:
-                band_chars[bid][t - 1] += b["char_count"]
+                band_tokens[bid][t - 1] += per_block_h
 
-    # Convert per-turn char counts to tokens, scaling to the API
-    # context total minus the (constant) system baseline.
-    band_tokens: dict[str | int, list[float]] = {
-        bid: [0.0] * n_turns for bid in band_order
-    }
+    # System absorbs the residual against api_context so each column
+    # roughly matches the API total; floor at the segment baseline so
+    # the bottom band stays visible even on cheap turns.
     for i, t in enumerate(turns):
-        active_chars = sum(band_chars[bid][i] for bid in band_order if bid != "system")
-        target = max(0.0, t["api_context"] - system_tokens)
-        if active_chars > 0 and target > 0:
-            scale = target / active_chars
-            for bid in band_order:
-                if bid == "system":
-                    band_tokens[bid][i] = system_tokens
-                else:
-                    band_tokens[bid][i] = band_chars[bid][i] * scale
-        else:
-            band_tokens["system"][i] = float(t["api_context"])
+        non_sys = sum(band_tokens[bid][i] for bid in band_order if bid != "system")
+        residual = t["api_context"] - non_sys
+        band_tokens["system"][i] = max(system_per_turn[i], residual)
 
-    # --- Build figure ---
-    _ensure_template()
     fig = go.Figure()
     xs = [t["turn"] for t in turns]
+    total_context = sum(t["api_context"] for t in turns) or 1
 
-    band_specs: list[tuple[str | int, str, str]] = [
-        ("system", "system + tool defs", _TOKENSCAPE_CATEGORY_COLORS["system"]),
-        ("user", "user", _TOKENSCAPE_CATEGORY_COLORS["user"]),
-        (
-            "assistant_text",
-            "assistant text",
-            _TOKENSCAPE_CATEGORY_COLORS["assistant_text"],
-        ),
-    ]
-    for i, b in enumerate(named):
-        color = _TOKENSCAPE_READ_COLORS[min(i, len(_TOKENSCAPE_READ_COLORS) - 1)]
-        band_specs.append((f"read_{i}", b["label"], color))
-    if other_reads:
-        band_specs.append(
-            ("other_reads", "other tool results", _TOKENSCAPE_OTHER_READ_COLOR)
-        )
-
-    for bid, label, color in band_specs:
-        ys = band_tokens[bid]
+    # Stacked bars — each turn becomes a column of discrete
+    # rectangles. ``bargap=0`` removes per-turn padding so a band
+    # spanning many turns reads as one wide slab, not a comb of
+    # individual columns. With explicit borders and a single fill
+    # colour per kind, the cost story stays legible at any session
+    # length where stacked-area would smooth into a curve.
+    for bid in band_order:
+        kind = band_kind[bid]
+        fill = _TOKENSCAPE_KIND_FILL[kind]
+        border = _TOKENSCAPE_KIND_BORDER[kind]
+        if bid == "system":
+            label = "system"
+        elif bid == "user":
+            label = "user"
+        elif bid == "assistant_text":
+            label = "assistant text"
+        elif bid == "other_reads":
+            label = "other tool results"
+        else:
+            label = named[int(bid.split("_", 1)[1])]["label"]
         fig.add_trace(
-            go.Scatter(
+            go.Bar(
                 x=xs,
-                y=ys,
-                mode="none",
+                y=band_tokens[bid],
                 name=label,
-                stackgroup="one",
-                fillcolor=color,
+                marker={
+                    "color": fill,
+                    "line": {"width": 0.4, "color": border},
+                },
+                showlegend=False,
                 hovertemplate=(
                     f"<b>{label}</b><br>"
                     "turn %{x}<br>"
@@ -2064,64 +2156,124 @@ def _render_tokenscape_streamgraph(  # noqa: PLR0912, PLR0915
             )
         )
 
-    # --- Annotations: label each named-read band at its centroid ---
+    # Four-kind legend swatches — invisible markers at off-canvas
+    # coordinates so only the legend square + name show.
+    for kind in ("system", "user", "assistant_text", "tool_result"):
+        fig.add_trace(
+            go.Scatter(
+                x=[None],
+                y=[None],
+                mode="markers",
+                marker={
+                    "size": 14,
+                    "symbol": "square",
+                    "color": _TOKENSCAPE_KIND_FILL[kind],
+                    "line": {"width": 0.6, "color": _TOKENSCAPE_KIND_BORDER[kind]},
+                },
+                name=_TOKENSCAPE_KIND_LEGEND_LABEL[kind],
+                showlegend=True,
+                hoverinfo="skip",
+            )
+        )
+
     annotations: list[dict] = []
-    # Cumulative below-band y for each turn — needed to anchor labels
-    # at the centre of the band slab. Keyed parallel to band_order.
-    cumulative_below = [0.0] * n_turns
-    for bid, label, _color in band_specs:
-        if not str(bid).startswith("read_"):
-            for i in range(n_turns):
-                cumulative_below[i] += band_tokens[bid][i]
-            continue
-        idx = int(str(bid).split("_", 1)[1])
-        block = named[idx]
-        # Place label at the persistence midpoint (in turn coords).
-        mid_turn = (
-            block["arrival_turn"] + (block["end_turn"] or block["arrival_turn"])
-        ) // 2
+
+    # Cumulative bottom of each band per turn — used to anchor labels
+    # at the vertical centre of each slab.
+    cumulative = [0.0] * n_turns
+    band_below_top: dict[str, list[float]] = {}
+    for bid in band_order:
+        band_below_top[bid] = list(cumulative)
+        for i in range(n_turns):
+            cumulative[i] += band_tokens[bid][i]
+    max_total = max(cumulative) if cumulative and max(cumulative) > 0 else 1
+
+    for seg_idx, (s_start, s_end) in enumerate(segments):
+        mid_turn = (s_start + s_end) // 2
         i = max(0, min(n_turns - 1, mid_turn - 1))
-        band_height = band_tokens[bid][i]
-        if band_height <= 0:
-            for j in range(n_turns):
-                cumulative_below[j] += band_tokens[bid][j]
+        sys_h = band_tokens["system"][i]
+        if sys_h <= 0:
             continue
-        y_center = cumulative_below[i] + band_height / 2
-        approx_tokens = max(band_tokens[bid])
+        y_center = band_below_top["system"][i] + sys_h / 2
+        baseline_label = seg_baseline_label.get(seg_idx, "system")
         annotations.append(
             {
                 "x": mid_turn,
                 "y": y_center,
                 "xref": "x",
                 "yref": "y",
-                "text": (
-                    f"<b>{label}</b><br>"
-                    f"≈ {approx_tokens:,.0f} tokens · {block['persisted']} turns"
-                ),
+                "text": f"{baseline_label} · {sys_h / 1000:.1f}k",
                 "showarrow": False,
-                "font": {"size": 11, "color": "#5a3a25"},
+                "font": {"size": 11, "color": "#3a342a"},
                 "align": "center",
-                "bgcolor": "rgba(255,255,255,0.7)",
-                "borderpad": 3,
             }
         )
-        for j in range(n_turns):
-            cumulative_below[j] += band_tokens[bid][j]
 
-    # --- Event markers: /compact (dashed) and 5m TTL break (dotted) ---
+    for i_named, block in enumerate(named):
+        bid = f"read_{i_named}"
+        mid_turn = (
+            block["arrival_turn"] + (block["end_turn"] or block["arrival_turn"])
+        ) // 2
+        i = max(0, min(n_turns - 1, mid_turn - 1))
+        band_h = band_tokens[bid][i]
+        if band_h <= 0:
+            continue
+        y_center = band_below_top[bid][i] + band_h / 2
+        approx_tokens = max(band_tokens[bid])
+        share_pct = 100.0 * approx_tokens * block["persisted"] / total_context
+        # Multi-line caption only on the dominant slab — anything
+        # smaller would overflow into adjacent bands.
+        is_dominant = (
+            band_h >= 0.15 * max_total
+            and block["persisted"] >= _TOKENSCAPE_DOMINANT_MIN_PERSISTENCE
+            and i_named == 0
+        )
+        if is_dominant:
+            text = (
+                f"<b>{block['label']}</b><br>"
+                f"{approx_tokens / 1000:.0f}k tokens × "  # noqa: RUF001
+                f"{block['persisted']} turns persisted<br>"
+                f"≈ {share_pct:.0f}% of session input bill"
+            )
+            font_size = 12
+        elif band_h >= 0.06 * max_total:
+            text = (
+                f"{block['label']} · "
+                f"{approx_tokens / 1000:.1f}k × {block['persisted']} turns"  # noqa: RUF001
+            )
+            font_size = 10
+        else:
+            continue
+        annotations.append(
+            {
+                "x": mid_turn,
+                "y": y_center,
+                "xref": "x",
+                "yref": "y",
+                "text": text,
+                "showarrow": False,
+                "font": {"size": font_size, "color": "#5a2a18"},
+                "align": "center",
+            }
+        )
+
     for ev in events:
         x = ev["turn"] - 0.5
         if ev["kind"] == "compact":
-            fig.add_vline(x=x, line_dash="dash", line_color="#888", line_width=1)
+            fig.add_vline(x=x, line_dash="dash", line_color="#777", line_width=1)
+            prev_ctx = turns[ev["turn"] - 2]["api_context"] if ev["turn"] > 1 else 0
+            new_ctx = turns[ev["turn"] - 1]["api_context"]
             annotations.append(
                 {
                     "x": x,
                     "y": 1.02,
                     "xref": "x",
                     "yref": "paper",
-                    "text": "/compact",
+                    "text": (
+                        f"/compact · {prev_ctx / 1000:.0f}k → {new_ctx / 1000:.0f}k"
+                    ),
                     "showarrow": False,
-                    "font": {"size": 11, "color": "#666"},
+                    "font": {"size": 11, "color": "#555"},
                     "xanchor": "left",
                 }
             )
@@ -2143,17 +2295,45 @@ def _render_tokenscape_streamgraph(  # noqa: PLR0912, PLR0915
             )
 
     fig.update_layout(
-        template="tufte",
-        showlegend=False,
-        hovermode="x unified",
-        xaxis_title="turn",
-        yaxis_title="input tokens",
-        margin={"l": 70, "r": 30, "t": 40, "b": 60},
+        barmode="stack",
+        bargap=0,
+        bargroupgap=0,
+        showlegend=True,
+        legend={
+            "orientation": "h",
+            "yanchor": "top",
+            "y": -0.18,
+            "xanchor": "center",
+            "x": 0.5,
+            "bgcolor": "rgba(0,0,0,0)",
+            "font": {"size": 12, "color": "#444"},
+        },
+        hovermode="closest",
+        xaxis={
+            "title": {"text": "turn", "font": {"size": 12, "color": "#666"}},
+            "showgrid": False,
+            "showline": True,
+            "linecolor": "#ccc",
+            "ticks": "outside",
+            "tickcolor": "#ccc",
+            "tickfont": {"size": 11, "color": "#666"},
+            "zeroline": False,
+        },
+        yaxis={
+            "title": {"text": "input tokens", "font": {"size": 12, "color": "#666"}},
+            "showgrid": True,
+            "gridcolor": "#eee",
+            "griddash": "dot",
+            "tickformat": ".2s",
+            "tickfont": {"size": 11, "color": "#666"},
+            "zeroline": False,
+        },
+        plot_bgcolor="white",
+        paper_bgcolor="white",
+        margin={"l": 70, "r": 30, "t": 40, "b": 70},
         annotations=annotations,
     )
 
-    # Serialise the top-reads list for the table beneath the chart.
-    total_context = sum(t["api_context"] for t in turns) or 1
     top_reads = [
         {
             "label": b["label"],
