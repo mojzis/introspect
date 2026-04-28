@@ -2071,7 +2071,11 @@ def _cost_overview_setup(tmp_dir: Path, specs: list[tuple[str, list[dict]]]) -> 
 
 
 def _session_at_cost(
-    session_id: str, input_tokens: int, *, timestamp_day: str = "2026-04-21"
+    session_id: str,
+    input_tokens: int,
+    *,
+    timestamp_day: str = "2026-04-21",
+    timestamp_hour: str = "10",
 ) -> list[dict]:
     """Build a minimal two-message JSONL that costs exactly
     ``input_tokens * $5 / 1_000_000`` at claude-opus-4-7 pricing.
@@ -2081,7 +2085,7 @@ def _session_at_cost(
             session_id,
             "u1",
             None,
-            f"{timestamp_day}T10:00:00.000Z",
+            f"{timestamp_day}T{timestamp_hour}:00:00.000Z",
             "go",
             tool_use_result={"content": "seed"},
         ),
@@ -2089,7 +2093,7 @@ def _session_at_cost(
             session_id,
             "a1",
             "u1",
-            f"{timestamp_day}T10:00:01.000Z",
+            f"{timestamp_day}T{timestamp_hour}:00:01.000Z",
             [{"type": "text", "text": "ok"}],
             model="claude-opus-4-7",
             msg_id=f"msg-{session_id}-a1",
@@ -2487,6 +2491,243 @@ def test_cost_overview_nav_link_present():
         assert response.status_code == 200
         assert 'href="/cost-overview"' in response.text
         assert "Cost Overview" in response.text
+
+
+# --- Portfolio panel time-window filter tests ---
+
+
+def test_cost_overview_portfolio_filter_day_scopes_pareto():
+    """``/cost-overview/portfolio?day=...`` narrows Pareto to that day."""
+    sid_a = "sess-port-da-aaaa-aaaa-aaaaaaaaaaaa"
+    sid_b = "sess-port-db-aaaa-aaaa-aaaaaaaaaaaa"
+    sid_c = "sess-port-dc-aaaa-aaaa-aaaaaaaaaaaa"
+    specs = [
+        (sid_a, _session_at_cost(sid_a, 4_000_000, timestamp_day="2026-04-20")),
+        (sid_b, _session_at_cost(sid_b, 2_000_000, timestamp_day="2026-04-21")),
+        (sid_c, _session_at_cost(sid_c, 1_000_000, timestamp_day="2026-04-21")),
+    ]
+    with tempfile.TemporaryDirectory() as tmp_str:
+        tmp = Path(tmp_str)
+        _cost_overview_setup(tmp, specs)
+
+        def _check(client):
+            response = client.get("/cost-overview/portfolio?day=2026-04-21")
+            assert response.status_code == 200
+            text = response.text
+            # Filter chip rendered with the day label.
+            assert "Filtered to" in text
+            assert "2026-04-21" in text
+            # Pareto totals: $10 + $5 = $15 (Day 21 sessions only).
+            assert "$15.00" in text
+            # Day-20 cost ($20.00) must NOT appear.
+            assert "$20.00" not in text
+
+        _run_with_client(tmp, _check)
+
+
+def test_cost_overview_portfolio_filter_hour_scopes_pareto():
+    """``?day=...&hour=14`` further narrows to a single hour."""
+    sid_morning = "sess-port-am-aaaa-aaaa-aaaaaaaaaaaa"
+    sid_afternoon = "sess-port-pm-aaaa-aaaa-aaaaaaaaaaaa"
+    specs = [
+        (
+            sid_morning,
+            _session_at_cost(
+                sid_morning,
+                2_000_000,
+                timestamp_day="2026-04-21",
+                timestamp_hour="10",
+            ),
+        ),
+        (
+            sid_afternoon,
+            _session_at_cost(
+                sid_afternoon,
+                1_000_000,
+                timestamp_day="2026-04-21",
+                timestamp_hour="14",
+            ),
+        ),
+    ]
+    with tempfile.TemporaryDirectory() as tmp_str:
+        tmp = Path(tmp_str)
+        _cost_overview_setup(tmp, specs)
+
+        def _check(client):
+            response = client.get("/cost-overview/portfolio?day=2026-04-21&hour=14")
+            assert response.status_code == 200
+            text = response.text
+            assert "2026-04-21 14:00" in text
+            # Only the 14:00 session ($5) appears.
+            assert "$5.00" in text
+            # The 10:00 session's $10 must not.
+            assert "$10.00" not in text
+
+        _run_with_client(tmp, _check)
+
+
+def test_cost_overview_portfolio_invalid_day_returns_400():
+    """Bad day format is rejected with 400, not silently treated as no-filter."""
+    with tempfile.TemporaryDirectory() as tmp_str:
+        tmp = Path(tmp_str)
+        # No fixtures needed — the validator runs before any DB work.
+
+        def _check(client):
+            response = client.get("/cost-overview/portfolio?day=garbage")
+            assert response.status_code == 400
+
+        _run_with_client(tmp, _check)
+
+
+def test_cost_overview_portfolio_hour_without_day_returns_400():
+    """``?hour=14`` alone is meaningless and must be rejected."""
+    with tempfile.TemporaryDirectory() as tmp_str:
+        tmp = Path(tmp_str)
+
+        def _check(client):
+            response = client.get("/cost-overview/portfolio?hour=14")
+            assert response.status_code == 400
+
+        _run_with_client(tmp, _check)
+
+
+def test_cost_overview_portfolio_no_filter_matches_page_total():
+    """Unfiltered portfolio call must agree with the page's hero total."""
+    with tempfile.TemporaryDirectory() as tmp_str:
+        tmp = Path(tmp_str)
+        _cost_overview_setup(tmp, _multi_day_specs())
+
+        def _check(client):
+            page = client.get("/cost-overview")
+            assert page.status_code == 200
+            fragment = client.get("/cost-overview/portfolio")
+            assert fragment.status_code == 200
+            # Multi-day specs sum to $35 (4M+2M+1M tokens * $5/M).
+            assert "$35.00" in page.text
+            assert "$35.00" in fragment.text
+            # No filter ⇒ no chip on the fragment.
+            assert "Filtered to" not in fragment.text
+
+        _run_with_client(tmp, _check)
+
+
+def test_cost_overview_portfolio_clear_link_targets_panel():
+    """Filtered render must include a Clear link that re-fetches without filter."""
+    sid = "sess-port-clr-aaaa-aaaa-aaaaaaaaaaaa"
+    specs = [(sid, _session_at_cost(sid, 1_000_000, timestamp_day="2026-04-21"))]
+    with tempfile.TemporaryDirectory() as tmp_str:
+        tmp = Path(tmp_str)
+        _cost_overview_setup(tmp, specs)
+
+        def _check(client):
+            response = client.get("/cost-overview/portfolio?day=2026-04-21")
+            assert response.status_code == 200
+            text = response.text
+            assert 'hx-get="/cost-overview/portfolio"' in text
+            assert 'hx-target="#cost-portfolio-panel"' in text
+            assert "Clear" in text
+
+        _run_with_client(tmp, _check)
+
+
+def _cross_day_subagent_session(
+    session_id: str, day_a_tokens: int, day_b_tokens: int
+) -> list[dict]:
+    """Session with sidechain cost on Day A and regular cost on Day B.
+
+    Used to pin the ``cost_overview`` design contract: subagent classifier
+    is **all-time**, so when the portfolio panel is filtered to Day B,
+    the session must still classify "with subagent" even though no
+    sidechain message exists in the Day-B window.
+    """
+    day_a = "2026-04-20"
+    day_b = "2026-04-21"
+    return [
+        # Day A: head user + sidechain user + sidechain assistant.
+        make_user_message(
+            session_id,
+            "u1",
+            None,
+            f"{day_a}T10:00:00.000Z",
+            "go",
+            tool_use_result={"content": "seed"},
+        ),
+        make_user_message(
+            session_id,
+            "su1",
+            "u1",
+            f"{day_a}T10:00:01.000Z",
+            "subagent",
+            is_sidechain=True,
+        ),
+        make_assistant_message(
+            session_id,
+            "sa1",
+            "su1",
+            f"{day_a}T10:00:02.000Z",
+            [{"type": "text", "text": "ok"}],
+            model="claude-opus-4-7",
+            msg_id=f"msg-{session_id}-sa1",
+            usage={"input_tokens": day_a_tokens, "output_tokens": 0},
+            is_sidechain=True,
+        ),
+        # Day B: regular (non-sidechain) assistant message — its cost is
+        # what the Day-B filter window picks up.
+        make_user_message(
+            session_id,
+            "u2",
+            "sa1",
+            f"{day_b}T10:00:00.000Z",
+            "next day",
+        ),
+        make_assistant_message(
+            session_id,
+            "a2",
+            "u2",
+            f"{day_b}T10:00:01.000Z",
+            [{"type": "text", "text": "ok"}],
+            model="claude-opus-4-7",
+            msg_id=f"msg-{session_id}-a2",
+            usage={"input_tokens": day_b_tokens, "output_tokens": 0},
+        ),
+    ]
+
+
+def test_cost_overview_portfolio_subagent_classifier_stays_alltime():
+    """Filtering to Day B must keep an all-time subagent flag on the session.
+
+    A session with a sidechain message on Day A and regular cost on Day B,
+    filtered to Day B, must still land in the "with" bucket — pins the
+    documented semantic that subagent/skill classifiers are session-wide,
+    only the cost aggregation narrows with the window.
+    """
+    from introspect.api.handlers.cost_overview import (  # noqa: PLC0415
+        _build_panel_context,
+        _window_for,
+    )
+
+    sid_with = "sess-port-sub-aaaa-aaaa-aaaaaaaaaaaa"
+    specs = [
+        (sid_with, _cross_day_subagent_session(sid_with, 200_000, 1_000_000)),
+    ]
+    with tempfile.TemporaryDirectory() as tmp_str:
+        tmp = Path(tmp_str)
+        _cost_overview_setup(tmp, specs)
+
+        panel = _materialize_and_run(
+            tmp,
+            lambda c: _build_panel_context(c, _window_for("2026-04-21", None)),
+        )
+
+        # Pareto cost narrows to Day B only: 1M tokens * $5/M = $5.
+        assert panel["pareto"]["total_cost_usd"] == pytest.approx(5.0)
+        # Classifier stays all-time: the session's Day-A sidechain still
+        # flips it into "with subagent" even though the window doesn't
+        # include any sidechain message.
+        subagent = panel["subagent_split"]
+        assert subagent["with"]["sessions"] == 1
+        assert subagent["without"]["sessions"] == 0
+        assert subagent["with"]["cost_usd"] == pytest.approx(5.0)
 
 
 # --- Daily / hourly cost breakdown tests ---

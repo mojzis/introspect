@@ -97,6 +97,37 @@ def conn(request: Request):
 DEFAULT_PAGE_SIZE = 50
 
 
+_DAY_RE = re.compile(r"^\d{4}-\d{2}-\d{2}$")
+_HOUR_RE = re.compile(r"^([01]\d|2[0-3])$")
+
+
+def parse_day(day_str: str) -> str:
+    """Validate a YYYY-MM-DD day string.
+
+    A pattern check is sufficient — the validated string is bound as a
+    DuckDB query parameter (not interpolated), and DuckDB rejects a
+    non-date string with a clear error if one slips through. We don't
+    parse to a Python date because :class:`datetime.date` carries no
+    timezone, and the column is compared as a SQL ``DATE`` regardless.
+
+    Raises :class:`ValueError` on bad input — HTTP handlers translate
+    that to a 400 at the route boundary.
+    """
+    if not _DAY_RE.match(day_str):
+        raise ValueError("Invalid day format")  # noqa: TRY003
+    return day_str
+
+
+def parse_hour(hour_str: str) -> str:
+    """Validate a two-digit 00-23 hour string.
+
+    Raises :class:`ValueError` on bad input.
+    """
+    if not _HOUR_RE.match(hour_str):
+        raise ValueError("Invalid hour format")  # noqa: TRY003
+    return hour_str
+
+
 def build_cost_attribution_sql(amc_filter: str = "") -> str:
     """Build the full cost-attribution query used by both cost views.
 
@@ -107,7 +138,7 @@ def build_cost_attribution_sql(amc_filter: str = "") -> str:
     * ``_build_cost_context`` (session-detail Cost tab) — scopes to one
       session via ``WHERE session_id = ?``.
     * ``_build_huge_reads_split`` (Cost Overview) — runs unscoped across
-      every session.
+      every session, optionally narrowed to a timestamp window.
 
     Keeping the classifier CTE in one place means the two paths can't drift
     — "huge reads" on the overview must agree with what the session-detail
@@ -116,7 +147,11 @@ def build_cost_attribution_sql(amc_filter: str = "") -> str:
     Args:
         amc_filter: a SQL ``WHERE`` clause (including the keyword) to scope
             the inner ``assistant_message_costs`` read, e.g.
-            ``"WHERE session_id = ?"``. Empty string means "all sessions".
+            ``"WHERE session_id = ?"`` or
+            ``"WHERE timestamp >= ? AND timestamp < ?"``.
+            Empty string means "all sessions". Trusted call sites only —
+            never user input; placeholders are bound by the caller via
+            ``db.execute(sql, params)``.
 
     The returned SQL yields columns:
         session_id, uuid, timestamp, is_sidechain, model,
@@ -124,8 +159,6 @@ def build_cost_attribution_sql(amc_filter: str = "") -> str:
         cache_creation_5m, cache_creation_1h,
         user_block_type, tool_name, tool_input
     """
-    # amc_filter is a trusted module-local literal ("" or "WHERE session_id = ?"
-    # — never user input), so splicing it into the query is safe.
     amc_cte = f"WITH amc AS (SELECT * FROM assistant_message_costs {amc_filter})"  # noqa: S608
     return amc_cte + _COST_ATTRIBUTION_STATIC_TAIL
 

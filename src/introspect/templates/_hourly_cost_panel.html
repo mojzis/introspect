@@ -11,7 +11,9 @@
          class="cost-chart"
          style="width:100%;min-height:320px;"
          data-figure-id="hourly-cost-chart-data-{{ day }}"
-         data-height="320"></div>
+         data-height="320"
+         data-on-click="portfolio-hour"
+         data-day="{{ day }}"></div>
     <script type="application/json" id="hourly-cost-chart-data-{{ day }}">{{ chart_json|safe }}</script>
     {% else %}
     <p>No cost recorded for {{ day }}.</p>

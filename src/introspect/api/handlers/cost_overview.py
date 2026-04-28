@@ -12,15 +12,35 @@ Builds a portfolio-level view of Claude Code costs:
 The session-level ``cost_usd`` values are sourced from
 :data:`_helpers.SESSION_COST_SUBQUERY` so the totals here always match the
 sessions-list page exactly.
+
+Time-window filter (``/cost-overview/portfolio?day=...&hour=...``)
+------------------------------------------------------------------
+When the user clicks a bar in the daily or hourly cost chart, the
+portfolio panel reruns under a timestamp window. The semantic is:
+
+* The **cost aggregation** (`SESSION_COST_SUBQUERY`) and therefore the
+  Pareto rows narrow to assistant_message_costs rows in the window.
+  Sessions absent from the window simply don't contribute.
+* **Subagent / skill classifiers stay all-time** session properties.
+  Filtering them to the window would require, e.g. a Task tool call
+  *inside hour 14* — a noisy and unintuitive definition. Keeping them
+  all-time means "of the cost incurred at hour 14, this much came from
+  sessions that ever used a subagent".
+* **Huge-reads stays per-session** (its read-cost-ratio is intrinsic);
+  only the cost denominator narrows with the window, so the threshold
+  test runs against the same $ values shown in the chart.
 """
 
 from __future__ import annotations
 
+from datetime import datetime, timedelta
 from typing import Any
 
 import duckdb
-from fastapi import Request
+from fastapi import HTTPException, Request
 from fastapi.responses import HTMLResponse
+
+from introspect.sql_fragments import session_cost_subquery_filtered
 
 from ._helpers import (
     OBVIOUS_COMMANDS_SQL,
@@ -30,12 +50,18 @@ from ._helpers import (
     conn,
     format_cost,
     parent,
+    parse_day,
+    parse_hour,
     templates,
 )
 from .cost_breakdown import (
     DEFAULT_BREAKDOWN,
     build_daily_panel_context,
 )
+
+# Type alias: half-open ISO-formatted timestamp window (inclusive start,
+# exclusive end). ``None`` means no filter.
+TimeWindow = tuple[str, str]
 
 # Pareto cumulative-cost cutoff — sessions are kept until their *previous*
 # row's cumulative share crosses this fraction (so the row that tips the
@@ -49,17 +75,69 @@ HUGE_READS_COST_FRACTION = 0.10
 HUGE_READS_MIN_TOKENS = 100_000
 
 
+def _window_for(day: str | None, hour: str | None) -> TimeWindow | None:
+    """Build a half-open ``[start, end)`` ISO-timestamp window.
+
+    Returns ``None`` for the unfiltered case. ``day`` alone yields one
+    24-hour window; ``day`` + ``hour`` yields a one-hour window with
+    rollover handled by ``timedelta``.
+    """
+    if not day:
+        return None
+    start = datetime.fromisoformat(f"{day}T{hour or '00'}:00:00")
+    delta = timedelta(hours=1) if hour else timedelta(days=1)
+    end = start + delta
+    return (start.isoformat(sep=" "), end.isoformat(sep=" "))
+
+
+def _filter_label(day: str | None, hour: str | None) -> str:
+    """Human-readable chip label for the active filter."""
+    if not day:
+        return ""
+    if hour:
+        return f"{day} {hour}:00"
+    return day
+
+
+def _cost_subquery(window: TimeWindow | None) -> str:
+    """Pick the unfiltered or filtered SESSION_COST_SUBQUERY for ``window``.
+
+    The window endpoints are produced by :func:`_window_for` from validated
+    day/hour inputs, so splicing them into the SQL is safe.
+    """
+    if window is None:
+        return SESSION_COST_SUBQUERY
+    start, end = window
+    return session_cost_subquery_filtered(
+        f"timestamp >= '{start}' AND timestamp < '{end}'"
+    )
+
+
+def _build_panel_context(
+    db: duckdb.DuckDBPyConnection,
+    window: TimeWindow | None,
+) -> dict[str, Any]:
+    """Build the Pareto + binary-splits context for the portfolio panel.
+
+    Shared by the full page render (window=None) and the HTMX fragment
+    swap. ``_build_pareto`` already runs the per-session cost rollup, so
+    the splits derive ``cost_rows`` from its rows — the rollup runs once
+    per request, not twice.
+    """
+    pareto = _build_pareto(db, window)
+    cost_rows = [(r["session_id"], r["cost_usd"]) for r in pareto["rows"]]
+    return {
+        "pareto": pareto,
+        "subagent_split": _build_subagent_split(db, cost_rows),
+        "huge_reads_split": _build_huge_reads_split(db, cost_rows, window),
+        "skill_split": _build_skill_split(db, cost_rows),
+    }
+
+
 async def cost_overview(request: Request) -> HTMLResponse:
     """Render the /cost-overview page."""
     db = conn(request)
-    # One shared pull of (session_id, cost_usd) feeds every split helper so
-    # the SESSION_COST_SUBQUERY aggregation only runs once per page load and
-    # the three binary splits all see the same totals.
-    cost_rows = _fetch_cost_rows(db)
-    pareto = _build_pareto(db)
-    subagent_split = _build_subagent_split(db, cost_rows)
-    huge_reads_split = _build_huge_reads_split(db, cost_rows)
-    skill_split = _build_skill_split(db, cost_rows)
+    panel = _build_panel_context(db, window=None)
     daily_panel = build_daily_panel_context(db, DEFAULT_BREAKDOWN)
 
     return templates.TemplateResponse(
@@ -67,29 +145,68 @@ async def cost_overview(request: Request) -> HTMLResponse:
         "cost_overview.html",
         {
             "parent": parent(request),
-            "pareto": pareto,
-            "subagent_split": subagent_split,
-            "huge_reads_split": huge_reads_split,
-            "skill_split": skill_split,
+            "is_filtered": False,
+            "filter_label": "",
+            **panel,
             **daily_panel,
         },
     )
 
 
-def _fetch_cost_rows(db: duckdb.DuckDBPyConnection) -> list[tuple]:
+async def cost_portfolio_panel(
+    request: Request,
+    day: str | None,
+    hour: str | None,
+) -> HTMLResponse:
+    """Render the portfolio fragment, optionally scoped to a time window."""
+    if hour and not day:
+        raise HTTPException(status_code=400, detail="hour requires day")
+    try:
+        day_str = parse_day(day) if day else None
+        hour_str = parse_hour(hour) if hour else None
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    window = _window_for(day_str, hour_str)
+
+    db = conn(request)
+    panel = _build_panel_context(db, window)
+    return templates.TemplateResponse(
+        request,
+        "_cost_portfolio_panel.html",
+        {
+            "parent": parent(request),
+            "is_filtered": window is not None,
+            "filter_label": _filter_label(day_str, hour_str),
+            **panel,
+        },
+    )
+
+
+def _fetch_cost_rows(
+    db: duckdb.DuckDBPyConnection,
+    window: TimeWindow | None = None,
+) -> list[tuple]:
     """Return ``[(session_id, cost_usd), ...]`` for every positive-cost session.
 
     Shared denominator for all three binary splits — guarantees they agree
     on totals and the :data:`SESSION_COST_SUBQUERY` aggregation only runs
     once per page load rather than once per split.
+
+    When ``window`` is set, the per-session rollup only sums assistant
+    messages whose ``timestamp`` falls inside the half-open interval —
+    sessions outside drop out entirely.
     """
+    subquery = _cost_subquery(window)
     return db.execute(
-        f"SELECT session_id, cost_usd FROM {SESSION_COST_SUBQUERY} "  # noqa: S608
+        f"SELECT session_id, cost_usd FROM {subquery} "  # noqa: S608
         "WHERE cost_usd IS NOT NULL AND cost_usd > 0"
     ).fetchall()
 
 
-def _build_pareto(db: duckdb.DuckDBPyConnection) -> dict[str, Any]:
+def _build_pareto(
+    db: duckdb.DuckDBPyConnection,
+    window: TimeWindow | None = None,
+) -> dict[str, Any]:
     """Rank sessions by cost desc and cut at 80% cumulative share.
 
     Returns::
@@ -108,10 +225,11 @@ def _build_pareto(db: duckdb.DuckDBPyConnection) -> dict[str, Any]:
     """
     # SESSION_COST_SUBQUERY carries its own ``sc`` alias; the outer CTE below
     # uses a distinct ``session_costs`` name to avoid shadowing it.
+    subquery = _cost_subquery(window)
     rows = db.execute(
         f"""
         WITH session_costs AS (
-            SELECT session_id, cost_usd FROM {SESSION_COST_SUBQUERY}
+            SELECT session_id, cost_usd FROM {subquery}
         ),
         ranked AS (
             SELECT
@@ -281,6 +399,7 @@ def _build_subagent_split(
 def _build_huge_reads_split(
     db: duckdb.DuckDBPyConnection,
     cost_rows: list[tuple],
+    window: TimeWindow | None = None,
 ) -> dict[str, Any]:
     """Huge-reads split.
 
@@ -299,6 +418,10 @@ def _build_huge_reads_split(
     with/without table are measured against the same source — keeping the
     headline claim ("totals match the sessions-list page exactly") true for
     the threshold itself, not just the report.
+
+    When ``window`` is set, both the cost denominator (already filtered in
+    ``cost_rows``) and the read-token tally narrow to the same timestamp
+    interval — keeping the ratio meaningful inside the window.
     """
     # Import inside the function to avoid a circular import with sessions.py
     # (sessions imports from _helpers; _helpers must not import from
@@ -313,7 +436,13 @@ def _build_huge_reads_split(
     # One big scan for every session. We only need session_id, model,
     # cc_total, cc_5m, cc_1h and the classifier inputs; the rest of the
     # attribution row is ignored here.
-    attrib_rows = db.execute(build_cost_attribution_sql("")).fetchall()
+    if window is None:
+        amc_filter = ""
+        params: tuple[Any, ...] = ()
+    else:
+        amc_filter = "WHERE timestamp >= ? AND timestamp < ?"
+        params = window
+    attrib_rows = db.execute(build_cost_attribution_sql(amc_filter), params).fetchall()
 
     # Per-session Read-category cache-creation tokens + cost.
     per_session: dict[str, dict[str, float]] = {}

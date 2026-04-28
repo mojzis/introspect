@@ -16,7 +16,12 @@ from introspect.api.handlers.cost_breakdown import (
 )
 from introspect.api.handlers.cost_breakdown import daily_panel as _cost_daily_panel
 from introspect.api.handlers.cost_breakdown import hourly_panel as _cost_hourly_panel
-from introspect.api.handlers.cost_overview import cost_overview as _cost_overview
+from introspect.api.handlers.cost_overview import (
+    cost_overview as _cost_overview,
+)
+from introspect.api.handlers.cost_overview import (
+    cost_portfolio_panel as _cost_portfolio_panel,
+)
 from introspect.api.handlers.dashboard import dashboard as _dashboard
 from introspect.api.handlers.mcps import mcps as _mcps
 from introspect.api.handlers.raw import raw_data as _raw_data
@@ -153,6 +158,15 @@ async def cost_hourly_panel(
     breakdown: str = Query(_COST_DEFAULT_BREAKDOWN),
 ):
     return await _cost_hourly_panel(request, day, breakdown)
+
+
+@router.get("/cost-overview/portfolio", response_class=HTMLResponse)
+async def cost_portfolio_panel(
+    request: Request,
+    day: str | None = Query(default=None),
+    hour: str | None = Query(default=None),
+):
+    return await _cost_portfolio_panel(request, day, hour)
 
 
 @router.post("/refresh", response_class=HTMLResponse)

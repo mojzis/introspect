@@ -1,0 +1,132 @@
+{# Pareto + binary-splits panel. Embedded full-page on first render and
+   re-fetched as an HTMX fragment when the user clicks a daily/hourly bar
+   on the cost chart. The container ``#cost-portfolio-panel`` is owned by
+   ``cost_overview.html``; this partial is what gets swapped. #}
+{% if is_filtered %}
+<div class="filter-chip"
+     style="display:inline-flex;align-items:center;gap:0.5rem;
+            padding:0.3rem 0.6rem;margin:0 0 0.8rem;
+            background:#eef3ff;border:1px solid #99b3ff;border-radius:4px;
+            font-size:0.85rem;">
+    <span>Filtered to <strong>{{ filter_label }}</strong></span>
+    <a href="#"
+       hx-get="/cost-overview/portfolio"
+       hx-target="#cost-portfolio-panel"
+       hx-swap="innerHTML"
+       hx-push-url="false"
+       style="color:#444;text-decoration:none;font-weight:600;">Clear ✕</a>
+</div>
+{% endif %}
+
+<div class="card">
+    <h2>Where the money goes</h2>
+    {% if pareto.total_session_count %}
+    <div class="stat-grid" style="margin-top:0.8rem;">
+        <div class="stat-card">
+            <div class="value">{{ pareto.total_cost }}</div>
+            <div class="label">Total cost{% if not is_filtered %} (all sessions){% endif %}</div>
+        </div>
+        <div class="stat-card">
+            <div class="value">{{ pareto.pareto_session_count }}</div>
+            <div class="label">Sessions to 80%</div>
+        </div>
+        <div class="stat-card">
+            <div class="value">{{ pareto.total_session_count }}</div>
+            <div class="label">Sessions with cost</div>
+        </div>
+    </div>
+    <p style="margin-top:0.8rem;">
+        These <strong>{{ pareto.pareto_session_count }}</strong> sessions
+        represent 80% of <strong>{{ pareto.total_cost }}</strong> total cost
+        ({{ pareto.pareto_cost }} cumulative).
+    </p>
+    {% else %}
+    <p>No cost data{% if is_filtered %} for {{ filter_label }}{% endif %}.</p>
+    {% endif %}
+</div>
+
+<h2>Pareto table</h2>
+<div class="card">
+    {% if pareto.rows %}
+    <p style="color:#888;margin:0 0 0.6rem;">Sessions ranked by cost. The highlighted row is where cumulative spend crosses 80% — everything above it is the "vital few".</p>
+    <table>
+        <thead>
+            <tr>
+                <th>Started</th>
+                <th>Project</th>
+                <th>Title</th>
+                <th style="text-align:right;">Cost</th>
+                <th style="text-align:right;">Cumulative</th>
+                <th style="text-align:right;">% of total</th>
+            </tr>
+        </thead>
+        <tbody>
+            {% for row in pareto.rows %}
+            <tr{% if row.is_cutoff %} class="pareto-cutoff" style="background:#fff3cd;font-weight:600;border-top:2px solid #c0a000;"{% elif not row.in_pareto %} style="color:#888;"{% endif %}>
+                <td>{{ row.started_at }}</td>
+                <td>{{ row.project }}</td>
+                <td>
+                    <a href="/sessions/{{ row.session_id }}" hx-get="/sessions/{{ row.session_id }}" hx-target="#content" hx-push-url="true">{{ row.title or row.session_id[:8] }}</a>
+                </td>
+                <td style="text-align:right;">
+                    <a href="/sessions/{{ row.session_id }}?tab=cost" hx-get="/sessions/{{ row.session_id }}?tab=cost" hx-target="#content" hx-push-url="true">{{ row.cost }}</a>
+                </td>
+                <td style="text-align:right;">{{ row.cumulative }}</td>
+                <td style="text-align:right;">{{ "%.1f"|format(row.cum_pct) }}%</td>
+            </tr>
+            {% endfor %}
+        </tbody>
+    </table>
+    {% else %}
+    <p>No sessions with cost{% if is_filtered %} during {{ filter_label }}{% endif %}.</p>
+    {% endif %}
+</div>
+
+<h2>Breakdowns</h2>
+<div class="card">
+    <p style="color:#888;margin:0 0 0.6rem;">Each breakdown partitions every session into two buckets and compares total spend. "% of total $" sums to 100% across the pair.</p>
+
+    <div style="display:grid;grid-template-columns:repeat(auto-fit,minmax(320px,1fr));gap:1rem;">
+
+        {% set splits = [
+            ("Subagent presence", subagent_split, "Sessions that used Task/Agent subagents or produced sidechain messages."),
+            ("Huge reads", huge_reads_split, "Sessions where Read-category cache creation is ≥10% of cost and ≥100k tokens."),
+            ("Skill / slash command usage", skill_split, "Sessions that invoked a non-built-in slash command or skill."),
+        ] %}
+
+        {% for label, split, hint in splits %}
+        <div>
+            <h3 style="margin-bottom:0.25rem;">{{ label }}</h3>
+            <p style="color:#888;font-size:0.82rem;margin:0 0 0.4rem;">{{ hint }}</p>
+            <table>
+                <thead>
+                    <tr>
+                        <th></th>
+                        <th style="text-align:right;">Sessions</th>
+                        <th style="text-align:right;">Total $</th>
+                        <th style="text-align:right;">Mean $</th>
+                        <th style="text-align:right;">% of total $</th>
+                    </tr>
+                </thead>
+                <tbody>
+                    <tr>
+                        <td><strong>With</strong></td>
+                        <td style="text-align:right;">{{ split["with"].sessions }}</td>
+                        <td style="text-align:right;">{{ split["with"].cost }}</td>
+                        <td style="text-align:right;">{{ split["with"].mean_cost }}</td>
+                        <td style="text-align:right;">{{ "%.1f"|format(split["with"].pct_cost) }}%</td>
+                    </tr>
+                    <tr>
+                        <td><strong>Without</strong></td>
+                        <td style="text-align:right;">{{ split["without"].sessions }}</td>
+                        <td style="text-align:right;">{{ split["without"].cost }}</td>
+                        <td style="text-align:right;">{{ split["without"].mean_cost }}</td>
+                        <td style="text-align:right;">{{ "%.1f"|format(split["without"].pct_cost) }}%</td>
+                    </tr>
+                </tbody>
+            </table>
+        </div>
+        {% endfor %}
+
+    </div>
+</div>

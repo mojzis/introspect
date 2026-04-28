@@ -12,7 +12,6 @@ this module is side-effect-free.
 
 from __future__ import annotations
 
-import re
 from typing import Any
 
 import duckdb
@@ -29,7 +28,7 @@ from introspect.pricing import (
     PRICING_OUTPUT_RATE_SQL,
 )
 
-from ._helpers import conn, format_cost, parent, templates
+from ._helpers import conn, format_cost, parent, parse_day, templates
 
 ALLOWED_BREAKDOWNS: tuple[str, ...] = ("total", "model", "project")
 DEFAULT_BREAKDOWN = "total"
@@ -429,23 +428,6 @@ def _build_hourly_panel_context(
     return base
 
 
-_DAY_RE = re.compile(r"^\d{4}-\d{2}-\d{2}$")
-
-
-def _parse_day(day_str: str) -> str:
-    """Validate a YYYY-MM-DD day string.
-
-    A pattern check is sufficient — the validated string is bound as a
-    DuckDB query parameter (not interpolated), and DuckDB rejects a
-    non-date string with a clear error if one slips through. We don't
-    parse to a Python date because :class:`datetime.date` carries no
-    timezone, and the column is compared as a SQL ``DATE`` regardless.
-    """
-    if not _DAY_RE.match(day_str):
-        raise HTTPException(status_code=400, detail="Invalid day format")
-    return day_str
-
-
 async def daily_panel(request: Request, breakdown: str) -> HTMLResponse:
     """Return the daily-cost panel fragment (chart + controls)."""
     context = build_daily_panel_context(conn(request), breakdown)
@@ -459,7 +441,10 @@ async def hourly_panel(
     breakdown: str,
 ) -> HTMLResponse:
     """Return the hourly-cost panel fragment for ``day``."""
-    day_str = _parse_day(day)
+    try:
+        day_str = parse_day(day)
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
     context = _build_hourly_panel_context(conn(request), day_str, breakdown)
     context["parent"] = parent(request)
     return templates.TemplateResponse(request, "_hourly_cost_panel.html", context)

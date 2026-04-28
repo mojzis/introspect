@@ -190,13 +190,27 @@
                         var day = (rawX instanceof Date)
                             ? rawX.toISOString().slice(0, 10)
                             : String(rawX).slice(0, 10);
-                        var url = '/cost-overview/breakdown/'
-                            + encodeURIComponent(day)
-                            + '?breakdown=' + encodeURIComponent(breakdown);
-                        htmx.ajax('GET', url, {
-                            target: '#hourly-cost-panel',
-                            swap: 'innerHTML'
-                        });
+                        htmx.ajax('GET',
+                            '/cost-overview/breakdown/' + encodeURIComponent(day)
+                            + '?breakdown=' + encodeURIComponent(breakdown),
+                            {target: '#hourly-cost-panel', swap: 'innerHTML'}
+                        );
+                        htmx.ajax('GET',
+                            '/cost-overview/portfolio?day=' + encodeURIComponent(day),
+                            {target: '#cost-portfolio-panel', swap: 'innerHTML'}
+                        );
+                    });
+                } else if (el.dataset.onClick === 'portfolio-hour') {
+                    var day = el.dataset.day || '';
+                    el.on('plotly_click', function (evt) {
+                        if (!evt || !evt.points || !evt.points.length) return;
+                        // Hourly bucket arrives as the strftime "HH:00" string.
+                        var hour = String(evt.points[0].x).slice(0, 2);
+                        htmx.ajax('GET',
+                            '/cost-overview/portfolio?day=' + encodeURIComponent(day)
+                            + '&hour=' + encodeURIComponent(hour),
+                            {target: '#cost-portfolio-panel', swap: 'innerHTML'}
+                        );
                     });
                 }
             });
