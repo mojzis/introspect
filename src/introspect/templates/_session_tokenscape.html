@@ -1,0 +1,57 @@
+{% if not tokenscape_ctx.has_data %}
+<div class="card">
+    <p>{% if tokenscape_ctx.error %}<strong>Tokenscape unavailable.</strong> {{ tokenscape_ctx.error }}{% else %}No assistant turns yet — nothing to plot.{% endif %}</p>
+</div>
+{% else %}
+
+<div class="card">
+    <h2>Where the cost went · session tokenscape</h2>
+    <p style="color:#666;margin:0 0 0.6rem;">
+        Each turn's input context decomposed by content category. A single early read that persists through many turns shows up as a wide coloured slab — that's the <em>tokens × turns persisted</em> that drives the cost. Token counts are estimated (≈ 4 chars/token); <code>system + tool defs</code> is solved from the gap between API input tokens and message content at turn 1.
+    </p>
+    <div id="session-tokenscape-chart"
+         class="cost-chart"
+         data-figure-id="session-tokenscape-data"
+         data-modebar="hover"
+         data-height="420"
+         style="width:100%;min-height:420px;"></div>
+    <script type="application/json" id="session-tokenscape-data">{{ tokenscape_ctx.figure_json|safe }}</script>
+    <p style="color:#888;margin:0.6rem 0 0;font-size:0.85rem;">
+        {{ tokenscape_ctx.turn_count }} assistant turns
+        {% if tokenscape_ctx.compact_count %} · {{ tokenscape_ctx.compact_count }} /compact event{{ 's' if tokenscape_ctx.compact_count != 1 else '' }}{% endif %}
+        · total input ≈ {{ "{:,}".format(tokenscape_ctx.total_input_tokens) }} tokens
+    </p>
+</div>
+
+{% if tokenscape_ctx.top_reads %}
+<h2>Top persistent reads</h2>
+<div class="card">
+    <p style="color:#888;margin:0 0 0.6rem;">Tool results that lived in the cache the longest, ranked by <code>tokens × turns persisted</code>. The biggest one is what to investigate first.</p>
+    <table>
+        <thead>
+            <tr>
+                <th>#</th>
+                <th>What</th>
+                <th style="text-align:right;">≈ tokens</th>
+                <th style="text-align:right;">arrived turn</th>
+                <th style="text-align:right;">persisted turns</th>
+                <th style="text-align:right;">share of input</th>
+            </tr>
+        </thead>
+        <tbody>
+            {% for r in tokenscape_ctx.top_reads %}
+            <tr>
+                <td>{{ loop.index }}</td>
+                <td>{{ r.label }}</td>
+                <td style="text-align:right;">{{ "{:,.0f}".format(r.tokens) }}</td>
+                <td style="text-align:right;">{{ r.arrival_turn }}</td>
+                <td style="text-align:right;">{{ r.persisted }}</td>
+                <td style="text-align:right;">{{ "%.1f"|format(r.share_pct) }}%</td>
+            </tr>
+            {% endfor %}
+        </tbody>
+    </table>
+</div>
+{% endif %}
+
+{% endif %}

@@ -1,10 +1,13 @@
 """Session-related route handlers."""
 
 import json
+import logging
 import math
 import re
 from pathlib import PurePosixPath
 
+import nolegend
+import plotly.graph_objects as go
 from fastapi import Request
 from fastapi.responses import HTMLResponse
 
@@ -26,6 +29,19 @@ from ._helpers import (
     session_row_to_dict,
     templates,
 )
+
+logger = logging.getLogger(__name__)
+
+# Lazy template activator so importing this module doesn't mutate
+# Plotly's default template state (matches the cost_breakdown idiom).
+_template_activated: list[bool] = [False]
+
+
+def _ensure_template() -> None:
+    if not _template_activated[0]:
+        nolegend.activate()
+        _template_activated[0] = True
+
 
 _MESSAGE_HARD_CAP = 5000
 _THINKING_PREVIEW_MAX = 200
@@ -1373,7 +1389,367 @@ def _build_chart_from_attrib(
     )
 
 
-_VALID_TABS = {"messages", "cost"}
+# --- Tokenscape -------------------------------------------------------
+#
+# "Where the cost went": each turn's input context decomposed into
+# system / user / assistant_text / tool_result. A single early read
+# that persists through many turns shows up as a large coloured slab
+# spanning the persistence range — making `tokens x turns_persisted`
+# (the actual cost driver) immediately visible. /compact events drop
+# accumulated context and reset the slabs.
+
+_TOKENSCAPE_CATEGORIES = ("system", "user", "assistant_text", "tool_result")
+_TOKENSCAPE_COLORS = {
+    "system": "#b8b3a3",
+    "user": "#7fbef0",
+    "assistant_text": "#bda6e6",
+    "tool_result": "#e3a08c",
+}
+# Char-to-token estimate. Anthropic doesn't expose a tokenizer for
+# Claude, so we use ~4 chars/token as a rough proxy for char-derived
+# breakdowns. The actual ``input_tokens`` from the API is the ground
+# truth and is plotted as an overlay where useful.
+_CHARS_PER_TOKEN = 4.0
+# Fraction-of-prev-turn-input below which we treat a drop as a
+# /compact event. /compact typically pulls 24k+ context down to ~4k,
+# so even an aggressive 0.4 ratio is safely above natural variation.
+_COMPACT_DROP_RATIO = 0.5
+# Minimum gap between consecutive turns' actual input_tokens to even
+# consider a /compact (filters out short cheap sessions where small
+# absolute drops would otherwise trip the ratio).
+_COMPACT_MIN_DROP_TOKENS = 5_000
+# Top-N callouts on the chart for the most expensive persistent reads.
+_TOKENSCAPE_TOP_READS = 2
+
+
+def _classify_block_kind(kind: str | None) -> str | None:
+    """Map ``session_messages_enriched.kind`` to a tokenscape category."""
+    if kind in ("human_prompt", "slash_command", "subagent_prompt"):
+        return "user"
+    if kind in ("agent_text", "agent_thinking", "agent_tool_call"):
+        return "assistant_text"
+    if kind == "tool_result":
+        return "tool_result"
+    return None
+
+
+def _build_tokenscape_context(db, session_id: str) -> dict:  # noqa: PLR0912, PLR0915
+    """Build the per-turn input-token decomposition shown on the Tokenscape tab.
+
+    Walks the session's enriched message blocks once and accumulates a
+    cumulative char-count per category at every assistant-turn boundary.
+    A /compact event (sharp drop in API ``input_tokens``) resets the
+    accumulators so the post-compact context starts fresh. Returns the
+    Plotly figure JSON plus summary stats — including the top
+    persistent reads, the ones most worth investigating.
+    """
+    rows = db.execute(
+        """
+        WITH result_meta AS (
+            -- Tool-result blocks don't expose ``id`` in the view (JSON field
+            -- name is ``tool_use_id``), so look it up from raw_messages plus
+            -- block_idx, and extract the content size in the same pass.
+            SELECT
+                rm.uuid AS user_uuid,
+                e.block_idx AS block_idx,
+                json_extract_string(
+                    rm.message, '$.content[' || e.block_idx || '].tool_use_id'
+                ) AS result_tool_use_id,
+                LENGTH(COALESCE(
+                    json_extract_string(
+                        rm.message, '$.content[' || e.block_idx || '].content'
+                    ),
+                    ''
+                )) AS result_char_count
+            FROM session_messages_enriched e
+            JOIN raw_messages rm ON rm.uuid = e.uuid
+            WHERE e.session_id = ? AND e.kind = 'tool_result'
+        )
+        SELECT
+            e.uuid,
+            e.timestamp,
+            e.kind,
+            COALESCE(e.tool_name, tc.tool_name) AS tool_name,
+            COALESCE(e.tool_input, tc.tool_input) AS tool_input,
+            CASE
+                WHEN e.kind = 'tool_result' THEN COALESCE(rmeta.result_char_count, 0)
+                WHEN e.kind = 'agent_tool_call' THEN
+                    LENGTH(COALESCE(e.tool_input, ''))
+                WHEN e.kind = 'agent_thinking' THEN
+                    LENGTH(COALESCE(e.thinking_text, ''))
+                ELSE
+                    LENGTH(COALESCE(e.text, ''))
+            END AS char_count,
+            amc.input_tokens,
+            amc.cache_read_tokens
+        FROM session_messages_enriched e
+        LEFT JOIN result_meta rmeta
+          ON rmeta.user_uuid = e.uuid AND rmeta.block_idx = e.block_idx
+        LEFT JOIN tool_calls tc ON tc.tool_use_id = rmeta.result_tool_use_id
+        LEFT JOIN assistant_message_costs amc ON amc.uuid = e.uuid
+        WHERE e.session_id = ? AND NOT e.is_sidechain
+        ORDER BY e.timestamp ASC, e.block_idx ASC
+        """,
+        [session_id, session_id],
+    ).fetchall()
+
+    if not rows:
+        return {"has_data": False}
+
+    # Accumulator per category in *chars* — converted to tokens at
+    # snapshot time.  Cumulative across the run; reset on /compact.
+    cumulative_chars: dict[str, int] = dict.fromkeys(_TOKENSCAPE_CATEGORIES, 0)
+    seen_assistant_uuid: set[str] = set()
+    turns: list[dict] = []
+    # Per tool_result block: (turn_at_which_it_arrived, char_count, label)
+    # — used to compute "tokens x turns persisted" after the walk.
+    reads: list[dict] = []
+    system_baseline_tokens: float | None = None
+
+    for (
+        uuid,
+        _ts,
+        kind,
+        tool_name,
+        tool_input,
+        char_count,
+        input_tokens,
+        cache_read_tokens,
+    ) in rows:
+        category = _classify_block_kind(kind)
+        chars = int(char_count or 0)
+        if category is not None and chars:
+            cumulative_chars[category] += chars
+            if category == "tool_result":
+                reads.append(
+                    {
+                        "char_count": chars,
+                        "tool_name": tool_name or "",
+                        "tool_input": tool_input or "",
+                        "arrival_turn": len(turns) + 1,
+                    }
+                )
+        # Each assistant message gets exactly one snapshot — the first
+        # block's row carries the API ``input_tokens`` (+ cache_read)
+        # for that turn. With prompt caching, almost all the context
+        # mass lives in cache_read_tokens; ``input_tokens`` alone is
+        # tiny (just the new content the cache didn't cover), so the
+        # ground-truth "context the model actually saw" is the sum.
+        if input_tokens is not None and uuid and uuid not in seen_assistant_uuid:
+            seen_assistant_uuid.add(uuid)
+            api_in = int(input_tokens or 0)
+            api_cache = int(cache_read_tokens or 0)
+            api_context = api_in + api_cache
+            content_tokens = sum(cumulative_chars.values()) / _CHARS_PER_TOKEN
+
+            # /compact detection: a sharp drop in API context size vs
+            # the previous turn means the model is no longer being fed
+            # our accumulated history. Reset cumulative content so the
+            # post-compact bars don't double-count.
+            compact_event = False
+            if turns:
+                prev_api = turns[-1]["api_context_tokens"]
+                drop = prev_api - api_context
+                if (
+                    prev_api > 0
+                    and drop > _COMPACT_MIN_DROP_TOKENS
+                    and api_context < prev_api * _COMPACT_DROP_RATIO
+                ):
+                    compact_event = True
+                    cumulative_chars = dict.fromkeys(_TOKENSCAPE_CATEGORIES, 0)
+                    content_tokens = 0.0
+
+            # System baseline solved once at turn 1: the surplus
+            # between API context tokens and message content tokens is
+            # the system prompt + tool definitions.
+            if system_baseline_tokens is None:
+                system_baseline_tokens = max(0.0, api_context - content_tokens)
+
+            # Scale the char-derived breakdown so it sums to the actual
+            # API context size — char/token estimates drift on long
+            # sessions, and we'd rather the bar height match the bill
+            # than the chars match perfectly.
+            content_total = sum(cumulative_chars.values())
+            target_content = max(0.0, api_context - system_baseline_tokens)
+            if content_total > 0 and target_content > 0:
+                scale = target_content / (content_total / _CHARS_PER_TOKEN)
+            else:
+                scale = 0.0
+            cat_tokens = {
+                cat: (cumulative_chars[cat] / _CHARS_PER_TOKEN) * scale
+                for cat in _TOKENSCAPE_CATEGORIES
+                if cat != "system"
+            }
+            cat_tokens["system"] = system_baseline_tokens
+
+            turns.append(
+                {
+                    "turn": len(turns) + 1,
+                    "api_context_tokens": api_context,
+                    "api_input_tokens": api_in,
+                    "system": cat_tokens["system"],
+                    "user": cat_tokens["user"],
+                    "assistant_text": cat_tokens["assistant_text"],
+                    "tool_result": cat_tokens["tool_result"],
+                    "compact_event": compact_event,
+                }
+            )
+
+    if not turns:
+        return {"has_data": False}
+
+    # Persistent-read attribution: each tool_result keeps showing up
+    # in subsequent turns until /compact wipes the cache. The top reads
+    # by `tokens x turns_persisted` are the ones worth investigating.
+    compact_turns = [t["turn"] for t in turns if t["compact_event"]]
+    last_turn = turns[-1]["turn"]
+
+    def _persistence_end(arrival: int) -> int:
+        for ct in compact_turns:
+            if ct > arrival:
+                return ct - 1
+        return last_turn
+
+    for read in reads:
+        end_turn = _persistence_end(read["arrival_turn"])
+        read["persisted"] = max(0, end_turn - read["arrival_turn"] + 1)
+        read["tokens"] = read["char_count"] / _CHARS_PER_TOKEN
+        read["weight"] = read["tokens"] * read["persisted"]
+        read["label"] = _read_label(read["tool_name"], read["tool_input"])
+
+    reads.sort(key=lambda r: r["weight"], reverse=True)
+    top_reads = reads[:_TOKENSCAPE_TOP_READS]
+
+    # "Share of input bill" uses the API context total (input + cache_read)
+    # since with prompt caching almost all the bill lives in cache_read.
+    total_context_tokens = sum(t["api_context_tokens"] for t in turns) or 1
+    for r in top_reads:
+        r["share_pct"] = 100.0 * r["weight"] / total_context_tokens
+
+    figure_json = _render_tokenscape_figure(turns, top_reads, compact_turns)
+
+    return {
+        "has_data": True,
+        "figure_json": figure_json,
+        "turn_count": len(turns),
+        "compact_count": len(compact_turns),
+        "top_reads": top_reads,
+        "total_input_tokens": int(total_context_tokens),
+    }
+
+
+def _read_label(tool_name: str, tool_input_raw: str) -> str:
+    """One-line label for a tool_result, e.g. ``Read settings.py``."""
+    if not tool_name:
+        return "tool result"
+    if tool_name == "Read":
+        d = _safe_json(tool_input_raw)
+        return f"Read {_basename(d.get('file_path'))}"
+    if tool_name == "Bash":
+        d = _safe_json(tool_input_raw)
+        cmd = (d.get("command") or "").strip().split()
+        head = " ".join(cmd[:2]) if cmd else "(empty)"
+        return f"Bash · {head}"
+    if tool_name in ("WebFetch", "WebSearch"):
+        return tool_name
+    if tool_name.startswith("mcp__"):
+        return f"mcp · {tool_name[len('mcp__') :]}"
+    return tool_name
+
+
+def _render_tokenscape_figure(
+    turns: list[dict],
+    top_reads: list[dict],
+    compact_turns: list[int],
+) -> str:
+    """Render the stacked-bar tokenscape figure as Plotly JSON."""
+    _ensure_template()
+    xs = [t["turn"] for t in turns]
+    fig = go.Figure()
+    for category in _TOKENSCAPE_CATEGORIES:
+        fig.add_trace(
+            go.Bar(
+                x=xs,
+                y=[t[category] for t in turns],
+                name=category.replace("_", " "),
+                marker={"color": _TOKENSCAPE_COLORS[category]},
+                hovertemplate=(
+                    f"<b>{category.replace('_', ' ')}</b><br>"
+                    "turn %{x}<br>"
+                    "≈ %{y:,.0f} tokens<extra></extra>"
+                ),
+            )
+        )
+
+    annotations: list[dict] = []
+    # Big-read callouts: place text in the middle of the persistence
+    # range, vertically centred on the tool_result band of the bar.
+    for r in top_reads:
+        if r["persisted"] <= 0 or r["tokens"] <= 0:
+            continue
+        mid_x = r["arrival_turn"] + r["persisted"] / 2 - 0.5
+        # Y-anchor: the top of the tool_result band at the arrival turn.
+        anchor_turn = turns[r["arrival_turn"] - 1]
+        band_bottom = (
+            anchor_turn["system"] + anchor_turn["user"] + anchor_turn["assistant_text"]
+        )
+        mid_y = band_bottom + anchor_turn["tool_result"] / 2
+        annotations.append(
+            {
+                "x": mid_x,
+                "y": mid_y,
+                "xref": "x",
+                "yref": "y",
+                "text": (
+                    f"<b>{r['label']}</b><br>"
+                    f"≈ {r['tokens']:,.0f} tokens × {r['persisted']} turns"  # noqa: RUF001
+                    f"<br>≈ {r['share_pct']:.0f}% of input bill"
+                ),
+                "showarrow": False,
+                "font": {"size": 11, "color": "#5a3a25"},
+                "align": "center",
+                "bgcolor": "rgba(255,255,255,0.6)",
+                "borderpad": 4,
+            }
+        )
+
+    # /compact dashed verticals + label
+    for ct in compact_turns:
+        fig.add_vline(
+            x=ct - 0.5,
+            line_dash="dash",
+            line_color="#888",
+            line_width=1,
+        )
+        annotations.append(
+            {
+                "x": ct - 0.5,
+                "y": 1.02,
+                "xref": "x",
+                "yref": "paper",
+                "text": "/compact",
+                "showarrow": False,
+                "font": {"size": 11, "color": "#888"},
+                "xanchor": "left",
+            }
+        )
+
+    fig.update_layout(
+        template="tufte",
+        barmode="stack",
+        bargap=0.05,
+        showlegend=True,
+        legend={"orientation": "h", "y": -0.15, "x": 0},
+        hovermode="x unified",
+        xaxis_title="turn",
+        yaxis_title="input tokens (≈)",
+        margin={"l": 70, "r": 30, "t": 30, "b": 80},
+        annotations=annotations,
+    )
+    return fig.to_json()
+
+
+_VALID_TABS = {"messages", "cost", "tokenscape"}
 
 
 async def session_detail(
@@ -1433,8 +1809,18 @@ async def session_detail(
 
     parsed_messages: list[dict] = []
     cost_ctx: dict = {}
+    tokenscape_ctx: dict = {}
     if active_tab == "messages":
         parsed_messages = _build_messages_context(db, session_id)
+    elif active_tab == "tokenscape":
+        try:
+            tokenscape_ctx = _build_tokenscape_context(db, session_id)
+        except Exception as exc:
+            logger.exception("Failed to build tokenscape for %s", session_id)
+            tokenscape_ctx = {
+                "has_data": False,
+                "error": f"{type(exc).__name__}: {exc}",
+            }
     else:  # "cost"
         cost_ctx = _build_cost_context(db, session_id)
 
@@ -1450,6 +1836,7 @@ async def session_detail(
             "tool_summary": tool_summary,
             "active_tab": active_tab,
             "cost_ctx": cost_ctx,
+            "tokenscape_ctx": tokenscape_ctx,
             "file_metrics": {
                 "files_read": file_metrics[0] or 0,
                 "files_edited": file_metrics[1] or 0,

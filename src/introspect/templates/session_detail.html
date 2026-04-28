@@ -31,7 +31,7 @@
 </div>
 
 <div class="tab-strip" style="display:flex;gap:0.5rem;border-bottom:1px solid #ddd;margin:1rem 0;">
-    {% for slug, label in [('messages','Messages'),('cost','Cost')] %}
+    {% for slug, label in [('messages','Messages'),('cost','Cost'),('tokenscape','Tokenscape')] %}
     <a href="/sessions/{{ session_id }}?tab={{ slug }}"
        hx-get="/sessions/{{ session_id }}?tab={{ slug }}"
        hx-target="#content" hx-push-url="true"
@@ -47,6 +47,8 @@
 {% include '_session_messages.html' %}
 {% elif active_tab == 'cost' %}
 {% include '_session_cost.html' %}
+{% elif active_tab == 'tokenscape' %}
+{% include '_session_tokenscape.html' %}
 {% endif %}
 {% else %}
 <div class="card">

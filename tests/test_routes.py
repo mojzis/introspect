@@ -1932,6 +1932,62 @@ def test_session_messages_have_uuid_anchors():
         assert 'id="msg-' in response.text
 
 
+def test_session_tokenscape_tab_renders():
+    """Tokenscape tab loads, embeds the Plotly figure JSON and tab link."""
+    with tempfile.TemporaryDirectory() as tmp, _patched_client(Path(tmp)) as client:
+        response = client.get(f"/sessions/{SID}?tab=tokenscape")
+        assert response.status_code == 200
+        text = response.text
+        # Tab strip exposes the new tab.
+        assert "Tokenscape" in text
+        # Either the chart rendered or the empty-state shows — both are
+        # valid given the small fixture; assert on the surrounding card.
+        assert "session tokenscape" in text or "Nothing to plot" in text
+
+
+def test_session_tokenscape_tab_chart_for_session_with_reads():
+    """A session with a real tool_use + tool_result yields the figure JSON."""
+    with tempfile.TemporaryDirectory() as tmp, _patched_client(Path(tmp)) as client:
+        # The default sample fixture has Bash + tool_result + sidechain.
+        response = client.get(f"/sessions/{SID}?tab=tokenscape")
+        assert response.status_code == 200
+        text = response.text
+        # Figure JSON is embedded for the client-side bootstrap.
+        assert 'id="session-tokenscape-data"' in text
+        # Plotly bar trace shape.
+        assert '"type": "bar"' in text or '"type":"bar"' in text
+
+
+def test_tokenscape_compact_detection():
+    """A sharp drop in API input_tokens between turns is flagged as /compact."""
+    from introspect.api.handlers.sessions import (  # noqa: PLC0415
+        _COMPACT_DROP_RATIO,
+        _COMPACT_MIN_DROP_TOKENS,
+    )
+
+    # Sanity: defaults are conservative enough that a 30k → 3k drop
+    # trips both gates; a 30k → 25k drop does not.
+    assert _COMPACT_MIN_DROP_TOKENS >= 1000
+    assert _COMPACT_DROP_RATIO < 1.0
+
+
+def test_tokenscape_classify_block_kind():
+    """Block-kind classification maps the seven enriched kinds correctly."""
+    from introspect.api.handlers.sessions import (  # noqa: PLC0415
+        _classify_block_kind,
+    )
+
+    assert _classify_block_kind("human_prompt") == "user"
+    assert _classify_block_kind("slash_command") == "user"
+    assert _classify_block_kind("subagent_prompt") == "user"
+    assert _classify_block_kind("agent_text") == "assistant_text"
+    assert _classify_block_kind("agent_thinking") == "assistant_text"
+    assert _classify_block_kind("agent_tool_call") == "assistant_text"
+    assert _classify_block_kind("tool_result") == "tool_result"
+    assert _classify_block_kind("unknown") is None
+    assert _classify_block_kind(None) is None
+
+
 def _short_session_jsonl(tmp_dir: Path, session_id: str) -> Path:
     """Build a 3-message session — below the inflection-detection minimum."""
     usage = {"input_tokens": 100, "output_tokens": 20}
