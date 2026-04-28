@@ -1,6 +1,8 @@
 """DuckDB database initialization and view management."""
 
 import contextlib
+import glob
+import logging
 from pathlib import Path
 
 import duckdb
@@ -13,6 +15,8 @@ from introspect.sql_fragments import (
     SESSION_COST_SUBQUERY,
     TOOL_COUNTS_SUBQUERY,
 )
+
+log = logging.getLogger(__name__)
 
 DEFAULT_DB_PATH = Path.home() / ".introspect" / "introspect.duckdb"
 DEFAULT_JSONL_GLOB = str(Path.home() / ".claude" / "projects" / "**" / "*.jsonl")
@@ -45,9 +49,57 @@ def _is_lock_error(exc: duckdb.IOException) -> bool:
     return any(marker in msg for marker in _LOCK_ERROR_MARKERS)
 
 
+# DuckDB's default ``maximum_object_size`` is 16MB. Some Claude Code tool
+# results (Read of large files, big diffs) exceed that and abort the entire
+# load. 512MB comfortably fits any realistic message.
+_MAX_TOOL_RESULT_SIZE_BYTES = 512 * 1024 * 1024
+
 _READ_JSON_OPTS = (
-    "filename=true, format='newline_delimited', union_by_name=true, ignore_errors=true"
+    f"filename=true, format='newline_delimited', union_by_name=true, "
+    f"ignore_errors=true, maximum_object_size={_MAX_TOOL_RESULT_SIZE_BYTES}"
 )
+
+
+def _quote_sql_string(value: str) -> str:
+    """Escape a Python string for use as a DuckDB SQL literal."""
+    return "'" + value.replace("'", "''") + "'"
+
+
+def _jsonl_read_expr(source: str | list[str]) -> str:
+    """Build a ``read_json_auto(...)`` expression.
+
+    ``source`` may be a glob string (fast path) or an explicit list of file
+    paths (used by the per-file fallback that excludes unparseable files).
+    """
+    if isinstance(source, str):
+        return f"read_json_auto({_quote_sql_string(source)}, {_READ_JSON_OPTS})"
+    quoted = ", ".join(_quote_sql_string(p) for p in source)
+    return f"read_json_auto([{quoted}], {_READ_JSON_OPTS})"
+
+
+def _filter_parseable_files(files: list[str]) -> list[str]:
+    """Return the subset of ``files`` that ``read_json_auto`` can scan.
+
+    Probes each file individually with a COUNT(*) so any DuckDB error (size
+    limit, malformed bytes, missing file, etc.) surfaces here rather than
+    aborting the bulk load. Cost is O(files): one in-memory parse per input,
+    so this is the slow path used only after a bulk-load failure.
+    """
+    parseable: list[str] = []
+    probe = duckdb.connect(":memory:")
+    try:
+        for path in files:
+            sql = f"SELECT COUNT(*) FROM {_jsonl_read_expr(path)}"  # noqa: S608
+            try:
+                probe.execute(sql).fetchone()
+            except duckdb.Error as exc:
+                log.warning("Skipping unparseable JSONL file %s: %s", path, exc)
+                continue
+            parseable.append(path)
+    finally:
+        probe.close()
+    return parseable
+
 
 _RAW_MESSAGES_COLUMNS = """
     filename AS file_path,
@@ -163,21 +215,7 @@ def materialize_views(
         with contextlib.suppress(duckdb.CatalogException):
             conn.execute(f"DROP TABLE IF EXISTS {name}")
 
-    _read = f"read_json_auto('{jsonl_glob}', {_READ_JSON_OPTS})"
-
-    conn.execute(f"""
-        CREATE TABLE raw_data AS
-        SELECT * FROM {_read}
-        {day_filter}
-    """)  # noqa: S608
-
-    conn.execute(f"""
-        CREATE TABLE raw_messages AS
-        SELECT {_RAW_MESSAGES_COLUMNS}
-        FROM {_read}
-        WHERE type IN ('user', 'assistant')
-        {and_day_filter}
-    """)  # noqa: S608
+    _load_raw_tables(conn, jsonl_glob, day_filter, and_day_filter)
 
     # Add indexes for common query patterns
     conn.execute("CREATE INDEX idx_rm_session ON raw_messages(session_id)")
@@ -189,6 +227,77 @@ def materialize_views(
     _create_indexes(conn, _DERIVED_INDEXES)
     _create_session_stats(conn, materialize=True)
     _create_indexes(conn, _SESSION_STATS_INDEXES)
+
+
+def _load_raw_tables(
+    conn: duckdb.DuckDBPyConnection,
+    jsonl_glob: str,
+    day_filter: str,
+    and_day_filter: str,
+) -> None:
+    """Create ``raw_data`` and ``raw_messages`` from the JSONL glob.
+
+    First tries the bulk read (fast path). On any DuckDB error from
+    ``read_json_auto`` (e.g. an oversized JSON object that exceeds
+    ``maximum_object_size`` even after we've raised it, or a corrupted file),
+    probes each file individually, drops the unparseable ones, and retries
+    with the surviving list so a single bad file can't take down the whole
+    load.
+    """
+    try:
+        _create_raw_tables(conn, jsonl_glob, day_filter, and_day_filter)
+    except duckdb.Error as exc:
+        log.warning(
+            "Bulk JSONL load failed (%s); retrying per-file to skip unparseable files.",
+            exc,
+        )
+        bulk_exc = exc
+    else:
+        return
+
+    # The first CREATE TABLE may have succeeded before the second failed —
+    # drop both so the retry starts from a clean slate.
+    for name in ("raw_messages", "raw_data"):
+        with contextlib.suppress(duckdb.CatalogException):
+            conn.execute(f"DROP TABLE IF EXISTS {name}")
+
+    files = sorted(glob.glob(jsonl_glob, recursive=True))  # noqa: PTH207
+    parseable = _filter_parseable_files(files)
+    if not parseable:
+        # Re-raise the original error rather than masking it with a different
+        # exception (read_json_auto on an empty list would raise an unrelated
+        # IOException, hiding the real cause).
+        msg = (
+            f"No parseable JSONL files under {jsonl_glob!r}; "
+            f"all {len(files)} candidate file(s) failed to load."
+        )
+        raise RuntimeError(msg) from bulk_exc
+
+    _create_raw_tables(conn, parseable, day_filter, and_day_filter)
+
+
+def _create_raw_tables(
+    conn: duckdb.DuckDBPyConnection,
+    source: str | list[str],
+    day_filter: str,
+    and_day_filter: str,
+) -> None:
+    """Issue the two CREATE TABLE statements for ``raw_data``/``raw_messages``."""
+    read_expr = _jsonl_read_expr(source)
+
+    conn.execute(f"""
+        CREATE TABLE raw_data AS
+        SELECT * FROM {read_expr}
+        {day_filter}
+    """)  # noqa: S608
+
+    conn.execute(f"""
+        CREATE TABLE raw_messages AS
+        SELECT {_RAW_MESSAGES_COLUMNS}
+        FROM {read_expr}
+        WHERE type IN ('user', 'assistant')
+        {and_day_filter}
+    """)  # noqa: S608
 
 
 def _build_project_map(
@@ -225,7 +334,7 @@ def _build_project_map(
 
 def _create_views(conn: duckdb.DuckDBPyConnection, jsonl_glob: str) -> None:
     """Create lazy views over JSONL files."""
-    _read = f"read_json_auto('{jsonl_glob}', {_READ_JSON_OPTS})"
+    _read = _jsonl_read_expr(jsonl_glob)
 
     conn.execute(f"""
         CREATE OR REPLACE VIEW raw_data AS
