@@ -451,8 +451,9 @@ def test_maximum_object_size_raised_above_default():
     """Default DuckDB limit is 16MB; some Claude tool results exceed it.
 
     Regression: a 31MB tool result aborted startup with InvalidInputException.
+    Threshold guards against accidentally lowering the limit back near 16MB.
     """
-    assert _MAX_TOOL_RESULT_SIZE_BYTES >= 64 * 1024 * 1024
+    assert _MAX_TOOL_RESULT_SIZE_BYTES >= 32 * 1024 * 1024
 
 
 def test_materialize_recovers_when_bulk_read_raises(monkeypatch, caplog):

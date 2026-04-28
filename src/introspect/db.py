@@ -80,13 +80,24 @@ def _jsonl_read_expr(source: str | list[str]) -> str:
 
 
 def _filter_parseable_files(files: list[str]) -> list[str]:
-    """Return the subset of ``files`` that ``read_json_auto`` can scan.
+    """Return ``files`` minus those that raise a hard read error.
 
-    Probes each file individually with a COUNT(*) so any DuckDB error (size
-    limit, malformed bytes, missing file, etc.) surfaces here rather than
-    aborting the bulk load. Cost is O(files): one in-memory parse per input,
-    so this is the slow path used only after a bulk-load failure.
+    Probes each file with a COUNT(*) so any DuckDB error that aborts the
+    bulk load (size limit, missing file, permission error) surfaces here.
+    Per-line malformed JSON is still swallowed by ``ignore_errors=true`` in
+    ``_READ_JSON_OPTS`` — that's intentional: the goal is to keep partial
+    files (a few corrupt lines among many good ones) rather than drop them
+    wholesale.
+
+    Cost is O(files): one in-memory full scan per input, so this is the
+    slow path used only after a bulk-load failure.
     """
+    if files:
+        log.warning(
+            "Probing %d JSONL file(s) individually after bulk-load failure; "
+            "this can take a while.",
+            len(files),
+        )
     parseable: list[str] = []
     probe = duckdb.connect(":memory:")
     try:
@@ -401,14 +412,14 @@ def _load_raw_tables(
     files = sorted(glob.glob(jsonl_glob, recursive=True))  # noqa: PTH207
     parseable = _filter_parseable_files(files)
     if not parseable:
-        # Re-raise the original error rather than masking it with a different
-        # exception (read_json_auto on an empty list would raise an unrelated
-        # IOException, hiding the real cause).
+        # Surface a ``duckdb.Error`` subclass so existing catch sites
+        # (mcp/tools.py, api handlers) handle this uniformly with other
+        # load failures. Chain ``bulk_exc`` so the original cause is kept.
         msg = (
             f"No parseable JSONL files under {jsonl_glob!r}; "
             f"all {len(files)} candidate file(s) failed to load."
         )
-        raise RuntimeError(msg) from bulk_exc
+        raise duckdb.IOException(msg) from bulk_exc
 
     _create_raw_tables(conn, parseable, day_filter, and_day_filter)
 
