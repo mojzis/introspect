@@ -1657,7 +1657,699 @@ def _build_chart_from_attrib(
     )
 
 
-_VALID_TABS = {"messages", "cost"}
+# --- Tokenscape -------------------------------------------------------
+#
+# "Where the cost went": each piece of content (system prompt, a user
+# message, a tool_result file read, an assistant text block) becomes
+# a *band* — a horizontal slab in a stacked-area chart that exists from
+# the turn the content arrived until the cache that holds it gets
+# discarded. A single early big read shows up as one wide rectangle
+# spanning many turns: the visual area equals the cost it caused.
+#
+# We have exact API token totals per turn (input + cache_read =
+# context the model saw). Within-turn allocation between bands uses
+# char counts, normalised so each turn's column sums to the API total.
+# The band heights for any given content are constant across the
+# turns where it persists.
+#
+# Two events truncate or rebuild the cache:
+# * 5-minute cache TTL break — cache_read drops to ~0, but the same
+#   total context is re-sent and recached. Bands persist; we draw a
+#   thin marker because the cache rebuild is itself expensive.
+# * /compact — total context drops sharply, history collapses into a
+#   summary. Bands reset.
+
+_TOKENSCAPE_TOP_READS = 6
+# One fill colour per content kind — identity comes from hover and
+# inline labels, not from a rainbow of band colours. Borders are a
+# darker variant of the fill so adjacent same-kind slabs stay distinct.
+_TOKENSCAPE_KIND_FILL = {
+    "system": "#cdc7b8",
+    "user": "#a8c8e8",
+    "assistant_text": "#c0b6e0",
+    "tool_result": "#e8a896",
+}
+_TOKENSCAPE_KIND_BORDER = {
+    "system": "#8f8772",
+    "user": "#5a8ec0",
+    "assistant_text": "#7a6cb0",
+    "tool_result": "#b8654a",
+}
+_TOKENSCAPE_KIND_LEGEND_LABEL = {
+    "system": "system",
+    "user": "user",
+    "assistant_text": "assistant text",
+    "tool_result": "tool result",
+}
+# Drop ratios for distinguishing /compact (truncates) from a 5-min
+# cache TTL break (rebuilds same context) — see module-doc above.
+_TOKENSCAPE_COMPACT_DROP_RATIO = 0.5
+_TOKENSCAPE_COMPACT_MIN_DROP = 5_000
+# Anthropic's prompt cache TTL is 5 minutes for the default tier;
+# longer idle gaps force the cache to be rebuilt next turn (cache_read
+# drops to ~0, cache_creation jumps to roughly the previous context).
+# Use a slight buffer below 5m to absorb timestamp jitter.
+_TOKENSCAPE_TTL_BREAK_MIN_GAP_SECONDS = 4 * 60 + 30
+_TOKENSCAPE_TTL_BREAK_CACHE_DROP_RATIO = 0.5
+_TOKENSCAPE_TTL_BREAK_MIN_CACHE = 5_000
+# Minimum persistence in turns for a tool_result to qualify as the
+# "dominant slab" eligible for the multi-line inline caption.
+_TOKENSCAPE_DOMINANT_MIN_PERSISTENCE = 4
+
+
+def _tokenscape_classify(kind: str | None) -> str | None:
+    """Map ``session_messages_enriched.kind`` to a tokenscape category."""
+    if kind in ("human_prompt", "slash_command", "subagent_prompt"):
+        return "user"
+    if kind in ("agent_text", "agent_thinking", "agent_tool_call"):
+        return "assistant_text"
+    if kind == "tool_result":
+        return "tool_result"
+    return None
+
+
+def _tokenscape_label(tool_name: str, tool_input_raw: str) -> str:
+    """One-line label for a tool_result band, e.g. ``Read settings.py``."""
+    if not tool_name:
+        return "tool result"
+    if tool_name == "Read":
+        d = _safe_json(tool_input_raw)
+        return f"Read {_basename(d.get('file_path'))}"
+    if tool_name == "Bash":
+        d = _safe_json(tool_input_raw)
+        cmd = (d.get("command") or "").strip().split()
+        head = " ".join(cmd[:2]) if cmd else "(empty)"
+        return f"Bash · {head}"
+    if tool_name in ("WebFetch", "WebSearch"):
+        return tool_name
+    if tool_name.startswith("mcp__"):
+        return f"mcp · {tool_name[len('mcp__') :]}"
+    return tool_name
+
+
+def _build_tokenscape_context(db, session_id: str) -> dict:
+    """Build the streamgraph context for the Tokenscape tab.
+
+    Each piece of content becomes a band that lives from its arrival
+    turn until /compact wipes it. Bands stack to API context totals;
+    top reads are individually labelled.
+    """
+    rows = db.execute(
+        """
+        WITH result_meta AS (
+            -- tool_result rows don't expose ``id`` in the view
+            -- (the JSON field is ``tool_use_id``), so look it up
+            -- from raw_messages and extract the content size in
+            -- the same pass.
+            SELECT
+                rm.uuid AS user_uuid,
+                e.block_idx AS block_idx,
+                json_extract_string(
+                    rm.message, '$.content[' || e.block_idx || '].tool_use_id'
+                ) AS result_tool_use_id,
+                LENGTH(COALESCE(
+                    json_extract_string(
+                        rm.message, '$.content[' || e.block_idx || '].content'
+                    ),
+                    ''
+                )) AS result_char_count
+            FROM session_messages_enriched e
+            JOIN raw_messages rm ON rm.uuid = e.uuid
+            WHERE e.session_id = ? AND e.kind = 'tool_result'
+        )
+        SELECT
+            e.uuid,
+            e.timestamp,
+            e.kind,
+            COALESCE(e.tool_name, tc.tool_name) AS tool_name,
+            COALESCE(e.tool_input, tc.tool_input) AS tool_input,
+            CASE
+                WHEN e.kind = 'tool_result' THEN COALESCE(rmeta.result_char_count, 0)
+                WHEN e.kind = 'agent_tool_call' THEN
+                    LENGTH(COALESCE(e.tool_input, ''))
+                WHEN e.kind = 'agent_thinking' THEN
+                    LENGTH(COALESCE(e.thinking_text, ''))
+                ELSE
+                    LENGTH(COALESCE(e.text, ''))
+            END AS char_count,
+            amc.input_tokens,
+            amc.cache_read_tokens,
+            amc.cache_creation_tokens
+        FROM session_messages_enriched e
+        LEFT JOIN result_meta rmeta
+          ON rmeta.user_uuid = e.uuid AND rmeta.block_idx = e.block_idx
+        LEFT JOIN tool_calls tc ON tc.tool_use_id = rmeta.result_tool_use_id
+        LEFT JOIN assistant_message_costs amc ON amc.uuid = e.uuid
+        WHERE e.session_id = ? AND NOT e.is_sidechain
+        ORDER BY e.timestamp ASC, e.block_idx ASC
+        """,
+        [session_id, session_id],
+    ).fetchall()
+    if not rows:
+        return {"has_data": False}
+
+    blocks, turns, events = _tokenscape_walk(rows)
+    if not turns:
+        return {"has_data": False}
+
+    figure_json, top_reads = _render_tokenscape_streamgraph(blocks, turns, events)
+    return {
+        "has_data": True,
+        "figure_json": figure_json,
+        "turn_count": len(turns),
+        "compact_count": sum(1 for e in events if e["kind"] == "compact"),
+        "ttl_break_count": sum(1 for e in events if e["kind"] == "ttl_break"),
+        "top_reads": top_reads,
+        "total_context_tokens": int(sum(t["api_context"] for t in turns)),
+    }
+
+
+def _tokenscape_walk(  # noqa: PLR0912
+    rows: list[tuple],
+) -> tuple[list[dict], list[dict], list[dict]]:
+    """Single pass over enriched message rows.
+
+    Produces ``(blocks, turns, events)``:
+
+    * ``blocks`` — every content block we can attribute to a band, with
+      ``arrival_turn`` set; ``end_turn`` is filled in below as we
+      discover /compact events.
+    * ``turns`` — one row per assistant message: API totals (input,
+      cache_read, cache_creation) plus a flag for any event that
+      occurred entering this turn.
+    * ``events`` — list of ``{turn, kind}`` for the marker overlay,
+      ``kind`` ∈ ``{"compact", "ttl_break"}``.
+    """
+    blocks: list[dict] = []
+    turns: list[dict] = []
+    events: list[dict] = []
+    seen_assistant_uuid: set[str] = set()
+    prev_turn_ts = None
+
+    for (
+        uuid,
+        ts,
+        kind,
+        tool_name,
+        tool_input,
+        char_count,
+        input_tokens,
+        cache_read_tokens,
+        cache_creation_tokens,
+    ) in rows:
+        category = _tokenscape_classify(kind)
+        chars = int(char_count or 0)
+        if category is not None and chars > 0:
+            block = {
+                "category": category,
+                "char_count": chars,
+                "arrival_turn": len(turns) + 1,
+                "end_turn": None,  # filled in after /compact detection
+                "label": "",
+            }
+            if category == "tool_result":
+                block["label"] = _tokenscape_label(tool_name or "", tool_input or "")
+            blocks.append(block)
+
+        if input_tokens is not None and uuid and uuid not in seen_assistant_uuid:
+            seen_assistant_uuid.add(uuid)
+            turn_idx = len(turns) + 1
+            api_in = int(input_tokens or 0)
+            api_cache = int(cache_read_tokens or 0)
+            api_creation = int(cache_creation_tokens or 0)
+            # Context the model actually processed = every token sent in
+            # this request, regardless of how it's billed. cache_creation
+            # is content that's being written to the cache *and* sent to
+            # the model on this turn — so a 5m TTL break preserves
+            # api_context (everything re-sent as cache_creation) even
+            # though cache_read drops to 0.
+            api_context = api_in + api_cache + api_creation
+
+            event_kind: str | None = None
+            if turns:
+                prev = turns[-1]
+                drop = prev["api_context"] - api_context
+                # /compact: total context plummets — history truncated.
+                # Take precedence over TTL detection because /compact is
+                # the more impactful event and can co-occur with an idle
+                # gap (running /compact after stepping away).
+                if (
+                    prev["api_context"] > 0
+                    and drop > _TOKENSCAPE_COMPACT_MIN_DROP
+                    and api_context
+                    < prev["api_context"] * _TOKENSCAPE_COMPACT_DROP_RATIO
+                ):
+                    event_kind = "compact"
+                # 5m TTL: idle gap >= 5min AND the cache was rebuilt
+                # (cache_read collapsed). Bands persist; only the
+                # cache write is "wasted" cost.
+                elif (
+                    prev_turn_ts is not None
+                    and ts is not None
+                    and (ts - prev_turn_ts).total_seconds()
+                    >= _TOKENSCAPE_TTL_BREAK_MIN_GAP_SECONDS
+                    and prev["api_cache_read"] > _TOKENSCAPE_TTL_BREAK_MIN_CACHE
+                    and api_cache
+                    < prev["api_cache_read"] * _TOKENSCAPE_TTL_BREAK_CACHE_DROP_RATIO
+                ):
+                    event_kind = "ttl_break"
+
+            if event_kind == "compact":
+                # Close out every still-open band on the previous turn.
+                for b in blocks:
+                    if b["end_turn"] is None:
+                        b["end_turn"] = turn_idx - 1
+                events.append({"turn": turn_idx, "kind": "compact"})
+            elif event_kind == "ttl_break":
+                # Bands persist — just record the cache rebuild cost.
+                events.append(
+                    {
+                        "turn": turn_idx,
+                        "kind": "ttl_break",
+                        "rebuild_tokens": api_creation,
+                    }
+                )
+
+            turns.append(
+                {
+                    "turn": turn_idx,
+                    "api_input": api_in,
+                    "api_cache_read": api_cache,
+                    "api_cache_creation": api_creation,
+                    "api_context": api_context,
+                    "event": event_kind,
+                }
+            )
+            prev_turn_ts = ts
+
+    # Fill end_turn for any band still open at the end of the session.
+    last_turn = turns[-1]["turn"] if turns else 0
+    for b in blocks:
+        if b["end_turn"] is None:
+            b["end_turn"] = last_turn
+
+    return blocks, turns, events
+
+
+def _render_tokenscape_streamgraph(  # noqa: PLR0912, PLR0915
+    blocks: list[dict],
+    turns: list[dict],
+    events: list[dict],
+) -> tuple[str, list[dict]]:
+    """Render the stepped stacked-area chart + return top-reads metadata.
+
+    The shape here is deliberate: ``line_shape='hv'`` turns each band
+    into a crisp rectangle, so a long-lived big read reads as a single
+    visible slab instead of a slanted polygon. Identity comes from
+    inline labels on the largest slabs and a four-colour legend at the
+    bottom — colour is by content kind, not by individual band.
+    """
+    n_turns = len(turns)
+    if n_turns == 0:
+        return "", []
+
+    # Segment turns by /compact events. Each segment gets its own
+    # system baseline; post-compact baselines absorb the synthetic
+    # summary message so the chart shows a single fat khaki slab
+    # rather than a giant misclassified user band.
+    compact_turns = [e["turn"] for e in events if e["kind"] == "compact"]
+    segments: list[tuple[int, int]] = []
+    seg_start = 1
+    for ct in compact_turns:
+        segments.append((seg_start, ct - 1))
+        seg_start = ct
+    segments.append((seg_start, n_turns))
+
+    read_blocks = [b for b in blocks if b["category"] == "tool_result"]
+    for b in read_blocks:
+        persisted = max(1, (b["end_turn"] or 1) - b["arrival_turn"] + 1)
+        b["weight"] = b["char_count"] * persisted
+        b["persisted"] = persisted
+    read_blocks.sort(key=lambda b: b["weight"], reverse=True)
+    named = read_blocks[:_TOKENSCAPE_TOP_READS]
+    other_reads = read_blocks[_TOKENSCAPE_TOP_READS:]
+
+    # In segments after the first, the largest block arriving on the
+    # segment's first turn is the compact summary. Folding it into the
+    # system baseline matches what the user feels: the previous
+    # conversation has been compressed into a single piece of context.
+    absorbed_block_ids: set[int] = set()
+    seg_baseline_label: dict[int, str] = {0: "system + tool defs"}
+    for seg_idx, (s_start, _s_end) in enumerate(segments):
+        if seg_idx == 0:
+            continue
+        seg_baseline_label[seg_idx] = "compact summary"
+        first_blocks = [b for b in blocks if b["arrival_turn"] == s_start]
+        if first_blocks:
+            absorbed_block_ids.add(id(max(first_blocks, key=lambda b: b["char_count"])))
+
+    def _band_id(b: dict) -> str:
+        if id(b) in absorbed_block_ids:
+            return "system"
+        if b["category"] == "user":
+            return "user"
+        if b["category"] == "assistant_text":
+            return "assistant_text"
+        if b in named:
+            return f"read_{named.index(b)}"
+        return "other_reads"
+
+    band_order: list[str] = ["system", "user", "assistant_text"]
+    band_order += [f"read_{i}" for i in range(len(named))]
+    if other_reads:
+        band_order.append("other_reads")
+    band_kind: dict[str, str] = {
+        "system": "system",
+        "user": "user",
+        "assistant_text": "assistant_text",
+        "other_reads": "tool_result",
+    }
+    for i in range(len(named)):
+        band_kind[f"read_{i}"] = "tool_result"
+
+    # Per-band CONSTANT height across the band's lifetime. The whole
+    # point of the chart is rectangles — heights cannot float per turn
+    # or the slabs slope and lose their identity. We solve a single
+    # global chars→tokens factor so the chart's y-axis stays in the
+    # same magnitude as api_context, then hold each band fixed at
+    # `chars * factor`.
+    band_height: dict[str, float] = dict.fromkeys(band_order, 0.0)
+    for b in blocks:
+        bid = _band_id(b)
+        if bid == "system":
+            continue
+        band_height[bid] = band_height.get(bid, 0.0) + b["char_count"]
+
+    # Per-segment system baseline (constant within a segment).
+    system_per_turn: list[float] = [0.0] * n_turns
+    seg_baseline_value: dict[int, float] = {}
+    for seg_idx, (s_start, s_end) in enumerate(segments):
+        first_turn = s_start
+        first_blocks = [
+            b
+            for b in blocks
+            if b["arrival_turn"] == first_turn and id(b) not in absorbed_block_ids
+        ]
+        first_chars = sum(b["char_count"] for b in first_blocks)
+        api_context_first = turns[first_turn - 1]["api_context"]
+        baseline = max(0.0, api_context_first - first_chars / 4.0)
+        baseline = max(baseline, min(api_context_first, 1000.0))
+        seg_baseline_value[seg_idx] = baseline
+        for t in range(s_start, s_end + 1):
+            if 1 <= t <= n_turns:
+                system_per_turn[t - 1] = baseline
+
+    # Solve the chars-to-tokens factor: pick the turn with the largest
+    # api_context, fit non-system bands' total chars at that turn to
+    # api_context minus baseline. This anchors the chart's peak to a
+    # plausible token total without per-turn rescaling.
+    peak_turn_idx = max(range(n_turns), key=lambda i: turns[i]["api_context"])
+    active_chars_at_peak = sum(
+        band_height[_band_id(b)]
+        for b in blocks
+        if b["arrival_turn"] <= peak_turn_idx + 1 <= (b["end_turn"] or n_turns)
+        and _band_id(b) != "system"
+    )
+    # `band_height` is per band, but blocks belonging to the same
+    # band share that key. Recompute properly: sum chars of blocks
+    # whose band is active at the peak turn.
+    active_chars_at_peak = sum(
+        b["char_count"]
+        for b in blocks
+        if b["arrival_turn"] <= peak_turn_idx + 1 <= (b["end_turn"] or n_turns)
+        and id(b) not in absorbed_block_ids
+    )
+    target_at_peak = max(
+        1.0, turns[peak_turn_idx]["api_context"] - system_per_turn[peak_turn_idx]
+    )
+    chars_to_tokens = target_at_peak / max(1.0, active_chars_at_peak)
+
+    # Apply the global factor to each band.
+    for bid in band_order:
+        if bid == "system":
+            continue
+        band_height[bid] *= chars_to_tokens
+
+    band_tokens: dict[str, list[float]] = {bid: [0.0] * n_turns for bid in band_order}
+    for b in blocks:
+        bid = _band_id(b)
+        if bid == "system":
+            continue
+        end = b["end_turn"] or n_turns
+        # The band is the SAME height every turn it's active. If
+        # multiple blocks share a band (e.g. several user messages),
+        # they additively raise the band height for the overlapping
+        # turns — but each individual contribution is still a flat
+        # rectangle.
+        per_block_h = b["char_count"] * chars_to_tokens
+        for t in range(b["arrival_turn"], end + 1):
+            if 1 <= t <= n_turns:
+                band_tokens[bid][t - 1] += per_block_h
+
+    # System absorbs the residual against api_context so each column
+    # roughly matches the API total; floor at the segment baseline so
+    # the bottom band stays visible even on cheap turns.
+    for i, t in enumerate(turns):
+        non_sys = sum(band_tokens[bid][i] for bid in band_order if bid != "system")
+        residual = t["api_context"] - non_sys
+        band_tokens["system"][i] = max(system_per_turn[i], residual)
+
+    fig = go.Figure()
+    xs = [t["turn"] for t in turns]
+    total_context = sum(t["api_context"] for t in turns) or 1
+
+    # Stacked bars — each turn becomes a column of discrete
+    # rectangles. ``bargap=0`` removes per-turn padding so a band
+    # spanning many turns reads as one wide slab, not a comb of
+    # individual columns. With explicit borders and a single fill
+    # colour per kind, the cost story stays legible at any session
+    # length where stacked-area would smooth into a curve.
+    for bid in band_order:
+        kind = band_kind[bid]
+        fill = _TOKENSCAPE_KIND_FILL[kind]
+        border = _TOKENSCAPE_KIND_BORDER[kind]
+        if bid == "system":
+            label = "system"
+        elif bid == "user":
+            label = "user"
+        elif bid == "assistant_text":
+            label = "assistant text"
+        elif bid == "other_reads":
+            label = "other tool results"
+        else:
+            label = named[int(bid.split("_", 1)[1])]["label"]
+        fig.add_trace(
+            go.Bar(
+                x=xs,
+                y=band_tokens[bid],
+                name=label,
+                marker={
+                    "color": fill,
+                    "line": {"width": 0.4, "color": border},
+                },
+                showlegend=False,
+                hovertemplate=(
+                    f"<b>{label}</b><br>"
+                    "turn %{x}<br>"
+                    "≈ %{y:,.0f} tokens<extra></extra>"
+                ),
+            )
+        )
+
+    # Four-kind legend swatches — invisible markers at off-canvas
+    # coordinates so only the legend square + name show.
+    for kind in ("system", "user", "assistant_text", "tool_result"):
+        fig.add_trace(
+            go.Scatter(
+                x=[None],
+                y=[None],
+                mode="markers",
+                marker={
+                    "size": 14,
+                    "symbol": "square",
+                    "color": _TOKENSCAPE_KIND_FILL[kind],
+                    "line": {"width": 0.6, "color": _TOKENSCAPE_KIND_BORDER[kind]},
+                },
+                name=_TOKENSCAPE_KIND_LEGEND_LABEL[kind],
+                showlegend=True,
+                hoverinfo="skip",
+            )
+        )
+
+    annotations: list[dict] = []
+
+    # Cumulative bottom of each band per turn — used to anchor labels
+    # at the vertical centre of each slab.
+    cumulative = [0.0] * n_turns
+    band_below_top: dict[str, list[float]] = {}
+    for bid in band_order:
+        band_below_top[bid] = list(cumulative)
+        for i in range(n_turns):
+            cumulative[i] += band_tokens[bid][i]
+    max_total = max(cumulative) if cumulative and max(cumulative) > 0 else 1
+
+    for seg_idx, (s_start, s_end) in enumerate(segments):
+        mid_turn = (s_start + s_end) // 2
+        i = max(0, min(n_turns - 1, mid_turn - 1))
+        sys_h = band_tokens["system"][i]
+        if sys_h <= 0:
+            continue
+        y_center = band_below_top["system"][i] + sys_h / 2
+        baseline_label = seg_baseline_label.get(seg_idx, "system")
+        annotations.append(
+            {
+                "x": mid_turn,
+                "y": y_center,
+                "xref": "x",
+                "yref": "y",
+                "text": f"{baseline_label} · {sys_h / 1000:.1f}k",
+                "showarrow": False,
+                "font": {"size": 11, "color": "#3a342a"},
+                "align": "center",
+            }
+        )
+
+    for i_named, block in enumerate(named):
+        bid = f"read_{i_named}"
+        mid_turn = (
+            block["arrival_turn"] + (block["end_turn"] or block["arrival_turn"])
+        ) // 2
+        i = max(0, min(n_turns - 1, mid_turn - 1))
+        band_h = band_tokens[bid][i]
+        if band_h <= 0:
+            continue
+        y_center = band_below_top[bid][i] + band_h / 2
+        approx_tokens = max(band_tokens[bid])
+        share_pct = 100.0 * approx_tokens * block["persisted"] / total_context
+        # Multi-line caption only on the dominant slab — anything
+        # smaller would overflow into adjacent bands.
+        is_dominant = (
+            band_h >= 0.15 * max_total
+            and block["persisted"] >= _TOKENSCAPE_DOMINANT_MIN_PERSISTENCE
+            and i_named == 0
+        )
+        if is_dominant:
+            text = (
+                f"<b>{block['label']}</b><br>"
+                f"{approx_tokens / 1000:.0f}k tokens × "  # noqa: RUF001
+                f"{block['persisted']} turns persisted<br>"
+                f"≈ {share_pct:.0f}% of session input bill"
+            )
+            font_size = 12
+        elif band_h >= 0.06 * max_total:
+            text = (
+                f"{block['label']} · "
+                f"{approx_tokens / 1000:.1f}k × {block['persisted']} turns"  # noqa: RUF001
+            )
+            font_size = 10
+        else:
+            continue
+        annotations.append(
+            {
+                "x": mid_turn,
+                "y": y_center,
+                "xref": "x",
+                "yref": "y",
+                "text": text,
+                "showarrow": False,
+                "font": {"size": font_size, "color": "#5a2a18"},
+                "align": "center",
+            }
+        )
+
+    for ev in events:
+        x = ev["turn"] - 0.5
+        if ev["kind"] == "compact":
+            fig.add_vline(x=x, line_dash="dash", line_color="#777", line_width=1)
+            prev_ctx = turns[ev["turn"] - 2]["api_context"] if ev["turn"] > 1 else 0
+            new_ctx = turns[ev["turn"] - 1]["api_context"]
+            annotations.append(
+                {
+                    "x": x,
+                    "y": 1.02,
+                    "xref": "x",
+                    "yref": "paper",
+                    "text": (
+                        f"/compact · {prev_ctx / 1000:.0f}k → {new_ctx / 1000:.0f}k"
+                    ),
+                    "showarrow": False,
+                    "font": {"size": 11, "color": "#555"},
+                    "xanchor": "left",
+                }
+            )
+        else:  # ttl_break
+            fig.add_vline(x=x, line_dash="dot", line_color="#c0a000", line_width=1)
+            annotations.append(
+                {
+                    "x": x,
+                    "y": 1.02,
+                    "xref": "x",
+                    "yref": "paper",
+                    "text": (
+                        f"5m gap · cache rebuilt (+{ev.get('rebuild_tokens', 0):,} tok)"
+                    ),
+                    "showarrow": False,
+                    "font": {"size": 10, "color": "#a08000"},
+                    "xanchor": "left",
+                }
+            )
+
+    fig.update_layout(
+        barmode="stack",
+        bargap=0,
+        bargroupgap=0,
+        showlegend=True,
+        legend={
+            "orientation": "h",
+            "yanchor": "top",
+            "y": -0.18,
+            "xanchor": "center",
+            "x": 0.5,
+            "bgcolor": "rgba(0,0,0,0)",
+            "font": {"size": 12, "color": "#444"},
+        },
+        hovermode="closest",
+        xaxis={
+            "title": {"text": "turn", "font": {"size": 12, "color": "#666"}},
+            "showgrid": False,
+            "showline": True,
+            "linecolor": "#ccc",
+            "ticks": "outside",
+            "tickcolor": "#ccc",
+            "tickfont": {"size": 11, "color": "#666"},
+            "zeroline": False,
+        },
+        yaxis={
+            "title": {"text": "input tokens", "font": {"size": 12, "color": "#666"}},
+            "showgrid": True,
+            "gridcolor": "#eee",
+            "griddash": "dot",
+            "tickformat": ".2s",
+            "tickfont": {"size": 11, "color": "#666"},
+            "zeroline": False,
+        },
+        plot_bgcolor="white",
+        paper_bgcolor="white",
+        margin={"l": 70, "r": 30, "t": 40, "b": 70},
+        annotations=annotations,
+    )
+
+    top_reads = [
+        {
+            "label": b["label"],
+            "tokens": int(max(band_tokens[f"read_{i}"])),
+            "arrival_turn": b["arrival_turn"],
+            "persisted": b["persisted"],
+            "share_pct": (
+                100.0 * max(band_tokens[f"read_{i}"]) * b["persisted"] / total_context
+            ),
+        }
+        for i, b in enumerate(named)
+    ]
+    return fig.to_json(), top_reads
+
+
+_VALID_TABS = {"messages", "cost", "tokenscape"}
 
 
 async def session_detail(
@@ -1717,8 +2409,18 @@ async def session_detail(
 
     parsed_messages: list[dict] = []
     cost_ctx: dict = {}
+    tokenscape_ctx: dict = {}
     if active_tab == "messages":
         parsed_messages = _build_messages_context(db, session_id)
+    elif active_tab == "tokenscape":
+        try:
+            tokenscape_ctx = _build_tokenscape_context(db, session_id)
+        except Exception as exc:
+            logger.exception("Failed to build tokenscape for %s", session_id)
+            tokenscape_ctx = {
+                "has_data": False,
+                "error": f"{type(exc).__name__}: {exc}",
+            }
     else:  # "cost"
         cost_ctx = _build_cost_context(db, session_id)
 
@@ -1734,6 +2436,7 @@ async def session_detail(
             "tool_summary": tool_summary,
             "active_tab": active_tab,
             "cost_ctx": cost_ctx,
+            "tokenscape_ctx": tokenscape_ctx,
             "file_metrics": {
                 "files_read": file_metrics[0] or 0,
                 "files_edited": file_metrics[1] or 0,
