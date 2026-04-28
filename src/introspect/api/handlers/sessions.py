@@ -1657,7 +1657,519 @@ def _build_chart_from_attrib(
     )
 
 
-_VALID_TABS = {"messages", "cost"}
+# --- Tokenscape -------------------------------------------------------
+#
+# "Where the cost went": each piece of content (system prompt, a user
+# message, a tool_result file read, an assistant text block) becomes
+# a *band* — a horizontal slab in a stacked-area chart that exists from
+# the turn the content arrived until the cache that holds it gets
+# discarded. A single early big read shows up as one wide rectangle
+# spanning many turns: the visual area equals the cost it caused.
+#
+# We have exact API token totals per turn (input + cache_read =
+# context the model saw). Within-turn allocation between bands uses
+# char counts, normalised so each turn's column sums to the API total.
+# The band heights for any given content are constant across the
+# turns where it persists.
+#
+# Two events truncate or rebuild the cache:
+# * 5-minute cache TTL break — cache_read drops to ~0, but the same
+#   total context is re-sent and recached. Bands persist; we draw a
+#   thin marker because the cache rebuild is itself expensive.
+# * /compact — total context drops sharply, history collapses into a
+#   summary. Bands reset.
+
+_TOKENSCAPE_TOP_READS = 5
+# Colour family for tool_result bands. The most expensive read gets
+# the brightest coral; lesser reads fade through into a muted grey.
+_TOKENSCAPE_READ_COLORS = (
+    "#e3a08c",
+    "#e9b3a3",
+    "#eec5b9",
+    "#f1d3ca",
+    "#e6d7d0",
+)
+_TOKENSCAPE_OTHER_READ_COLOR = "#d8c8c0"
+_TOKENSCAPE_CATEGORY_COLORS = {
+    "system": "#b8b3a3",
+    "user": "#7fbef0",
+    "assistant_text": "#bda6e6",
+}
+# Drop ratios for distinguishing /compact (truncates) from a 5-min
+# cache TTL break (rebuilds same context) — see module-doc above.
+_TOKENSCAPE_COMPACT_DROP_RATIO = 0.5
+_TOKENSCAPE_COMPACT_MIN_DROP = 5_000
+# Anthropic's prompt cache TTL is 5 minutes for the default tier;
+# longer idle gaps force the cache to be rebuilt next turn (cache_read
+# drops to ~0, cache_creation jumps to roughly the previous context).
+# Use a slight buffer below 5m to absorb timestamp jitter.
+_TOKENSCAPE_TTL_BREAK_MIN_GAP_SECONDS = 4 * 60 + 30
+_TOKENSCAPE_TTL_BREAK_CACHE_DROP_RATIO = 0.5
+_TOKENSCAPE_TTL_BREAK_MIN_CACHE = 5_000
+
+
+def _tokenscape_classify(kind: str | None) -> str | None:
+    """Map ``session_messages_enriched.kind`` to a tokenscape category."""
+    if kind in ("human_prompt", "slash_command", "subagent_prompt"):
+        return "user"
+    if kind in ("agent_text", "agent_thinking", "agent_tool_call"):
+        return "assistant_text"
+    if kind == "tool_result":
+        return "tool_result"
+    return None
+
+
+def _tokenscape_label(tool_name: str, tool_input_raw: str) -> str:
+    """One-line label for a tool_result band, e.g. ``Read settings.py``."""
+    if not tool_name:
+        return "tool result"
+    if tool_name == "Read":
+        d = _safe_json(tool_input_raw)
+        return f"Read {_basename(d.get('file_path'))}"
+    if tool_name == "Bash":
+        d = _safe_json(tool_input_raw)
+        cmd = (d.get("command") or "").strip().split()
+        head = " ".join(cmd[:2]) if cmd else "(empty)"
+        return f"Bash · {head}"
+    if tool_name in ("WebFetch", "WebSearch"):
+        return tool_name
+    if tool_name.startswith("mcp__"):
+        return f"mcp · {tool_name[len('mcp__') :]}"
+    return tool_name
+
+
+def _build_tokenscape_context(db, session_id: str) -> dict:
+    """Build the streamgraph context for the Tokenscape tab.
+
+    Each piece of content becomes a band that lives from its arrival
+    turn until /compact wipes it. Bands stack to API context totals;
+    top reads are individually labelled.
+    """
+    rows = db.execute(
+        """
+        WITH result_meta AS (
+            -- tool_result rows don't expose ``id`` in the view
+            -- (the JSON field is ``tool_use_id``), so look it up
+            -- from raw_messages and extract the content size in
+            -- the same pass.
+            SELECT
+                rm.uuid AS user_uuid,
+                e.block_idx AS block_idx,
+                json_extract_string(
+                    rm.message, '$.content[' || e.block_idx || '].tool_use_id'
+                ) AS result_tool_use_id,
+                LENGTH(COALESCE(
+                    json_extract_string(
+                        rm.message, '$.content[' || e.block_idx || '].content'
+                    ),
+                    ''
+                )) AS result_char_count
+            FROM session_messages_enriched e
+            JOIN raw_messages rm ON rm.uuid = e.uuid
+            WHERE e.session_id = ? AND e.kind = 'tool_result'
+        )
+        SELECT
+            e.uuid,
+            e.timestamp,
+            e.kind,
+            COALESCE(e.tool_name, tc.tool_name) AS tool_name,
+            COALESCE(e.tool_input, tc.tool_input) AS tool_input,
+            CASE
+                WHEN e.kind = 'tool_result' THEN COALESCE(rmeta.result_char_count, 0)
+                WHEN e.kind = 'agent_tool_call' THEN
+                    LENGTH(COALESCE(e.tool_input, ''))
+                WHEN e.kind = 'agent_thinking' THEN
+                    LENGTH(COALESCE(e.thinking_text, ''))
+                ELSE
+                    LENGTH(COALESCE(e.text, ''))
+            END AS char_count,
+            amc.input_tokens,
+            amc.cache_read_tokens,
+            amc.cache_creation_tokens
+        FROM session_messages_enriched e
+        LEFT JOIN result_meta rmeta
+          ON rmeta.user_uuid = e.uuid AND rmeta.block_idx = e.block_idx
+        LEFT JOIN tool_calls tc ON tc.tool_use_id = rmeta.result_tool_use_id
+        LEFT JOIN assistant_message_costs amc ON amc.uuid = e.uuid
+        WHERE e.session_id = ? AND NOT e.is_sidechain
+        ORDER BY e.timestamp ASC, e.block_idx ASC
+        """,
+        [session_id, session_id],
+    ).fetchall()
+    if not rows:
+        return {"has_data": False}
+
+    blocks, turns, events = _tokenscape_walk(rows)
+    if not turns:
+        return {"has_data": False}
+
+    figure_json, top_reads = _render_tokenscape_streamgraph(blocks, turns, events)
+    return {
+        "has_data": True,
+        "figure_json": figure_json,
+        "turn_count": len(turns),
+        "compact_count": sum(1 for e in events if e["kind"] == "compact"),
+        "ttl_break_count": sum(1 for e in events if e["kind"] == "ttl_break"),
+        "top_reads": top_reads,
+        "total_context_tokens": int(sum(t["api_context"] for t in turns)),
+    }
+
+
+def _tokenscape_walk(  # noqa: PLR0912
+    rows: list[tuple],
+) -> tuple[list[dict], list[dict], list[dict]]:
+    """Single pass over enriched message rows.
+
+    Produces ``(blocks, turns, events)``:
+
+    * ``blocks`` — every content block we can attribute to a band, with
+      ``arrival_turn`` set; ``end_turn`` is filled in below as we
+      discover /compact events.
+    * ``turns`` — one row per assistant message: API totals (input,
+      cache_read, cache_creation) plus a flag for any event that
+      occurred entering this turn.
+    * ``events`` — list of ``{turn, kind}`` for the marker overlay,
+      ``kind`` ∈ ``{"compact", "ttl_break"}``.
+    """
+    blocks: list[dict] = []
+    turns: list[dict] = []
+    events: list[dict] = []
+    seen_assistant_uuid: set[str] = set()
+    prev_turn_ts = None
+
+    for (
+        uuid,
+        ts,
+        kind,
+        tool_name,
+        tool_input,
+        char_count,
+        input_tokens,
+        cache_read_tokens,
+        cache_creation_tokens,
+    ) in rows:
+        category = _tokenscape_classify(kind)
+        chars = int(char_count or 0)
+        if category is not None and chars > 0:
+            block = {
+                "category": category,
+                "char_count": chars,
+                "arrival_turn": len(turns) + 1,
+                "end_turn": None,  # filled in after /compact detection
+                "label": "",
+            }
+            if category == "tool_result":
+                block["label"] = _tokenscape_label(tool_name or "", tool_input or "")
+            blocks.append(block)
+
+        if input_tokens is not None and uuid and uuid not in seen_assistant_uuid:
+            seen_assistant_uuid.add(uuid)
+            turn_idx = len(turns) + 1
+            api_in = int(input_tokens or 0)
+            api_cache = int(cache_read_tokens or 0)
+            api_creation = int(cache_creation_tokens or 0)
+            # Context the model actually processed = every token sent in
+            # this request, regardless of how it's billed. cache_creation
+            # is content that's being written to the cache *and* sent to
+            # the model on this turn — so a 5m TTL break preserves
+            # api_context (everything re-sent as cache_creation) even
+            # though cache_read drops to 0.
+            api_context = api_in + api_cache + api_creation
+
+            event_kind: str | None = None
+            if turns:
+                prev = turns[-1]
+                drop = prev["api_context"] - api_context
+                # /compact: total context plummets — history truncated.
+                # Take precedence over TTL detection because /compact is
+                # the more impactful event and can co-occur with an idle
+                # gap (running /compact after stepping away).
+                if (
+                    prev["api_context"] > 0
+                    and drop > _TOKENSCAPE_COMPACT_MIN_DROP
+                    and api_context
+                    < prev["api_context"] * _TOKENSCAPE_COMPACT_DROP_RATIO
+                ):
+                    event_kind = "compact"
+                # 5m TTL: idle gap >= 5min AND the cache was rebuilt
+                # (cache_read collapsed). Bands persist; only the
+                # cache write is "wasted" cost.
+                elif (
+                    prev_turn_ts is not None
+                    and ts is not None
+                    and (ts - prev_turn_ts).total_seconds()
+                    >= _TOKENSCAPE_TTL_BREAK_MIN_GAP_SECONDS
+                    and prev["api_cache_read"] > _TOKENSCAPE_TTL_BREAK_MIN_CACHE
+                    and api_cache
+                    < prev["api_cache_read"] * _TOKENSCAPE_TTL_BREAK_CACHE_DROP_RATIO
+                ):
+                    event_kind = "ttl_break"
+
+            if event_kind == "compact":
+                # Close out every still-open band on the previous turn.
+                for b in blocks:
+                    if b["end_turn"] is None:
+                        b["end_turn"] = turn_idx - 1
+                events.append({"turn": turn_idx, "kind": "compact"})
+            elif event_kind == "ttl_break":
+                # Bands persist — just record the cache rebuild cost.
+                events.append(
+                    {
+                        "turn": turn_idx,
+                        "kind": "ttl_break",
+                        "rebuild_tokens": api_creation,
+                    }
+                )
+
+            turns.append(
+                {
+                    "turn": turn_idx,
+                    "api_input": api_in,
+                    "api_cache_read": api_cache,
+                    "api_cache_creation": api_creation,
+                    "api_context": api_context,
+                    "event": event_kind,
+                }
+            )
+            prev_turn_ts = ts
+
+    # Fill end_turn for any band still open at the end of the session.
+    last_turn = turns[-1]["turn"] if turns else 0
+    for b in blocks:
+        if b["end_turn"] is None:
+            b["end_turn"] = last_turn
+
+    return blocks, turns, events
+
+
+def _render_tokenscape_streamgraph(  # noqa: PLR0912, PLR0915
+    blocks: list[dict],
+    turns: list[dict],
+    events: list[dict],
+) -> tuple[str, list[dict]]:
+    """Render the stacked-area streamgraph + return top-reads metadata."""
+    n_turns = len(turns)
+    if n_turns == 0:
+        return "", []
+
+    # Solve system baseline at turn 1 from the gap between the API
+    # context total and content blocks active at turn 1.
+    turn1_blocks = [b for b in blocks if b["arrival_turn"] == 1]
+    turn1_chars = sum(b["char_count"] for b in turn1_blocks) or 1
+    api_context_t1 = turns[0]["api_context"]
+    # We don't know exact chars/token, but ~4 chars/token is a
+    # reasonable proxy for English+code. Whatever's left over after
+    # accounting for message content is the system prompt + tool
+    # definitions baseline. Negative gap (tiny turn 1) clamps to 0.
+    estimated_content_tokens = turn1_chars / 4.0
+    system_tokens = max(0, api_context_t1 - estimated_content_tokens)
+
+    # Rank tool_result blocks by char_count x persisted_turns to pick
+    # the top N for individual bands. Smaller reads aggregate.
+    read_blocks = [b for b in blocks if b["category"] == "tool_result"]
+    for b in read_blocks:
+        persisted = max(1, (b["end_turn"] or 1) - b["arrival_turn"] + 1)
+        b["weight"] = b["char_count"] * persisted
+        b["persisted"] = persisted
+    read_blocks.sort(key=lambda b: b["weight"], reverse=True)
+    named = read_blocks[:_TOKENSCAPE_TOP_READS]
+    other_reads = read_blocks[_TOKENSCAPE_TOP_READS:]
+
+    # --- Per-turn band heights ---
+    # For each turn, sum char_count of every active block per band-id.
+    # band-ids: 'system', 'user', 'assistant_text', 'other_reads', or
+    # the index of a named read block.
+    def _band_id(b: dict) -> str | int:
+        if b["category"] == "user":
+            return "user"
+        if b["category"] == "assistant_text":
+            return "assistant_text"
+        if b in named:
+            return f"read_{named.index(b)}"
+        return "other_reads"
+
+    band_order = (
+        ["system", "user", "assistant_text"]
+        + [f"read_{i}" for i in range(len(named))]
+        + (["other_reads"] if other_reads else [])
+    )
+    band_chars: dict[str | int, list[float]] = {
+        bid: [0.0] * n_turns for bid in band_order
+    }
+
+    for b in blocks:
+        bid = _band_id(b)
+        if bid == "system":
+            continue
+        end = b["end_turn"] or n_turns
+        for t in range(b["arrival_turn"], end + 1):
+            if 1 <= t <= n_turns:
+                band_chars[bid][t - 1] += b["char_count"]
+
+    # Convert per-turn char counts to tokens, scaling to the API
+    # context total minus the (constant) system baseline.
+    band_tokens: dict[str | int, list[float]] = {
+        bid: [0.0] * n_turns for bid in band_order
+    }
+    for i, t in enumerate(turns):
+        active_chars = sum(band_chars[bid][i] for bid in band_order if bid != "system")
+        target = max(0.0, t["api_context"] - system_tokens)
+        if active_chars > 0 and target > 0:
+            scale = target / active_chars
+            for bid in band_order:
+                if bid == "system":
+                    band_tokens[bid][i] = system_tokens
+                else:
+                    band_tokens[bid][i] = band_chars[bid][i] * scale
+        else:
+            band_tokens["system"][i] = float(t["api_context"])
+
+    # --- Build figure ---
+    _ensure_template()
+    fig = go.Figure()
+    xs = [t["turn"] for t in turns]
+
+    band_specs: list[tuple[str | int, str, str]] = [
+        ("system", "system + tool defs", _TOKENSCAPE_CATEGORY_COLORS["system"]),
+        ("user", "user", _TOKENSCAPE_CATEGORY_COLORS["user"]),
+        (
+            "assistant_text",
+            "assistant text",
+            _TOKENSCAPE_CATEGORY_COLORS["assistant_text"],
+        ),
+    ]
+    for i, b in enumerate(named):
+        color = _TOKENSCAPE_READ_COLORS[min(i, len(_TOKENSCAPE_READ_COLORS) - 1)]
+        band_specs.append((f"read_{i}", b["label"], color))
+    if other_reads:
+        band_specs.append(
+            ("other_reads", "other tool results", _TOKENSCAPE_OTHER_READ_COLOR)
+        )
+
+    for bid, label, color in band_specs:
+        ys = band_tokens[bid]
+        fig.add_trace(
+            go.Scatter(
+                x=xs,
+                y=ys,
+                mode="none",
+                name=label,
+                stackgroup="one",
+                fillcolor=color,
+                hovertemplate=(
+                    f"<b>{label}</b><br>"
+                    "turn %{x}<br>"
+                    "≈ %{y:,.0f} tokens<extra></extra>"
+                ),
+            )
+        )
+
+    # --- Annotations: label each named-read band at its centroid ---
+    annotations: list[dict] = []
+    # Cumulative below-band y for each turn — needed to anchor labels
+    # at the centre of the band slab. Keyed parallel to band_order.
+    cumulative_below = [0.0] * n_turns
+    for bid, label, _color in band_specs:
+        if not str(bid).startswith("read_"):
+            for i in range(n_turns):
+                cumulative_below[i] += band_tokens[bid][i]
+            continue
+        idx = int(str(bid).split("_", 1)[1])
+        block = named[idx]
+        # Place label at the persistence midpoint (in turn coords).
+        mid_turn = (
+            block["arrival_turn"] + (block["end_turn"] or block["arrival_turn"])
+        ) // 2
+        i = max(0, min(n_turns - 1, mid_turn - 1))
+        band_height = band_tokens[bid][i]
+        if band_height <= 0:
+            for j in range(n_turns):
+                cumulative_below[j] += band_tokens[bid][j]
+            continue
+        y_center = cumulative_below[i] + band_height / 2
+        approx_tokens = max(band_tokens[bid])
+        annotations.append(
+            {
+                "x": mid_turn,
+                "y": y_center,
+                "xref": "x",
+                "yref": "y",
+                "text": (
+                    f"<b>{label}</b><br>"
+                    f"≈ {approx_tokens:,.0f} tokens · {block['persisted']} turns"
+                ),
+                "showarrow": False,
+                "font": {"size": 11, "color": "#5a3a25"},
+                "align": "center",
+                "bgcolor": "rgba(255,255,255,0.7)",
+                "borderpad": 3,
+            }
+        )
+        for j in range(n_turns):
+            cumulative_below[j] += band_tokens[bid][j]
+
+    # --- Event markers: /compact (dashed) and 5m TTL break (dotted) ---
+    for ev in events:
+        x = ev["turn"] - 0.5
+        if ev["kind"] == "compact":
+            fig.add_vline(x=x, line_dash="dash", line_color="#888", line_width=1)
+            annotations.append(
+                {
+                    "x": x,
+                    "y": 1.02,
+                    "xref": "x",
+                    "yref": "paper",
+                    "text": "/compact",
+                    "showarrow": False,
+                    "font": {"size": 11, "color": "#666"},
+                    "xanchor": "left",
+                }
+            )
+        else:  # ttl_break
+            fig.add_vline(x=x, line_dash="dot", line_color="#c0a000", line_width=1)
+            annotations.append(
+                {
+                    "x": x,
+                    "y": 1.02,
+                    "xref": "x",
+                    "yref": "paper",
+                    "text": (
+                        f"5m gap · cache rebuilt (+{ev.get('rebuild_tokens', 0):,} tok)"
+                    ),
+                    "showarrow": False,
+                    "font": {"size": 10, "color": "#a08000"},
+                    "xanchor": "left",
+                }
+            )
+
+    fig.update_layout(
+        template="tufte",
+        showlegend=False,
+        hovermode="x unified",
+        xaxis_title="turn",
+        yaxis_title="input tokens",
+        margin={"l": 70, "r": 30, "t": 40, "b": 60},
+        annotations=annotations,
+    )
+
+    # Serialise the top-reads list for the table beneath the chart.
+    total_context = sum(t["api_context"] for t in turns) or 1
+    top_reads = [
+        {
+            "label": b["label"],
+            "tokens": int(max(band_tokens[f"read_{i}"])),
+            "arrival_turn": b["arrival_turn"],
+            "persisted": b["persisted"],
+            "share_pct": (
+                100.0 * max(band_tokens[f"read_{i}"]) * b["persisted"] / total_context
+            ),
+        }
+        for i, b in enumerate(named)
+    ]
+    return fig.to_json(), top_reads
+
+
+_VALID_TABS = {"messages", "cost", "tokenscape"}
 
 
 async def session_detail(
@@ -1717,8 +2229,18 @@ async def session_detail(
 
     parsed_messages: list[dict] = []
     cost_ctx: dict = {}
+    tokenscape_ctx: dict = {}
     if active_tab == "messages":
         parsed_messages = _build_messages_context(db, session_id)
+    elif active_tab == "tokenscape":
+        try:
+            tokenscape_ctx = _build_tokenscape_context(db, session_id)
+        except Exception as exc:
+            logger.exception("Failed to build tokenscape for %s", session_id)
+            tokenscape_ctx = {
+                "has_data": False,
+                "error": f"{type(exc).__name__}: {exc}",
+            }
     else:  # "cost"
         cost_ctx = _build_cost_context(db, session_id)
 
@@ -1734,6 +2256,7 @@ async def session_detail(
             "tool_summary": tool_summary,
             "active_tab": active_tab,
             "cost_ctx": cost_ctx,
+            "tokenscape_ctx": tokenscape_ctx,
             "file_metrics": {
                 "files_read": file_metrics[0] or 0,
                 "files_edited": file_metrics[1] or 0,

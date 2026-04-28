@@ -1865,6 +1865,62 @@ def test_session_messages_have_uuid_anchors():
         assert 'id="msg-' in response.text
 
 
+def test_session_tokenscape_tab_renders():
+    """Tokenscape tab loads and exposes the new tab in the strip."""
+    with tempfile.TemporaryDirectory() as tmp, _patched_client(Path(tmp)) as client:
+        response = client.get(f"/sessions/{SID}?tab=tokenscape")
+        assert response.status_code == 200
+        text = response.text
+        assert "Tokenscape" in text
+        assert "session tokenscape" in text or "Nothing to plot" in text
+
+
+def test_session_tokenscape_tab_streamgraph_shape():
+    """Sample fixture has tool_use + tool_result, so the tab embeds a figure."""
+    with tempfile.TemporaryDirectory() as tmp, _patched_client(Path(tmp)) as client:
+        response = client.get(f"/sessions/{SID}?tab=tokenscape")
+        assert response.status_code == 200
+        text = response.text
+        assert 'id="session-tokenscape-data"' in text
+        # Streamgraph uses Scatter with stackgroup="one" — assert on the
+        # serialised stackgroup so a regression to bars stands out.
+        assert '"stackgroup": "one"' in text or '"stackgroup":"one"' in text
+
+
+def test_tokenscape_classify():
+    """Block-kind classification covers all enriched kinds."""
+    from introspect.api.handlers.sessions import (  # noqa: PLC0415
+        _tokenscape_classify,
+    )
+
+    assert _tokenscape_classify("human_prompt") == "user"
+    assert _tokenscape_classify("slash_command") == "user"
+    assert _tokenscape_classify("subagent_prompt") == "user"
+    assert _tokenscape_classify("agent_text") == "assistant_text"
+    assert _tokenscape_classify("agent_thinking") == "assistant_text"
+    assert _tokenscape_classify("agent_tool_call") == "assistant_text"
+    assert _tokenscape_classify("tool_result") == "tool_result"
+    assert _tokenscape_classify("unknown") is None
+    assert _tokenscape_classify(None) is None
+
+
+def test_tokenscape_label_known_tools():
+    """File-path labels surface the basename for Read, head for Bash, etc."""
+    from introspect.api.handlers.sessions import (  # noqa: PLC0415
+        _tokenscape_label,
+    )
+
+    assert (
+        _tokenscape_label("Read", '{"file_path": "/tmp/foo/bar.py"}') == "Read bar.py"
+    )
+    assert _tokenscape_label("Bash", '{"command": "git log --oneline"}').startswith(
+        "Bash · git log"
+    )
+    assert _tokenscape_label("WebFetch", "{}") == "WebFetch"
+    assert _tokenscape_label("mcp__filesystem__read", "{}").startswith("mcp · ")
+    assert _tokenscape_label("", "") == "tool result"
+
+
 def _short_session_jsonl(tmp_dir: Path, session_id: str) -> Path:
     """Build a 3-message session — below the inflection-detection minimum."""
     usage = {"input_tokens": 100, "output_tokens": 20}
