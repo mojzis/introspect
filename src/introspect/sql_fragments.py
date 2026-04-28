@@ -89,7 +89,7 @@ FILE_WRITES_SUBQUERY = """(
 ) fw_agg"""
 
 
-def _build_session_cost_subquery() -> str:
+def _build_session_cost_subquery(timestamp_where: str = "") -> str:
     """Assemble the per-session $ cost subquery, plumbing in the rate CASE strings.
 
     Reads from the deduped ``assistant_message_costs`` view and computes cost
@@ -102,6 +102,11 @@ def _build_session_cost_subquery() -> str:
     ``cache_creation.{ephemeral_5m,ephemeral_1h}_input_tokens`` sub-fields
     are zero — bill those tokens at the 5m write rate (Anthropic's older
     default).  Mirrors the Python fallback in ``fetch_token_usage``.
+
+    ``timestamp_where`` is spliced into the inner SELECT as a WHERE clause
+    when non-empty. Trust contract: callers must pass only validated SQL
+    (no user input) — used by the cost-overview portfolio panel to scope
+    the per-session rollup to a chosen day or hour.
     """
     cc_fallback = (
         "(CASE WHEN cache_creation_5m = 0 AND cache_creation_1h = 0 "
@@ -115,11 +120,21 @@ def _build_session_cost_subquery() -> str:
         f" + cache_creation_1h * ({PRICING_CACHE_WRITE_1H_RATE_SQL})"
         f" + {cc_fallback} * ({PRICING_CACHE_WRITE_5M_RATE_SQL})"
     )
+    where_clause = f" WHERE {timestamp_where}" if timestamp_where else ""
     sql = (
         f"(SELECT session_id, SUM(({cost_expr}) / 1000000.0) AS cost_usd "  # noqa: S608
-        "FROM assistant_message_costs GROUP BY session_id) sc"
+        f"FROM assistant_message_costs{where_clause} GROUP BY session_id) sc"
     )
     return sql
+
+
+def session_cost_subquery_filtered(timestamp_where: str) -> str:
+    """Per-session cost subquery scoped to a timestamp predicate.
+
+    Trust contract: ``timestamp_where`` MUST be built from validated inputs
+    (e.g. parsed YYYY-MM-DD strings), never raw user input.
+    """
+    return _build_session_cost_subquery(timestamp_where)
 
 
 SESSION_COST_SUBQUERY = _build_session_cost_subquery()
