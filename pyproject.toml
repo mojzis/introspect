@@ -36,6 +36,10 @@ dev = [
     "deptry",
     "poethepoet",
     "beautifulsoup4",
+    "ty-find>=0.4.0",
+    "biston>=0.5.0",
+    "pytest-xdist>=3.8.0",
+    "pytest-randomly>=4.1.0",
 ]
 
 [tool.ruff]
@@ -88,8 +92,12 @@ cmd = "ty check"
 help = "Run type checker"
 
 [tool.poe.tasks.test]
-cmd = "pytest -q --tb=short"
-help = "Run tests"
+cmd = "pytest -q --tb=short -n auto"
+help = "Run tests (parallel)"
+
+[tool.poe.tasks._test-quiet]
+cmd = "pytest -o addopts= -qq --tb=line --no-header -n auto"
+help = "Run tests with minimal output, no coverage, parallel (used by `check`)"
 
 [tool.poe.tasks.vulns]
 shell = "uvx pysentry-rs . || true"
@@ -104,21 +112,35 @@ help = "Dead code detection"
 cmd = "deptry ."
 help = "Unused dependency check"
 
+[tool.poe.tasks.clones]
+cmd = "biston scan ."
+help = "Structural clone detection (advisory)"
+
 [tool.poe.tasks._check-parallel]
 shell = """
   ruff check . &
   ty check &
   vulture src &
   deptry . &
+  biston scan . &
   (uvx pysentry-rs . || true) &
   wait
 """
 interpreter = "bash"
 
+[tool.poe.tasks.check-fast]
+shell = """
+  ruff check . &
+  ty check &
+  wait
+"""
+interpreter = "bash"
+help = "Lint + typecheck only — sub-second feedback loop"
+
 [tool.poe.tasks.check]
 sequence = [
     { ref = "_check-parallel" },
-    { ref = "test" },
+    { ref = "_test-quiet" },
 ]
 help = "Run all checks (parallel where possible)"
 
@@ -129,6 +151,7 @@ sequence = [
     { ref = "vulns" },
     { ref = "dead-code" },
     { ref = "unused-deps" },
+    { ref = "clones" },
     { ref = "test" },
 ]
 ignore_fail = true
@@ -145,3 +168,7 @@ help = "Install git hooks"
 [tool.poe.tasks.claude]
 cmd = "claude --mcp-config .claude/mcp.json"
 help = "Start Claude connected to the introspect MCP server (requires `introspect serve` running)"
+
+[tool.poe.tasks.worktree]
+cmd = "bash scripts/worktree.sh"
+help = "Create a worktree under ~/worktrees from a fresh origin/main. Usage: poe worktree <branch> [base-ref]"
