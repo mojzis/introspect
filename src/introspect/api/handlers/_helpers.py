@@ -201,8 +201,8 @@ _COST_ATTRIBUTION_STATIC_TAIL = """,
             GROUP BY amc_uuid
         )
         SELECT
-            amc.session_id,
-            amc.uuid,
+            amc.session_id::VARCHAR AS session_id,
+            amc.uuid::VARCHAR AS uuid,
             amc.timestamp,
             amc.is_sidechain,
             amc.model,

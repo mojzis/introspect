@@ -1,285 +1,207 @@
 ---
 name: nolegend
 description: >
-  Tufte-style data visualization with Plotly in marimo notebooks.
-  Use this skill whenever creating charts, graphs, dashboards, sparklines,
-  or any data visualization with Plotly or Plotly Express — even if the user
-  doesn't mention Tufte. Also trigger when the user asks for "clean charts",
-  "professional charts", "boardroom-ready", "presentation-quality",
-  "minimal", or "beautiful" visualizations. Trigger for any marimo notebook
-  that involves Plotly plotting, px.line, px.bar, px.scatter, go.Figure,
-  or data storytelling.
+  Tufte-style Plotly charts in introspect's FastAPI/Jinja stack. Use this
+  whenever you add or modify a chart — bar, line, scatter, sparkline, or
+  any go.Figure-driven visualization. Trigger on words like "clean",
+  "minimal", "professional", "boardroom-ready", or whenever a new
+  visualization is being built or an existing one is unclear. Charts in
+  this repo are built server-side with go.Figure + nolegend.activate()
+  and bootstrapped client-side via Plotly.newPlot in base.html — there is
+  no Plotly Express or marimo here.
 ---
 
-# nolegend — Plotly Visualization Skill
+# nolegend — Plotly visualization rules for introspect
 
 *Remove the legend to become one.*
 
-Create boardroom-ready Plotly charts in marimo notebooks following
-Edward Tufte's principles. Every chart should tell a story, not
-decorate a slide.
+Every chart should tell a story, not decorate the page. Apply Tufte's
+principles, then refine with the helpers from the `nolegend` package.
+
+## Where charts live in this project
+
+- Server side: `go.Figure` built in a handler (e.g.
+  `cost_breakdown.py:_build_figure`, `sessions.py:_render_multi_chart`),
+  serialised via `fig.to_json()`, embedded into a `<script
+  type="application/json">` tag.
+- Client side: `base.html`'s `initCostChart` JS finds elements with
+  `class="cost-chart"`, parses the JSON, and runs `Plotly.newPlot`. Click
+  / select handlers are added via `el.on('plotly_click', ...)` →
+  `htmx.ajax(...)` for HTMX fragment swaps.
+- Template: `nolegend.activate()` is called lazily on first render
+  (`_ensure_template()` pattern — keeps imports side-effect-free).
+- Plotly Express is **not** used. Build figures directly with
+  `go.Figure` and `add_trace`. Keep Plotly Express advice from upstream
+  nolegend out of this project.
 
 ## Core principles
 
-Apply these to EVERY chart you create. No exceptions.
+1. **Maximize data-ink ratio.** Every pixel encodes data. Remove
+   gridlines, borders, backgrounds, decorations. The `tufte` template
+   does most of this — don't undo it with overrides.
+2. **No chartjunk.** No 3D, no gradient fills, no drop shadows, no
+   coloured backgrounds.
+3. **Direct-label over legends.** This is the load-bearing rule. With a
+   view toggle that flips trace visibility, set
+   `showlegend=False` on the layout and put the label on the line itself
+   (see "Direct labels on toggled views" below).
+4. **Titles convey insight, not description.** When the chart has its
+   own caption (most do here, via the surrounding `<h2>`), keep the
+   in-figure title empty so the plot area isn't pushed down.
+5. **Range frames.** Axes span the data range, not arbitrary round
+   numbers. The `tufte` template does this for line/scatter; bars
+   default to starting at 0.
+6. **Restrained colour.** ≤ 5 colours per chart. Gray (`#b0b0b0`) is
+   for context. Keep the most expensive / most important series in the
+   highest-contrast slot (e.g. `_INVOCATION_COLOR_PALETTE` puts red at
+   index 0 so the runaway subagent stands out).
 
-1. **Maximize data-ink ratio.** Every pixel should encode data.
-   Remove gridlines, borders, backgrounds, and decorations.
-2. **No chartjunk.** No 3D effects, no gradient fills, no drop shadows,
-   no unnecessary gridlines, no colored backgrounds.
-3. **Direct-label over legends.** Put the label on the data, not in a box.
-4. **Titles convey insight, not description.**
-   "Revenue peaked in Q3 before seasonal decline" not "Quarterly Revenue".
-5. **Range frames.** Axes should span the data range, not arbitrary round numbers.
-6. **Small multiples over complex single charts.** Use `facet_col`/`facet_row`.
-7. **Restrained color.** 2-3 colors for most charts. Gray is your friend.
+## Direct labels on toggled views
 
-## Workflow: px → go refinement
+The session detail Cost tab is the canonical example: one figure with
+multiple Scatter traces, view toggle (`Total / Agent / Category /
+Invocations`) flips visibility via `Plotly.restyle`. Without a legend
+the user can't tell which line is which — so we direct-label every
+line trace at its endpoint.
 
-ALWAYS follow this two-phase workflow. Never jump straight to go.Figure
-for a new chart.
-
-### Phase 1: Draft with Plotly Express
-
-Start with `px` for speed. Get the data mapping right first.
+Pattern (from `_render_multi_chart`):
 
 ```python
-import plotly.express as px
-import nolegend
+text_labels = [""] * len(ys)
+if ys:
+    text_labels[-1] = f" {name}"  # leading space avoids hugging the line
 
-nolegend.activate()
-
-fig = px.line(
-    df, x="date", y="revenue", color="region",
-    template="tufte",
-    title="Northern region drove 60% of growth in H2",
-)
+fig.add_trace(go.Scatter(
+    x=x_axis,
+    y=ys,
+    mode="lines+text",
+    name=name,
+    line={"color": color, "width": 1.5},
+    text=text_labels,
+    textposition="middle right",
+    textfont={"color": color, "size": 11},
+    cliponaxis=False,
+    customdata=...,
+    hovertemplate=...,
+))
 ```
 
-Rules for the px draft:
-- Always pass `template="tufte"` (or call `nolegend.activate()` once)
-- Write the insight-title immediately — it shapes the chart
-- Use `facet_col` / `facet_row` for small multiples instead of cramming
-  everything into one panel
-- Keep the number of traces ≤ 5. If more, aggregate or facet.
-
-### Phase 2: Refine with helpers and go
-
-After the px draft looks structurally right, refine:
+Plus, on the layout:
 
 ```python
-# Axes span only the data
-nolegend.range_frame(fig)
-
-# Labels on the lines, legend removed
-nolegend.direct_label(fig)
-
-# Call out the key insight
-nolegend.annotate_point(fig, x="2024-09", y=peak_val,
-                     text="Record quarter")
-
-# Fine-tune with update_layout / update_traces
 fig.update_layout(
-    yaxis_title="Revenue ($M)",
-    margin=dict(r=80),  # room for direct labels
+    showlegend=False,
+    margin={"l": 60, "r": 110, "t": 20, "b": 60},  # right margin holds labels
 )
 ```
 
-Rules for refinement:
-- `nolegend.range_frame(fig)` — use on scatter and line charts, skip on bar charts
-- `nolegend.direct_label(fig)` — use when ≤ 5 named traces exist
-- `nolegend.annotate_point()` — always annotate the ONE thing the audience
-  should remember
-- Increase right margin (`margin=dict(r=80)`) when using direct labels
-- For bar charts, consider `nolegend.strip_chartjunk(fig)` as a quick pass
+Why per-trace `text` rather than `add_annotation`:
 
-## Color rules
+- Annotations are figure-wide and **don't toggle** with trace visibility.
+  When the user flips from "Total" to "By agent", annotation labels for
+  hidden traces would still float in space.
+- Per-trace `text` is part of the trace, so visibility toggling
+  (`Plotly.restyle({visible: ...})`) hides the labels too, automatically.
+- One label per trace at the last point (rest empty) is enough — the
+  reader sees the colour + name pair at the line endpoint.
 
-Color is the most powerful — and most abused — visual channel.
+For stacked bar charts (cost-overview daily/hourly), use
+`add_annotation` instead — bars don't have an "endpoint" to attach text
+to, so place the label at the peak segment of each top-N group. See
+`cost_breakdown.py:_compute_top_group_annotations` for the pattern.
 
-### Default behavior
+## Hover, click, select interactivity
 
-The `tufte` template uses the `qualitative` palette: 5 colorblind-safe,
-muted colors that don't shout. This is correct for most charts.
+Charts in this repo are interactive surfaces, not static images. Keep
+this in mind:
 
-### When to change palettes
+- `customdata` is your friend. Put per-point identifiers
+  (uuid, day, session_id) in `customdata` so the click handler can fire
+  the right HTMX request. Example: session cost chart's bucket points
+  carry `[first_uuid, last_uuid, msg_count]`.
+- `hovertemplate` should reference customdata — it gives the user the
+  context they need before they decide to click.
+- `dragmode='select'` for any chart that supports box-filtering. Force
+  it via `Plotly.relayout` after `newPlot` in case the modebar resets it.
+- Line-only traces don't reliably populate `evt.points` on box-select.
+  Read `evt.range.x` and look up customdata from `el.data[trace_idx]`.
+- Markers always-visible: when a chart has a "marker overlay" trace
+  (spike/slope highlights), keep it visible across all view toggles by
+  flagging its trace index in the JS `viewMap` logic.
 
-| Situation | Palette | Code |
-|-----------|---------|------|
-| 2 series (most common case) | `duo` | `template=nolegend.with_palette("duo")` |
-| Grayscale / print | `ink` | `template=nolegend.with_palette("ink")` |
-| Financial / business | `earth` | `template=nolegend.with_palette("earth")` |
-| Technical / scientific | `slate` | `template=nolegend.with_palette("slate")` |
-| Heatmap / ordered data | `sequential` | Use with `color_continuous_scale` |
+## Colour rules (hard constraints)
 
-### The spotlight technique
+- Never use more than 5 colours in a single chart (excluding the
+  marker overlay).
+- Never use rainbow / jet colorscales — not perceptually uniform.
+- Never use red and green together without another differentiator.
+- Use `_MAIN_AGENT_COLOR` for "main / total" series so the same colour
+  consistently means the same thing across the app's charts.
+- For sequential data, `nolegend.SEQUENTIAL` or `viridis`.
+- When in doubt: fewer colours. One colour + gray usually suffices.
 
-When ONE series matters and the rest are context, use spotlight:
+## Pinned colour map for re-rendered panels
 
-```python
-colors = nolegend.QUALITATIVE.spotlight(index=2)  # highlight 3rd series
-fig.update_traces(
-    marker_color=[colors[i] for i in range(len(fig.data))]
-)
-```
-
-This grays out everything except the focal series.
-
-### Color rules (hard constraints)
-
-- **Never use more than 5 colors** in a single chart
-- **Never use rainbow / jet colorscales** — they're not perceptually uniform
-- **Never use red and green together** without another differentiator
-- **Gray (#b0b0b0) is a color** — use it for context, baselines, and
-  secondary series
-- For sequential data, use `nolegend.SEQUENTIAL` or `viridis`
-- When in doubt, use fewer colors. One color + gray usually suffices.
+When two panels show overlapping groups (e.g. daily totals and hourly
+drill-down by project), build a single canonical colour map from the
+all-time aggregate and pass it to both renderers. This way "project
+foo" is the same colour in every panel. See
+`cost_breakdown.py:_canonical_color_map` for the pattern.
 
 ## Chart type selection
 
 Match the chart to the question, not the other way around.
 
-| Question type | Chart | px function |
-|--------------|-------|-------------|
-| How did it change over time? | Line | `px.line` |
-| How do groups compare? | Horizontal bar | `px.bar(..., orientation='h')` |
-| What's the relationship? | Scatter | `px.scatter` |
-| What's the distribution? | Histogram or box | `px.histogram` / `px.box` |
-| What's the composition? | Stacked bar | `px.bar(..., barmode='stack')` |
-| How do parts relate to whole? | 100% stacked bar | NOT pie charts |
-| What's the trend per group? | Small multiples | `px.line(..., facet_col=...)` |
-| What's the quick trend? | Sparkline | `nolegend.sparkline(values)` |
+| Question type | Chart |
+|---|---|
+| How did it change over time? | Line |
+| How do groups compare? | Horizontal bar |
+| What's the relationship? | Scatter |
+| What's the distribution? | Histogram or box |
+| What's the composition? | Stacked bar |
+| What's the trend per group? | Small multiples (faceted bars/lines) |
+| What's the quick trend? | Sparkline |
 
 **Never use:** pie charts, donut charts, 3D charts, radar/spider charts,
-gauge charts. These all have lower data-ink ratios than alternatives.
-
-## marimo integration
-
-### Basic reactive chart
-
-```python
-import marimo as mo
-import plotly.express as px
-import nolegend
-
-nolegend.activate(dark=mo.app_meta().theme == "dark")
-
-fig = px.scatter(df, x="cost", y="impact", hover_name="project",
-                 template="tufte",
-                 title="Three projects dominate the efficiency frontier")
-nolegend.range_frame(fig)
-
-chart = mo.ui.plotly(fig)
-```
-
-### Selection-driven workflow
-
-```python
-# Cell 1: chart with selections
-chart = mo.ui.plotly(fig)
-chart
-
-# Cell 2: downstream — reacts to brush/click
-selected = chart.value  # returns filtered DataFrame
-mo.md(f"**{len(selected)}** projects selected, "
-      f"avg impact: **{selected['impact'].mean():.1f}**")
-```
-
-### Dashboard layout
-
-```python
-mo.vstack([
-    mo.md("## Portfolio Performance"),
-    mo.hstack([chart_revenue, chart_margin], widths=[2, 1]),
-    mo.hstack([spark_arr, spark_churn, spark_nps]),
-])
-```
-
-### Sparkline rows
-
-Sparklines work well in marimo `hstack` for KPI dashboards:
-
-```python
-def kpi_spark(label, values, current):
-    spark = nolegend.sparkline(values, width=120, height=30)
-    return mo.vstack([
-        mo.md(f"**{label}**"),
-        mo.ui.plotly(spark),
-        mo.md(f"### {current}"),
-    ])
-
-mo.hstack([
-    kpi_spark("ARR", arr_trend, "$12.4M"),
-    kpi_spark("Churn", churn_trend, "2.1%"),
-    kpi_spark("NPS", nps_trend, "67"),
-])
-```
+gauge charts.
 
 ## Typography and titles
 
-- **Title = insight.** State what the chart shows, not what it is.
-  The title is the first thing read; make it the takeaway.
-- **Subtitle via annotation.** For methodology or caveats, add a
-  subtitle annotation below the title, smaller and grayer.
-- **Axis labels: only when non-obvious.** "Year" on a time axis is noise.
-  "Revenue ($M)" on the y-axis is useful.
-- **Font: serif by default.** The template uses Georgia. Don't override
-  with Arial unless matching a corporate deck.
-
-```python
-# Adding a subtitle
-fig.add_annotation(
-    text="Source: Internal BI, Q1-Q4 2025",
-    xref="paper", yref="paper",
-    x=0, y=1.06,
-    showarrow=False,
-    font=dict(size=10, color="#999999"),
-    xanchor="left",
-)
-```
+- **In-card heading carries the title.** The surrounding `<h2>` in the
+  Jinja template is the chart's title — keep `fig.update_layout(title=...)`
+  empty so the plot area sits at the top of its card.
+- **Axis labels: only when non-obvious.** "Day" on a daily-bucket
+  x-axis is fine. "USD" on a cost y-axis is useful. Skip generic
+  "Value" / "Count".
+- **Font: serif (Georgia).** The `tufte` template handles this. The
+  base.html stylesheet pins `#js-plotly-tester` to Georgia too —
+  don't remove that rule, it prevents axis-title displacement after
+  HTMX swaps.
 
 ## Anti-patterns to catch and fix
 
-When reviewing or generating charts, actively look for and fix these:
-
 | Anti-pattern | Fix |
-|-------------|-----|
-| Legend box with 2+ entries | `nolegend.direct_label(fig)` |
-| Gridlines visible | `showgrid=False` (template handles this) |
-| Default Plotly blue | Use tufte template or explicit palette |
-| Title says "Chart of X by Y" | Rewrite as insight |
+|---|---|
+| Legend box with 2+ entries on a toggled chart | Direct labels via per-trace `text` |
+| Gridlines visible | `showgrid=False` (template handles it) |
+| Default Plotly blue everywhere | Use the project palette constants |
+| Title says "Chart of X by Y" | Rewrite the surrounding `<h2>` as the insight |
 | Pie chart | Replace with horizontal bar |
-| Too many colors (>5) | Aggregate categories or use spotlight |
-| Y-axis starts at 0 when data starts at 800 | `nolegend.range_frame(fig)` |
-| `fig.show()` in marimo | Return `mo.ui.plotly(fig)` instead |
-| `plt.show()` anywhere | Wrong library — use Plotly |
+| Too many colours (>5) | Aggregate, fold into "Other", or use spotlight |
+| Y-axis starts at 0 when data starts at 800 | Trust the tufte template's range frame |
+| Annotations on a toggled-trace chart | Use per-trace `text` instead |
+| `fig.update_layout(title=...)` set | Drop it — the `<h2>` is the title |
+| HTMX swap rebuilds chart from scratch and loses selection state | Use `Plotly.restyle` for visibility flips |
 
-## Polars integration
+## Checklist before merging a chart change
 
-When the user works with Polars DataFrames (common in marimo):
-
-```python
-# Plotly Express accepts Polars directly since px 5.16+
-fig = px.line(df_polars, x="date", y="value", template="tufte")
-
-# For older versions, convert only the columns you need
-fig = px.line(
-    df_polars.select(["date", "value"]).to_pandas(),
-    x="date", y="value", template="tufte",
-)
-```
-
-## Checklist before presenting
-
-Run through this before any chart is shown to the user:
-
-- [ ] Title states the insight, not the axes
+- [ ] `nolegend.activate()` called (lazy `_ensure_template()` pattern)
 - [ ] No legend box (direct labels or single series)
-- [ ] No gridlines
-- [ ] ≤ 5 colors
+- [ ] No gridlines, no in-figure title
+- [ ] ≤ 5 colours, palette pinned across panels if shared
 - [ ] Axes have units where non-obvious
-- [ ] Range frame applied (line/scatter)
-- [ ] Key data point annotated
-- [ ] Right margin sufficient for labels (≥80px if direct-labeling)
-- [ ] Works in marimo dark mode (if applicable)
-- [ ] Uses `mo.ui.plotly(fig)` not `fig.show()`
+- [ ] Right margin ≥ 80–110px when direct-labeling
+- [ ] `customdata` carries enough info for click/select handlers
+- [ ] `cliponaxis=False` on text-bearing traces so end labels render
+- [ ] Test added in `tests/test_routes.py` asserting the figure JSON
+  shape (e.g. trace name, customdata presence, no `<polyline>`)
