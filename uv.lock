@@ -56,6 +56,17 @@ wheels = [
 ]
 
 [[package]]
+name = "biston"
+version = "0.5.0"
+source = { registry = "https://pypi.org/simple" }
+sdist = { url = "https://files.pythonhosted.org/packages/e1/35/ac5828c2744716da22aa52af700cd9521781b914045f264a9ab53654108d/biston-0.5.0.tar.gz", hash = "sha256:289b1a9a6d8811b04fb049ef01cc4834f2c37434e8235bad01892012d01b79ea", size = 882675, upload-time = "2026-04-16T21:39:38.738Z" }
+wheels = [
+    { url = "https://files.pythonhosted.org/packages/44/97/e255f980ba62ff27cd2d212a66562eb20d804c3d3a5779aadfc583dab59a/biston-0.5.0-py3-none-macosx_11_0_arm64.whl", hash = "sha256:fb63fbca3d059c8bb750d79de016e1d606e577b83b5c513931679323c995756c", size = 1405240, upload-time = "2026-04-16T21:39:33.562Z" },
+    { url = "https://files.pythonhosted.org/packages/ae/ae/c5b9bcbdbd7eafa4001169275b4d4f2f1f96ef12bc35140c95a5dc9b3a2d/biston-0.5.0-py3-none-manylinux_2_28_x86_64.whl", hash = "sha256:6836af938703d5a1248204729432f9c42115eb4123ae838a405ac8e69e0897d8", size = 1623075, upload-time = "2026-04-16T21:39:35.316Z" },
+    { url = "https://files.pythonhosted.org/packages/e2/62/0da884c32b256b56ee61d91ae55de4082dff5841984bf6644431eed9b1f1/biston-0.5.0-py3-none-win_amd64.whl", hash = "sha256:e2cf9ebf029958eb1e78215df301cc6d5b8885e2d6b80f744ba47c9c0285c289", size = 1477973, upload-time = "2026-04-16T21:39:37.063Z" },
+]
+
+[[package]]
 name = "certifi"
 version = "2026.2.25"
 source = { registry = "https://pypi.org/simple" }
@@ -385,6 +396,15 @@ wheels = [
 ]
 
 [[package]]
+name = "execnet"
+version = "2.1.2"
+source = { registry = "https://pypi.org/simple" }
+sdist = { url = "https://files.pythonhosted.org/packages/bf/89/780e11f9588d9e7128a3f87788354c7946a9cbb1401ad38a48c4db9a4f07/execnet-2.1.2.tar.gz", hash = "sha256:63d83bfdd9a23e35b9c6a3261412324f964c2ec8dcd8d3c6916ee9373e0befcd", size = 166622, upload-time = "2025-11-12T09:56:37.75Z" }
+wheels = [
+    { url = "https://files.pythonhosted.org/packages/ab/84/02fc1827e8cdded4aa65baef11296a9bbe595c474f0d6d758af082d849fd/execnet-2.1.2-py3-none-any.whl", hash = "sha256:67fba928dd5a544b783f6056f449e5e3931a5c378b128bc18501f7ea79e296ec", size = 40708, upload-time = "2025-11-12T09:56:36.333Z" },
+]
+
+[[package]]
 name = "fastapi"
 version = "0.136.0"
 source = { registry = "https://pypi.org/simple" }
@@ -483,13 +503,17 @@ dependencies = [
 [package.dev-dependencies]
 dev = [
     { name = "beautifulsoup4" },
+    { name = "biston" },
     { name = "deptry" },
     { name = "httpx" },
     { name = "poethepoet" },
     { name = "pytest" },
     { name = "pytest-cov" },
+    { name = "pytest-randomly" },
+    { name = "pytest-xdist" },
     { name = "ruff" },
     { name = "ty" },
+    { name = "ty-find" },
     { name = "vulture" },
 ]
 
@@ -509,13 +533,17 @@ requires-dist = [
 [package.metadata.requires-dev]
 dev = [
     { name = "beautifulsoup4" },
+    { name = "biston", specifier = ">=0.5.0" },
     { name = "deptry" },
     { name = "httpx" },
     { name = "poethepoet" },
     { name = "pytest" },
     { name = "pytest-cov" },
+    { name = "pytest-randomly", specifier = ">=4.1.0" },
+    { name = "pytest-xdist", specifier = ">=3.8.0" },
     { name = "ruff" },
     { name = "ty" },
+    { name = "ty-find", specifier = ">=0.4.0" },
     { name = "vulture" },
 ]
 
@@ -946,6 +974,31 @@ wheels = [
 ]
 
 [[package]]
+name = "pytest-randomly"
+version = "4.1.0"
+source = { registry = "https://pypi.org/simple" }
+dependencies = [
+    { name = "pytest" },
+]
+sdist = { url = "https://files.pythonhosted.org/packages/27/b3/36192dacc0f470ac2cc516f73e01739c9a48a8224f76beada4f85e1c8a89/pytest_randomly-4.1.0.tar.gz", hash = "sha256:47f1d9746c3bc3efabd53ae1ebfb8bb385cf3d4df4b505b6d58d9c97a3dfe70f", size = 14302, upload-time = "2026-04-20T13:01:51.831Z" }
+wheels = [
+    { url = "https://files.pythonhosted.org/packages/9a/db/2df9a1fca597a273f957a559c20c2d95d629928384507b2afa43ba6909d1/pytest_randomly-4.1.0-py3-none-any.whl", hash = "sha256:f55e89e53367b090c0c053697d7f9d77595543d0e0516c93978b50c0f6b252f9", size = 8353, upload-time = "2026-04-20T13:01:50.382Z" },
+]
+
+[[package]]
+name = "pytest-xdist"
+version = "3.8.0"
+source = { registry = "https://pypi.org/simple" }
+dependencies = [
+    { name = "execnet" },
+    { name = "pytest" },
+]
+sdist = { url = "https://files.pythonhosted.org/packages/78/b4/439b179d1ff526791eb921115fca8e44e596a13efeda518b9d845a619450/pytest_xdist-3.8.0.tar.gz", hash = "sha256:7e578125ec9bc6050861aa93f2d59f1d8d085595d6551c2c90b6f4fad8d3a9f1", size = 88069, upload-time = "2025-07-01T13:30:59.346Z" }
+wheels = [
+    { url = "https://files.pythonhosted.org/packages/ca/31/d4e37e9e550c2b92a9cbc2e4d0b7420a27224968580b5a447f420847c975/pytest_xdist-3.8.0-py3-none-any.whl", hash = "sha256:202ca578cfeb7370784a8c33d6d05bc6e13b4f25b5053c30a152269fd10f0b88", size = 46396, upload-time = "2025-07-01T13:30:56.632Z" },
+]
+
+[[package]]
 name = "python-dotenv"
 version = "1.2.2"
 source = { registry = "https://pypi.org/simple" }
@@ -1329,6 +1382,17 @@ wheels = [
     { url = "https://files.pythonhosted.org/packages/df/92/be9abf4d3e589ad5023e2ea965b93e204ec856420d46adf73c5c36c04678/ty-0.0.32-py3-none-win32.whl", hash = "sha256:2ff2ebb4986b24aebcf1444db7db5ca41b36086040e95eea9f8fb851c11e805c", size = 10260689, upload-time = "2026-04-20T19:28:56.541Z" },
     { url = "https://files.pythonhosted.org/packages/14/61/dc86acea899349d2579cb8419aecedd83dc504d7d6a10df65eef546c8300/ty-0.0.32-py3-none-win_amd64.whl", hash = "sha256:ba7284a4a954b598c1b31500352b3ec1f89bff533825592b5958848226fdc7ee", size = 11255371, upload-time = "2026-04-20T19:28:39.917Z" },
     { url = "https://files.pythonhosted.org/packages/43/01/beffec56d71ca25b343ede63adb076456b5b3e211f1c066452a44cd120b3/ty-0.0.32-py3-none-win_arm64.whl", hash = "sha256:7e10aadbdbda989a7d567ee6a37f8b98d4d542e31e3b190a2879fd581f75d658", size = 10658087, upload-time = "2026-04-20T19:28:59.286Z" },
+]
+
+[[package]]
+name = "ty-find"
+version = "0.4.0"
+source = { registry = "https://pypi.org/simple" }
+sdist = { url = "https://files.pythonhosted.org/packages/b4/42/d091804cb90af13e2491886eec672fabffc87c15b1a603f0996d2f30d1c8/ty_find-0.4.0.tar.gz", hash = "sha256:38af79873f47a45eedc6c8e83d34b61809f0820e11d00e074c2597acbc7061e4", size = 971917, upload-time = "2026-03-13T08:55:40.774Z" }
+wheels = [
+    { url = "https://files.pythonhosted.org/packages/6e/87/c064fe35522a3d44b1523c7cb96186f24a1e144ab3ddcbc1b9aac0822644/ty_find-0.4.0-py3-none-macosx_11_0_arm64.whl", hash = "sha256:58bce5374a914b6fb4f6d333b1921ff0b485f8a3b68eac6b26f3fd6c68effa8a", size = 1033104, upload-time = "2026-03-13T08:55:35.564Z" },
+    { url = "https://files.pythonhosted.org/packages/63/85/576c5c72f5b98faf9118b58137928e9a6299d84839ac76342f1c68f30663/ty_find-0.4.0-py3-none-manylinux_2_28_x86_64.whl", hash = "sha256:0f8cc4c76786abeff6d536343d91236814fd862a6485d434a9f6d771545f80ab", size = 1189072, upload-time = "2026-03-13T08:55:37.505Z" },
+    { url = "https://files.pythonhosted.org/packages/31/88/c5d1a4ef2a8401493504086c7bb1502432a4f723f05e86f03684a409f85e/ty_find-0.4.0-py3-none-win_amd64.whl", hash = "sha256:97dd5117129386c55ea1ca4e2a291dca129a5cd4eb882bccc7c806b08968dbb3", size = 808050, upload-time = "2026-03-13T08:55:39.423Z" },
 ]
 
 [[package]]
