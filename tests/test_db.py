@@ -9,7 +9,9 @@ import duckdb
 import pytest
 
 from introspect.db import (
+    _MAX_TOOL_RESULT_SIZE_BYTES,
     DatabaseLockedError,
+    _filter_parseable_files,
     connect_writable,
     ensure_materialized,
     get_connection,
@@ -443,6 +445,94 @@ def test_get_connection_raises_when_locked(mock_locked_db):
     """get_connection propagates DatabaseLockedError when the DB is locked."""
     with pytest.raises(DatabaseLockedError):
         get_connection(Path("/tmp/fake.duckdb"), "/tmp/*.jsonl")
+
+
+def test_maximum_object_size_raised_above_default():
+    """Default DuckDB limit is 16MB; some Claude tool results exceed it.
+
+    Regression: a 31MB tool result aborted startup with InvalidInputException.
+    Threshold guards against accidentally lowering the limit back near 16MB.
+    """
+    assert _MAX_TOOL_RESULT_SIZE_BYTES >= 32 * 1024 * 1024
+
+
+def test_materialize_recovers_when_bulk_read_raises(monkeypatch, caplog):
+    """A buffer-level read error should fall back to per-file load, not crash.
+
+    Reproduces the production failure (``maximum_object_size`` exceeded) by
+    making the first bulk-read raise ``InvalidInputException``. The fallback
+    path probes each file individually, drops the bad one, and retries with
+    the survivors so users still get the rest of their history.
+    """
+    with tempfile.TemporaryDirectory() as tmp:
+        tmp_path = Path(tmp)
+        _write_sample_jsonl(tmp_path)
+        glob_pat = glob_pattern(tmp_path)
+
+        # Force only the first ``_create_raw_tables`` call (the bulk read in
+        # ``_load_raw_tables``) to raise. The retry call after filtering is
+        # left to run normally so we can assert it produced real rows.
+        import introspect.db as db_module  # noqa: PLC0415
+
+        original = db_module._create_raw_tables
+        calls = {"n": 0}
+
+        boom_msg = "maximum_object_size exceeded"
+
+        def fail_once(conn, source, day_filter, and_day_filter):
+            calls["n"] += 1
+            if calls["n"] == 1:
+                raise duckdb.InvalidInputException(boom_msg)
+            return original(conn, source, day_filter, and_day_filter)
+
+        monkeypatch.setattr(db_module, "_create_raw_tables", fail_once)
+
+        db_path = tmp_path / "test.duckdb"
+        conn = duckdb.connect(str(db_path))
+        try:
+            with caplog.at_level("WARNING", logger="introspect.db"):
+                materialize_views(conn, glob_pat, days=0, resolve_projects=False)
+
+            session_ids = {
+                r[0]
+                for r in conn.execute(
+                    "SELECT DISTINCT session_id FROM raw_messages"
+                ).fetchall()
+            }
+            assert SID in session_ids
+        finally:
+            conn.close()
+
+        # Operator-facing warning so the failure is visible in logs.
+        assert any("Bulk JSONL load failed" in r.message for r in caplog.records)
+
+
+def test_filter_parseable_files_keeps_good_skips_bad(caplog):
+    """``_filter_parseable_files`` returns only files that probe cleanly.
+
+    Includes a binary-garbage file alongside good and unopenable inputs.
+    With ``ignore_errors=true`` DuckDB may treat the garbage file as
+    "parseable" (returning NULLs); the contract is that the function never
+    crashes and that hard errors (e.g. the missing file) are surfaced as
+    warnings and excluded from the result.
+    """
+    with tempfile.TemporaryDirectory() as tmp:
+        tmp_path = Path(tmp)
+        good_path = _write_sample_jsonl(tmp_path)
+
+        binary_path = tmp_path / "not-json.jsonl"
+        binary_path.write_bytes(b"\x00\x01\x02 not valid json at all \xff\xfe")
+
+        missing_path = tmp_path / "missing.jsonl"
+
+        with caplog.at_level("WARNING", logger="introspect.db"):
+            result = _filter_parseable_files(
+                [str(good_path), str(binary_path), str(missing_path)]
+            )
+
+        assert str(good_path) in result
+        assert str(missing_path) not in result
+        assert any(str(missing_path) in r.message for r in caplog.records)
 
 
 def test_ensure_materialized_builds_when_db_missing():
