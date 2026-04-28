@@ -28,6 +28,7 @@ from introspect.api.handlers.raw import raw_data as _raw_data
 from introspect.api.handlers.refresh import refresh_now as _refresh_now
 from introspect.api.handlers.refresh import refresh_status as _refresh_status
 from introspect.api.handlers.search import search as _search
+from introspect.api.handlers.sessions import cost_bloat_panel as _cost_bloat_panel
 from introspect.api.handlers.sessions import session_detail as _session_detail
 from introspect.api.handlers.sessions import sessions as _sessions
 from introspect.api.handlers.stats import stats as _stats
@@ -75,6 +76,16 @@ async def session_detail(
     tab: str = Query("messages"),
 ):
     return await _session_detail(request, session_id, tab)
+
+
+@router.get("/sessions/{session_id}/cost/bloat", response_class=HTMLResponse)
+async def session_cost_bloat(
+    request: Request,
+    session_id: str,
+    from_uuid: str | None = Query(default=None),
+    to_uuid: str | None = Query(default=None),
+):
+    return await _cost_bloat_panel(request, session_id, from_uuid, to_uuid)
 
 
 @router.get("/search", response_class=HTMLResponse)

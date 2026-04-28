@@ -41,110 +41,27 @@
 
 <h2>Cumulative cost over time</h2>
 <div class="card">
-    {% if cost_ctx.chart.messages %}
-    <div x-data="{ view: localStorage.getItem('introspect.costView') || 'total' }"
-         x-init="$watch('view', v => localStorage.setItem('introspect.costView', v))">
-        <div class="filter-bar" style="margin-bottom:0.6rem;">
-            <button type="button" class="tool-btn tool-btn-sm"
-                    :class="view === 'total' ? 'tool-btn-active' : ''"
-                    @click="view = 'total'">Total</button>
-            <button type="button" class="tool-btn tool-btn-sm"
-                    :class="view === 'agent' ? 'tool-btn-active' : ''"
-                    @click="view = 'agent'">By agent</button>
-            {% if cost_ctx.chart.has_subagents %}
-            <button type="button" class="tool-btn tool-btn-sm"
-                    :class="view === 'invocations' ? 'tool-btn-active' : ''"
-                    @click="view = 'invocations'">By invocation</button>
-            {% endif %}
-            <button type="button" class="tool-btn tool-btn-sm"
-                    :class="view === 'category' ? 'tool-btn-active' : ''"
-                    @click="view = 'category'">By category</button>
-        </div>
-        <svg xmlns="http://www.w3.org/2000/svg"
-             viewBox="0 0 {{ cost_ctx.chart.width }} {{ cost_ctx.chart.height }}"
-             preserveAspectRatio="none"
-             style="width:100%;height:160px;display:block;">
-            <g x-show="view === 'total'" style="display:none;">
-                <polyline fill="none" stroke="#3b5bdb" stroke-width="1.5"
-                          vector-effect="non-scaling-stroke"
-                          points="{{ cost_ctx.chart.polylines.total }}" />
-            </g>
-            <g x-show="view === 'agent'" style="display:none;">
-                <polyline fill="none" stroke="#3b5bdb" stroke-width="1.5"
-                          vector-effect="non-scaling-stroke"
-                          points="{{ cost_ctx.chart.polylines.main }}" />
-                <polyline fill="none" stroke="#8a5ad0" stroke-width="1.5"
-                          vector-effect="non-scaling-stroke"
-                          points="{{ cost_ctx.chart.polylines.sub }}" />
-            </g>
-            {% if cost_ctx.chart.has_subagents %}
-            <g x-show="view === 'invocations'" style="display:none;">
-                {% for s in cost_ctx.chart.invocation_series %}
-                <polyline fill="none" stroke="{{ s.color }}" stroke-width="1.5"
-                          vector-effect="non-scaling-stroke"
-                          points="{{ cost_ctx.chart.polylines[s.key] }}" />
-                {% endfor %}
-            </g>
-            {% endif %}
-            <g x-show="view === 'category'" style="display:none;">
-                <polyline fill="none" stroke="#c86b1a" stroke-width="1.5"
-                          vector-effect="non-scaling-stroke"
-                          points="{{ cost_ctx.chart.polylines.read }}" />
-                <polyline fill="none" stroke="#2e8b57" stroke-width="1.5"
-                          vector-effect="non-scaling-stroke"
-                          points="{{ cost_ctx.chart.polylines.created }}" />
-                <polyline fill="none" stroke="#5a6e9a" stroke-width="1.5"
-                          vector-effect="non-scaling-stroke"
-                          points="{{ cost_ctx.chart.polylines.conversation }}" />
-            </g>
-            {# Markers: one <g> per view so each tick lands on the owning series' line. #}
-            {# Vertical ticks (not circles) — preserveAspectRatio="none" stretches the #}
-            {# x-axis, which would deform circles into ellipses. Ticks plus              #}
-            {# vector-effect=non-scaling-stroke render at a consistent pixel weight.    #}
-            {% set tick_half = 7 %}
-            {% macro marker_group(view_name, y_key) -%}
-            <g x-show="view === '{{ view_name }}'" style="display:none;">
-                {% for mk in cost_ctx.chart.markers %}
-                <a href="/sessions/{{ session_id }}?tab=messages#msg-{{ mk.uuid }}">
-                    <line x1="{{ mk.x }}" x2="{{ mk.x }}"
-                          y1="{{ mk[y_key] - tick_half }}" y2="{{ mk[y_key] + tick_half }}"
-                          stroke="{% if mk.kind == 'spike' %}#c62828{% else %}#c0a000{% endif %}"
-                          stroke-width="2.5" stroke-linecap="round"
-                          vector-effect="non-scaling-stroke">
-                        <title>{{ mk.kind }} · inc {{ mk.inc_cost }} · cum {{ mk.cum_cost }}</title>
-                    </line>
-                </a>
-                {% endfor %}
-            </g>
-            {%- endmacro %}
-            {{ marker_group('total', 'y_total') }}
-            {{ marker_group('agent', 'y_agent') }}
-            {% if cost_ctx.chart.has_subagents %}
-            {{ marker_group('invocations', 'y_invocation') }}
-            {% endif %}
-            {{ marker_group('category', 'y_category') }}
-        </svg>
-        <div style="margin:0.4rem 0 0;font-size:0.85rem;color:#555;display:flex;gap:1rem;flex-wrap:wrap;">
-            <span x-show="view === 'total'" style="display:none;"><span style="display:inline-block;width:10px;height:10px;background:#3b5bdb;margin-right:0.25rem;"></span>Total</span>
-            <span x-show="view === 'agent'" style="display:none;gap:1rem;">
-                <span><span style="display:inline-block;width:10px;height:10px;background:#3b5bdb;margin-right:0.25rem;"></span>Main</span>
-                <span style="margin-left:1rem;"><span style="display:inline-block;width:10px;height:10px;background:#8a5ad0;margin-right:0.25rem;"></span>Subagent</span>
-            </span>
-            {% if cost_ctx.chart.has_subagents %}
-            <span x-show="view === 'invocations'" style="display:none;flex-wrap:wrap;">
-                {% for s in cost_ctx.chart.invocation_series %}
-                <span style="margin-right:1rem;"><span style="display:inline-block;width:10px;height:10px;background:{{ s.color }};margin-right:0.25rem;"></span>{{ s.name }} · {{ s.cost }}</span>
-                {% endfor %}
-            </span>
-            {% endif %}
-            <span x-show="view === 'category'" style="display:none;gap:1rem;">
-                <span><span style="display:inline-block;width:10px;height:10px;background:#c86b1a;margin-right:0.25rem;"></span>Read</span>
-                <span style="margin-left:1rem;"><span style="display:inline-block;width:10px;height:10px;background:#2e8b57;margin-right:0.25rem;"></span>Created</span>
-                <span style="margin-left:1rem;"><span style="display:inline-block;width:10px;height:10px;background:#5a6e9a;margin-right:0.25rem;"></span>Conversation</span>
-            </span>
-        </div>
-        <p style="color:#888;margin:0.35rem 0 0;font-size:0.85rem;">{{ cost_ctx.chart.messages }} messages{% if cost_ctx.chart.points != cost_ctx.chart.messages %} (bucketed to {{ cost_ctx.chart.points }} points){% endif %}</p>
+    {% if cost_ctx.chart_error %}
+    <div style="background:#fff0f0;border-left:4px solid #c62828;padding:0.6rem 0.9rem;color:#742;">
+        <strong>Chart unavailable.</strong> Per-model breakdown and bloat tables below are still computed.
+        <details style="margin-top:0.4rem;"><summary style="cursor:pointer;color:#999;font-size:0.85rem;">Details</summary><pre style="margin:0.4rem 0 0;font-size:0.8rem;color:#a44;">{{ cost_ctx.chart_error }}</pre></details>
     </div>
+    {% elif cost_ctx.chart.messages %}
+    <p style="color:#666;margin:0 0 0.6rem;font-size:0.85rem;">Drag to box-select a range or click a marker to filter the bloat tables below. Toggle which series are visible with the buttons.</p>
+    <div id="session-cost-chart"
+         class="cost-chart"
+         data-figure-id="session-cost-chart-data"
+         data-on-click="session-cost-marker"
+         data-session-id="{{ session_id }}"
+         data-modebar="hover"
+         data-view-map='{{ cost_ctx.chart.view_map | tojson }}'
+         data-annotation-view-map='{{ cost_ctx.chart.annotation_view_map | tojson }}'
+         data-marker-trace="{{ cost_ctx.chart.marker_trace }}"
+         data-has-subagents="{{ '1' if cost_ctx.chart.has_subagents else '0' }}"
+         data-height="280"
+         style="width:100%;min-height:280px;"></div>
+    <script type="application/json" id="session-cost-chart-data">{{ cost_ctx.chart.figure_json|safe }}</script>
+    <p style="color:#888;margin:0.35rem 0 0;font-size:0.85rem;">{{ cost_ctx.chart.messages }} messages{% if cost_ctx.chart.points != cost_ctx.chart.messages %} (bucketed to {{ cost_ctx.chart.points }} points, {{ cost_ctx.chart.bucket_size }} per bucket — selection rounds to bucket edges){% endif %}</p>
     {% else %}
     <p>No cost data to chart.</p>
     {% endif %}
@@ -185,87 +102,6 @@
 </div>
 {% endif %}
 
-<h2>Bloat attribution — what added context</h2>
-<div class="card">
-    <p style="color:#888;margin:0 0 0.6rem;">Where new context tokens (cache writes) came from. Categories describe <em>what</em> was added; the Main/Subagent split shows <em>which agent</em> caused it (subagents do reads, writes, and conversation too). Cost is the cache-write portion only — see the per-model table above for the full session cost. Total accounted: {{ "{:,}".format(cost_ctx.bloat_total_tokens) }} tokens / {{ cost_ctx.bloat_total_cost }} of cache writes.</p>
-    <table>
-        <thead>
-            <tr>
-                <th rowspan="2">Category</th>
-                <th colspan="2" style="text-align:center;border-left:1px solid #ddd;">Main agent</th>
-                <th colspan="2" style="text-align:center;border-left:1px solid #ddd;">Subagent</th>
-                <th colspan="3" style="text-align:center;border-left:1px solid #ddd;">Total</th>
-            </tr>
-            <tr>
-                <th style="text-align:right;border-left:1px solid #ddd;">Tokens</th>
-                <th style="text-align:right;">Cost</th>
-                <th style="text-align:right;border-left:1px solid #ddd;">Tokens</th>
-                <th style="text-align:right;">Cost</th>
-                <th style="text-align:right;border-left:1px solid #ddd;">Tokens</th>
-                <th style="text-align:right;">Cost</th>
-                <th style="text-align:right;">%</th>
-            </tr>
-        </thead>
-        <tbody>
-            {% for r in cost_ctx.bloat_rollup %}
-            <tr>
-                <td><strong>{{ r.category }}</strong></td>
-                <td style="text-align:right;border-left:1px solid #ddd;">{{ "{:,}".format(r.main.tokens) }}</td>
-                <td style="text-align:right;">{{ r.main.cost }}</td>
-                <td style="text-align:right;border-left:1px solid #ddd;">{{ "{:,}".format(r.subagent.tokens) }}</td>
-                <td style="text-align:right;">{{ r.subagent.cost }}</td>
-                <td style="text-align:right;border-left:1px solid #ddd;">{{ "{:,}".format(r.total.tokens) }}</td>
-                <td style="text-align:right;">{{ r.total.cost }}</td>
-                <td style="text-align:right;">{{ "%.1f"|format(r.total.pct) }}%</td>
-            </tr>
-            {% endfor %}
-            <tr style="border-top:2px solid #ccc;font-weight:600;">
-                <td>Total</td>
-                <td style="text-align:right;border-left:1px solid #ddd;">{{ "{:,}".format(cost_ctx.bloat_rollup_totals.main.tokens) }}</td>
-                <td style="text-align:right;">{{ cost_ctx.bloat_rollup_totals.main.cost }}</td>
-                <td style="text-align:right;border-left:1px solid #ddd;">{{ "{:,}".format(cost_ctx.bloat_rollup_totals.subagent.tokens) }}</td>
-                <td style="text-align:right;">{{ cost_ctx.bloat_rollup_totals.subagent.cost }}</td>
-                <td style="text-align:right;border-left:1px solid #ddd;">{{ "{:,}".format(cost_ctx.bloat_rollup_totals.total.tokens) }}</td>
-                <td style="text-align:right;">{{ cost_ctx.bloat_rollup_totals.total.cost }}</td>
-                <td style="text-align:right;">100.0%</td>
-            </tr>
-        </tbody>
-    </table>
-</div>
-
-<h2>Top contributors</h2>
-<div class="card">
-    {% if cost_ctx.bloat_top_buckets %}
-    <table>
-        <thead>
-            <tr>
-                <th>Bucket</th>
-                <th>Category</th>
-                <th>Agent</th>
-                <th style="text-align:right;">Tokens</th>
-                <th style="text-align:right;">Cache write cost</th>
-                <th style="text-align:right;">% of cache writes</th>
-            </tr>
-        </thead>
-        <tbody>
-            {% for b in cost_ctx.bloat_top_buckets %}
-            <tr>
-                <td>{{ b.bucket }}</td>
-                <td>{{ b.category }}</td>
-                <td>{{ b.agent }}</td>
-                <td style="text-align:right;">{{ "{:,}".format(b.tokens) }}</td>
-                <td style="text-align:right;">{{ b.cost }}</td>
-                <td style="text-align:right;">{{ "%.1f"|format(b.pct) }}%</td>
-            </tr>
-            {% endfor %}
-        </tbody>
-    </table>
-    {% if cost_ctx.bloat_extra_count %}
-    <p style="color:#888;margin:0.5rem 0 0;">…and {{ cost_ctx.bloat_extra_count }} more buckets not shown.</p>
-    {% endif %}
-    {% else %}
-    <p>No bloat data — this session has no cache-creation tokens.</p>
-    {% endif %}
-</div>
+{% include "_session_cost_bloat.html" %}
 
 {% endif %}

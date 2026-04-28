@@ -164,6 +164,143 @@
          inline scripts running mid-swap. -->
     <script>
     (function () {
+        function attachSessionCostHandlers(el) {
+            var sid = el.dataset.sessionId;
+            var rawViewMap = el.dataset.viewMap;
+            var viewMap = rawViewMap ? JSON.parse(rawViewMap) : null;
+            var rawAnnMap = el.dataset.annotationViewMap;
+            var annMap = rawAnnMap ? JSON.parse(rawAnnMap) : null;
+            var markerTrace = parseInt(el.dataset.markerTrace || '-1', 10);
+            var hasSubagents = el.dataset.hasSubagents === '1';
+            var lsKey = 'introspect.costView';
+            var currentView = (typeof localStorage !== 'undefined'
+                && localStorage.getItem(lsKey)) || 'total';
+            if (currentView === 'invocations' && !hasSubagents) currentView = 'total';
+
+            function applyView(name) {
+                if (!viewMap || !viewMap[name]) return;
+                currentView = name;
+                if (typeof localStorage !== 'undefined') localStorage.setItem(lsKey, name);
+                var nTraces = (el.data || []).length;
+                var visible = [];
+                for (var i = 0; i < nTraces; i++) visible.push('legendonly');
+                viewMap[name].forEach(function (i) { visible[i] = true; });
+                if (markerTrace >= 0 && markerTrace < nTraces) visible[markerTrace] = true;
+                Plotly.restyle(el, {visible: visible});
+                // Flip per-view annotation visibility. annMap is
+                // {viewName: [annotation indices]}; an annotation is
+                // visible iff its index is in the active view's list.
+                var anns = (el.layout && el.layout.annotations) || [];
+                if (annMap && anns.length) {
+                    var activeSet = {};
+                    (annMap[name] || []).forEach(function (i) { activeSet[i] = true; });
+                    var update = {};
+                    for (var i = 0; i < anns.length; i++) {
+                        update['annotations[' + i + '].visible'] = !!activeSet[i];
+                    }
+                    Plotly.relayout(el, update);
+                }
+                var toolbar = el.previousElementSibling;
+                if (toolbar && toolbar.classList.contains('cost-view-toolbar')) {
+                    toolbar.querySelectorAll('button').forEach(function (b) {
+                        if (b.dataset.view === name) b.classList.add('tool-btn-active');
+                        else b.classList.remove('tool-btn-active');
+                    });
+                }
+            }
+
+            if (viewMap) {
+                var toolbar = document.createElement('div');
+                toolbar.className = 'filter-bar cost-view-toolbar';
+                toolbar.style.marginBottom = '0.6rem';
+                var views = [
+                    {key: 'total', label: 'Total'},
+                    {key: 'agent', label: 'By agent'}
+                ];
+                if (hasSubagents) views.push({key: 'invocations', label: 'By invocation'});
+                views.push({key: 'category', label: 'By category'});
+                views.forEach(function (v) {
+                    var btn = document.createElement('button');
+                    btn.type = 'button';
+                    btn.className = 'tool-btn tool-btn-sm';
+                    btn.dataset.view = v.key;
+                    btn.textContent = v.label;
+                    btn.addEventListener('click', function () { applyView(v.key); });
+                    toolbar.appendChild(btn);
+                });
+                el.parentNode.insertBefore(toolbar, el);
+                applyView(currentView);
+            }
+
+            function fireRangeFilter(fromUuid, toUuid) {
+                if (!sid || !fromUuid || !toUuid) return;
+                htmx.ajax('GET',
+                    '/sessions/' + encodeURIComponent(sid)
+                    + '/cost/bloat?from_uuid=' + encodeURIComponent(fromUuid)
+                    + '&to_uuid=' + encodeURIComponent(toUuid),
+                    {target: '#session-cost-bloat-panel', swap: 'outerHTML'}
+                );
+            }
+
+            function bucketCustomdata() {
+                // Pull customdata from any non-marker trace — every line
+                // trace carries the same per-bucket [first_uuid, last_uuid,
+                // count] blob, so the first one we find works.
+                var traces = el.data || [];
+                for (var i = 0; i < traces.length; i++) {
+                    if (i === markerTrace) continue;
+                    var cd = traces[i].customdata;
+                    if (cd && cd.length) return cd;
+                }
+                return null;
+            }
+
+            el.on('plotly_click', function (evt) {
+                if (!evt || !evt.points || !evt.points.length) return;
+                var p = evt.points[0];
+                if (p.fullData && p.fullData.mode &&
+                        p.fullData.mode.indexOf('markers') >= 0) {
+                    // Marker click: customdata = [uuid, kind, inc, cum].
+                    var uuid = p.customdata && p.customdata[0];
+                    fireRangeFilter(uuid, uuid);
+                }
+            });
+            el.on('plotly_selected', function (evt) {
+                if (!evt) return;
+                var cd = bucketCustomdata();
+                if (!cd) return;
+                var x0, x1;
+                if (evt.range && evt.range.x && evt.range.x.length === 2) {
+                    // Box-select carries the dragged x-range directly.
+                    // Line-only traces don't always populate evt.points (no
+                    // marker = nothing to "select"), so we read the range.
+                    x0 = Math.round(evt.range.x[0]);
+                    x1 = Math.round(evt.range.x[1]);
+                } else if (evt.points && evt.points.length) {
+                    var indices = evt.points
+                        .filter(function (p) { return p.curveNumber !== markerTrace; })
+                        .map(function (p) { return p.pointIndex; });
+                    if (!indices.length) return;
+                    x0 = Math.min.apply(null, indices);
+                    x1 = Math.max.apply(null, indices);
+                } else {
+                    return;
+                }
+                if (x0 > x1) { var tmp = x0; x0 = x1; x1 = tmp; }
+                x0 = Math.max(0, Math.min(x0, cd.length - 1));
+                x1 = Math.max(0, Math.min(x1, cd.length - 1));
+                var first = cd[x0];
+                var last = cd[x1];
+                if (!first || !last) return;
+                fireRangeFilter(first[0], last[1]);
+            });
+
+            // Force dragmode to 'select' after the modebar's defaults
+            // settle — some Plotly versions reset it to 'zoom' once the
+            // modebar is wired up.
+            Plotly.relayout(el, {dragmode: 'select'});
+        }
+
         function initCostChart(el) {
             // Skip charts that are already initialised — Plotly attaches
             // ``_fullLayout`` once newPlot has run.
@@ -176,9 +313,12 @@
             // once at the correct size; height comes from the data attr.
             fig.layout.width = el.clientWidth;
             fig.layout.height = parseInt(el.dataset.height || '360', 10);
+            var modebarVisible = el.dataset.modebar === 'hover';
             Plotly.purge(el);
             Plotly.newPlot(el, fig.data, fig.layout,
-                {displaylogo: false, displayModeBar: false}
+                {displaylogo: false,
+                 displayModeBar: modebarVisible ? 'hover' : false,
+                 modeBarButtonsToRemove: ['lasso2d']}
             ).then(function () {
                 if (el.dataset.onClick === 'hourly-drilldown') {
                     var breakdown = el.dataset.breakdown || 'total';
@@ -212,6 +352,8 @@
                             {target: '#cost-portfolio-panel', swap: 'innerHTML'}
                         );
                     });
+                } else if (el.dataset.onClick === 'session-cost-marker') {
+                    attachSessionCostHandlers(el);
                 }
             });
         }

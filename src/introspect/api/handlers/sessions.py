@@ -1,11 +1,14 @@
 """Session-related route handlers."""
 
 import json
+import logging
 import math
 import re
 from pathlib import PurePosixPath
 
-from fastapi import Request
+import nolegend
+import plotly.graph_objects as go
+from fastapi import HTTPException, Request
 from fastapi.responses import HTMLResponse
 
 from introspect.pricing import compute_cost_usd
@@ -26,6 +29,8 @@ from ._helpers import (
     session_row_to_dict,
     templates,
 )
+
+logger = logging.getLogger(__name__)
 
 _MESSAGE_HARD_CAP = 5000
 _THINKING_PREVIEW_MAX = 200
@@ -639,6 +644,11 @@ def _aggregate_bloat(rows: list[tuple]) -> tuple[dict, dict]:
 
     Both dicts are keyed by (label, agent) so the main vs. subagent split is
     preserved as an orthogonal dimension, not collapsed into one category.
+
+    Each bucket entry also carries ``top_uuid`` / ``top_cost_usd`` — the
+    single message that contributed the most cache-write cost to that
+    bucket. That's the worst-offender users want to jump to from the
+    contributors table.
     """
     bucket_totals: dict[tuple[str, str], dict] = {}
     category_totals: dict[tuple[str, str], dict] = {
@@ -648,6 +658,7 @@ def _aggregate_bloat(rows: list[tuple]) -> tuple[dict, dict]:
     }
     for bloat_row in rows:
         (
+            uuid,
             is_side,
             model,
             cc_total,
@@ -687,15 +698,55 @@ def _aggregate_bloat(rows: list[tuple]) -> tuple[dict, dict]:
                 "agent": agent,
                 "tokens": 0,
                 "cost_usd": 0.0,
+                "top_uuid": uuid,
+                "top_cost_usd": cost,
             },
         )
         bucket_entry["tokens"] += cc_total
         bucket_entry["cost_usd"] += cost
+        if cost > bucket_entry["top_cost_usd"]:
+            bucket_entry["top_uuid"] = uuid
+            bucket_entry["top_cost_usd"] = cost
     return bucket_totals, category_totals
 
 
-def _build_cost_context(db, session_id: str) -> dict:
-    """Build the data structures the Cost tab template needs."""
+def _resolve_uuid_range(
+    attrib_rows: list[tuple], from_uuid: str, to_uuid: str
+) -> tuple[int, int]:
+    """Look up the inclusive index range that ``from_uuid``..``to_uuid`` spans.
+
+    Linear scan over already-fetched rows. Both ends inclusive; missing
+    uuid raises 404. If ``from_uuid`` lands later than ``to_uuid`` (the
+    user dragged right-to-left), swap them so the slice stays sane.
+    """
+    lo: int | None = None
+    hi: int | None = None
+    for i, row in enumerate(attrib_rows):
+        uuid = row[1]
+        if uuid == from_uuid and lo is None:
+            lo = i
+        if uuid == to_uuid:
+            hi = i
+    if lo is None or hi is None:
+        raise HTTPException(status_code=404, detail="uuid not in session")
+    if lo > hi:
+        lo, hi = hi, lo
+    return lo, hi
+
+
+def _build_cost_context(
+    db,
+    session_id: str,
+    *,
+    range_filter: tuple[str, str] | None = None,
+) -> dict:
+    """Build the data structures the Cost tab template needs.
+
+    When ``range_filter`` is set, the bloat tables (rollup + top
+    contributors) are scoped to that uuid range. The chart context still
+    covers the whole session — the chart is the user's navigation surface,
+    not a filtered view.
+    """
     # Single query drives three consumers: per-model rollup, bloat
     # aggregator, *and* the per-message cost chart.  The parent-user-message
     # join unnests `u.message.content` (an array of blocks — parallel-tool
@@ -720,8 +771,15 @@ def _build_cost_context(db, session_id: str) -> dict:
     per_model_rows = [row[2:11] for row in attrib_rows]
     per_model, total_cost = _aggregate_per_model(per_model_rows)
 
+    if range_filter is not None:
+        lo, hi = _resolve_uuid_range(attrib_rows, *range_filter)
+        bloat_attrib_rows = attrib_rows[lo : hi + 1]
+    else:
+        bloat_attrib_rows = attrib_rows
+
     bloat_rows = [
         (
+            row[1],  # uuid
             row[3],  # is_sidechain
             row[4],  # model
             row[8],  # cc_total
@@ -731,7 +789,7 @@ def _build_cost_context(db, session_id: str) -> dict:
             row[12],  # tool_name
             row[13],  # tool_input
         )
-        for row in attrib_rows
+        for row in bloat_attrib_rows
     ]
     bucket_totals, category_totals = _aggregate_bloat(bloat_rows)
 
@@ -752,7 +810,33 @@ def _build_cost_context(db, session_id: str) -> dict:
     # a named type) so they don't overwrite the current type with None mid-run.
     subagent_type_timeline = [(t, s) for t, s in subagent_type_timeline if s]
 
-    chart = _build_chart_from_attrib(attrib_rows, subagent_type_timeline, total_cost)
+    # Chart construction touches Plotly + DuckDB-typed data; isolate
+    # failures so the rest of the cost tab (per-model rollup, bloat
+    # tables) still renders for the user. The template handles the
+    # ``chart_error`` key by replacing the plot with an inline notice.
+    try:
+        chart = _build_chart_from_attrib(attrib_rows, subagent_type_timeline)
+        chart_error: str | None = None
+    except Exception as exc:
+        logger.exception("Failed to build session cost chart for %s", session_id)
+        chart = {
+            "messages": 0,
+            "points": 0,
+            "bucket_size": 1,
+            "figure_json": "",
+            "view_map": {"total": [], "agent": [], "category": [], "invocations": []},
+            "annotation_view_map": {
+                "total": [],
+                "agent": [],
+                "category": [],
+                "invocations": [],
+            },
+            "marker_trace": -1,
+            "invocation_series": [],
+            "invocation_summary": [],
+            "has_subagents": False,
+        }
+        chart_error = f"{type(exc).__name__}: {exc}"
     raw_tokens = sum(c["tokens"] for c in category_totals.values())
     total_bloat_tokens = raw_tokens or 1
     total_bloat_cost = sum(c["cost_usd"] for c in category_totals.values())
@@ -827,6 +911,8 @@ def _build_cost_context(db, session_id: str) -> dict:
             "cost_usd": bucket["cost_usd"],
             "cost": format_cost(bucket["cost_usd"]),
             "pct": 100.0 * bucket["tokens"] / total_bloat_tokens,
+            "top_uuid": bucket["top_uuid"],
+            "top_cost": format_cost(bucket["top_cost_usd"]),
         }
         for bucket in sorted_buckets[:_BLOAT_TOP_N]
     ]
@@ -843,20 +929,27 @@ def _build_cost_context(db, session_id: str) -> dict:
         "bloat_total_tokens": raw_tokens,
         "bloat_total_cost": format_cost(total_bloat_cost),
         "has_data": bool(attrib_rows),
+        "bloat_filter_active": range_filter is not None,
+        "bloat_filter_summary": (
+            f"Showing {len(bloat_attrib_rows)} of {len(attrib_rows)} messages"
+            if range_filter is not None
+            else ""
+        ),
+        "bloat_filter_count": len(bloat_attrib_rows) if range_filter is not None else 0,
+        "bloat_filter_total": len(attrib_rows),
+        "chart_error": chart_error,
     }
 
 
-_CHART_WIDTH = 600
-_CHART_HEIGHT = 160
 _SPIKE_MIN_N = 6
 _SLOPE_MIN_N = 10
-_SPIKE_TOP_N = 3
-_SLOPE_TOP_N = 5
-_SPIKE_ABS_FLOOR = 0.01
-_SPIKE_MEDIAN_MULTIPLIER = 2
-_SLOPE_SIGMA_MULTIPLIER = 2
+_SPIKE_TOP_N = 6
+_SLOPE_TOP_N = 8
+_SPIKE_ABS_FLOOR = 0.02
+_SPIKE_MEDIAN_MULTIPLIER = 1.5
+_SLOPE_SIGMA_MULTIPLIER = 1.5
 _SLOPE_WINDOW = 5
-_SLOPE_DEDUPE_RADIUS = 3
+_SLOPE_DEDUPE_RADIUS = 5
 # Slope detection needs ≥ 2 positive deltas to compute variance — 1 value
 # has zero spread and would collapse the threshold to 0.
 _SLOPE_MIN_POSITIVE_DELTAS = 2
@@ -869,10 +962,10 @@ def _detect_inflection_points(
 ) -> list[dict]:
     """Spike + slope inflection detection on the raw per-message arrays.
 
-    Thresholds (locked per context.md):
-      * Spike: inc_usd[i] >= max($0.01, 2 * median(inc_usd)); top-3.
-      * Slope: delta(i) = cum[i] - cum[i-W] (W=5) >= 2 stdev of positive
-        deltas; top-5; de-duped +/-3 against spike indices.
+    Thresholds:
+      * Spike: inc_usd[i] >= max($0.02, 1.5 * median(inc_usd)); top-6.
+      * Slope: delta(i) = cum[i] - cum[i-W] (W=5) >= 1.5 stdev of positive
+        deltas; top-8; de-duped +/-5 against spike indices.
       * Minimum N: 10 for slope, 6 for spike.
     """
     n = len(inc_usd)
@@ -918,9 +1011,9 @@ def _detect_inflection_points(
             var = sum((d - mean_d) ** 2 for d in positive_deltas) / len(positive_deltas)
             sigma = math.sqrt(var)
             if sigma > 0:
-                # Floor at $0.01 (same floor the spike branch uses) so noise
-                # near the cent level can't fire a marker even if sigma is
-                # tiny but nonzero.
+                # Same absolute floor the spike branch uses so noise near
+                # the cent level can't fire a marker even if sigma is tiny
+                # but nonzero.
                 threshold = max(_SLOPE_SIGMA_MULTIPLIER * sigma, _SPIKE_ABS_FLOOR)
                 # Filter + de-dupe against spikes
                 filtered = [
@@ -980,31 +1073,27 @@ def _bucket_series(
     return result, bucket_size
 
 
-def _x_for_index(idx: int, total_points: int, width: float) -> float:
-    """Map a bucketed index to an SVG x-coord.
+_template_activated: list[bool] = [False]
 
-    Single source of truth so polyline rendering and marker placement stay
-    in lockstep; changing the x-scaling (e.g. to bucket-midpoints) here
-    updates both consumers.
+
+def _ensure_template() -> None:
+    """Register nolegend's "tufte" template the first time a chart is built.
+
+    Mirrors the cost-overview lazy activator so importing the handler from
+    a CLI / test that doesn't render a chart leaves Plotly's default
+    template alone.
     """
-    n = max(1, total_points - 1)
-    return (idx / n) * width
+    if not _template_activated[0]:
+        nolegend.activate()
+        _template_activated[0] = True
 
 
-def _polyline_from_series(
-    values: list[float], width: float, height: float, max_val: float
-) -> str:
-    """Render a list of cumulative values as an SVG polyline point string."""
-    if not values:
-        return ""
-    scale = max_val if max_val > 0 else 1.0
-    points = len(values)
-    coords: list[str] = []
-    for i, v in enumerate(values):
-        x = _x_for_index(i, points, width)
-        y = height - (v / scale) * height
-        coords.append(f"{x:.1f},{y:.1f}")
-    return " ".join(coords)
+_SPIKE_MARKER_COLOR = "#c62828"
+_SLOPE_MARKER_COLOR = "#c0a000"
+_AGENT_SUB_COLOR = "#8a5ad0"
+_CATEGORY_READ_COLOR = "#c86b1a"
+_CATEGORY_CREATED_COLOR = "#2e8b57"
+_CATEGORY_CONVERSATION_COLOR = "#5a6e9a"
 
 
 def _rank_invocations(
@@ -1126,16 +1215,103 @@ def _build_invocation_views(
     return series, summary
 
 
-def _render_multi_chart(  # noqa: PLR0913
+# Smaller deltas than this are treated as "no offset needed" — saves a
+# stray leader arrow on labels whose spread position rounds back to the
+# actual y within float noise.
+_LABEL_OFFSET_EPSILON = 1e-9
+
+
+def _spread_y(actual_ys: list[float], min_gap: float) -> list[float]:
+    """Spread label y-positions so adjacent labels are at least ``min_gap`` apart.
+
+    Sort descending, push each label down until it's ``min_gap`` below
+    its predecessor, then shift the whole stack to keep its midpoint at
+    the original midpoint (so labels stay roughly centred on their
+    actual positions). Returns positions in the original order.
+    """
+    n = len(actual_ys)
+    if n <= 1 or min_gap <= 0:
+        return list(actual_ys)
+    order = sorted(range(n), key=lambda i: -actual_ys[i])
+    sorted_ys = [actual_ys[i] for i in order]
+    spread = [sorted_ys[0]]
+    for i in range(1, n):
+        spread.append(min(sorted_ys[i], spread[-1] - min_gap))
+    actual_mid = (max(sorted_ys) + min(sorted_ys)) / 2
+    spread_mid = (spread[0] + spread[-1]) / 2
+    shift = actual_mid - spread_mid
+    spread = [y + shift for y in spread]
+    result = [0.0] * n
+    for k, orig_i in enumerate(order):
+        result[orig_i] = spread[k]
+    return result
+
+
+def _build_label_annotations(
+    view_label_specs: dict[str, list[tuple[str, str, float]]],
+    *,
+    x_max: int,
+    default_view: str,
+) -> tuple[list[dict], dict[str, list[int]]]:
+    """Build Plotly annotations for direct line-end labels, per view.
+
+    Returns ``(annotations, annotation_view_map)``. The map keys are
+    view names ("total", "agent", "category", "invocations") and the
+    values are the indices in ``annotations`` belonging to that view —
+    the JS toggle flips each annotation's ``visible`` based on this
+    lookup since Plotly's Annotation type doesn't permit a custom
+    ``meta`` field.
+
+    Within a view, label y-positions are spread to avoid overlap; when
+    a label is offset from its line's actual endpoint, a thin leader
+    arrow connects them.
+    """
+    annotations: list[dict] = []
+    view_map: dict[str, list[int]] = {view: [] for view in view_label_specs}
+    for view, specs in view_label_specs.items():
+        if not specs:
+            continue
+        actual_ys = [y for _name, _color, y in specs]
+        y_range = max(actual_ys) - min(actual_ys) if len(actual_ys) > 1 else 0.0
+        min_gap = max(y_range * 0.14, max(actual_ys) * 0.06, 0.0001)
+        spread = _spread_y(actual_ys, min_gap)
+        for (name, color, actual_y), label_y in zip(specs, spread, strict=True):
+            offset = abs(actual_y - label_y) > _LABEL_OFFSET_EPSILON
+            view_map[view].append(len(annotations))
+            annotations.append(
+                {
+                    "x": x_max,
+                    "y": actual_y,
+                    "xref": "x",
+                    "yref": "y",
+                    "text": name,
+                    "ax": x_max,
+                    "ay": label_y,
+                    "axref": "x",
+                    "ayref": "y",
+                    "xanchor": "left",
+                    "yanchor": "middle",
+                    "xshift": 8,
+                    "showarrow": offset,
+                    "arrowhead": 0,
+                    "arrowwidth": 0.8,
+                    "arrowcolor": color,
+                    "font": {"color": color, "size": 12},
+                    "visible": view == default_view,
+                }
+            )
+    return annotations, view_map
+
+
+def _render_multi_chart(  # noqa: PLR0913, PLR0915
     uuids: list[str],
     inc_usd: list[float],
     is_sidechain_list: list[bool],
     categories: list[str],
     invocation_ids: list[int | None],
     invocation_types: list[str],
-    total_cost: float,
 ) -> dict:
-    """Build the per-series chart + marker overlay.
+    """Build the per-series Plotly figure + marker overlay + view map.
 
     ``invocation_ids[i]`` is the 0-based Task/Agent invocation index the
     i-th message belongs to (``None`` for main-agent messages).
@@ -1143,37 +1319,40 @@ def _render_multi_chart(  # noqa: PLR0913
     called_at order — so ``invocation_types[invocation_ids[i]]`` names the
     agent type of message i.
 
-    The "by invocation" view ranks invocations by total cost descending.
-    The top-N (palette size) get individual polylines in the most distinct
-    colors so outliers — e.g. one runaway Explore that dwarfs the rest —
-    land in the red/orange slots and stand out at a glance.  Invocations
-    beyond the palette roll up into a single "Other" gray series; the chart
-    still totals correctly even when there are many small calls.
+    Returns a dict consumed by ``_session_cost.html``:
+
+    * ``figure_json``        — serialised ``go.Figure``: a Scatter trace
+      per series (total / main / sub / read / created / conversation /
+      per-invocation) plus one marker overlay trace.
+    * ``view_map``           — mapping ``{view_name: [trace_indices]}``
+      so the client toggle can flip ``visible`` via ``Plotly.restyle``.
+    * ``marker_trace``       — index of the always-on marker overlay.
+    * ``messages``, ``points``, ``bucket_size`` — chart metadata for the
+      caption / box-select-precision warning.
+    * ``has_subagents``      — gate for showing the "By invocation" view.
+    * ``invocation_series``  — legend rows used in the per-invocation
+      summary table below the chart.
+    * ``invocation_summary`` — outlier table shown beneath the chart.
+
+    The "by invocation" view ranks invocations by total cost descending;
+    top-N get distinct palette colours, the rest fold into "Other".
     """
-    fixed_empty_polylines = {
-        "total": "",
-        "main": "",
-        "sub": "",
-        "read": "",
-        "created": "",
-        "conversation": "",
-    }
     n_messages = len(uuids)
+    empty_view_map = {"total": [], "agent": [], "category": [], "invocations": []}
     if n_messages == 0:
         return {
-            "width": _CHART_WIDTH,
-            "height": _CHART_HEIGHT,
-            "max": 0.0,
             "messages": 0,
             "points": 0,
-            "polylines": fixed_empty_polylines,
+            "bucket_size": 1,
+            "figure_json": "",
+            "view_map": empty_view_map,
+            "annotation_view_map": dict(empty_view_map),
+            "marker_trace": -1,
             "invocation_series": [],
             "invocation_summary": [],
             "has_subagents": False,
-            "markers": [],
         }
 
-    # Build raw per-series increments (parallel arrays).
     main_inc = [0.0 if is_sidechain_list[i] else inc_usd[i] for i in range(n_messages)]
     sub_inc = [inc_usd[i] if is_sidechain_list[i] else 0.0 for i in range(n_messages)]
     read_inc = [
@@ -1187,19 +1366,10 @@ def _render_multi_chart(  # noqa: PLR0913
         for i in range(n_messages)
     ]
 
-    ranked, per_inv_first_uuid, top_inv_index, per_inv_inc = _rank_invocations(
+    ranked, per_inv_first_uuid, _top_inv_index, per_inv_inc = _rank_invocations(
         uuids, inc_usd, invocation_ids
     )
 
-    def _inv_series_key(inv_id: int | None) -> str:
-        if inv_id is None:
-            return "main"
-        rank = top_inv_index.get(inv_id)
-        if rank is None:
-            return "inv_other"
-        return f"inv_{rank}"
-
-    # Inflection detection on raw arrays.
     raw_cum: list[float] = []
     running = 0.0
     for inc in inc_usd:
@@ -1221,14 +1391,6 @@ def _render_multi_chart(  # noqa: PLR0913
     )
     points = len(cumulatives["total"])
 
-    width, height = _CHART_WIDTH, _CHART_HEIGHT
-    max_cost = total_cost if total_cost > 0 else 1.0
-
-    polylines = {
-        name: _polyline_from_series(series, width, height, max_cost)
-        for name, series in cumulatives.items()
-    }
-
     invocation_series, invocation_summary = _build_invocation_views(
         ranked=ranked,
         invocation_types=invocation_types,
@@ -1237,56 +1399,179 @@ def _render_multi_chart(  # noqa: PLR0913
         main_messages=sum(1 for i in range(n_messages) if not is_sidechain_list[i]),
     )
 
-    def _y_on(series_key: str, bucket_idx: int) -> float:
-        series = cumulatives.get(series_key, [])
-        if not series:
-            return height
-        val = series[bucket_idx]
-        return height - (val / max_cost) * height
-
-    markers_out: list[dict] = []
-    for m in raw_markers:
-        raw_idx = m["idx"]
-        bucket_idx = raw_idx // bucket_size
-        if bucket_idx >= points:
-            bucket_idx = points - 1
-        x = _x_for_index(bucket_idx, points, width)
-        agent_key = "sub" if is_sidechain_list[raw_idx] else "main"
-        category_key = categories[raw_idx].lower()
-        inv_key = _inv_series_key(invocation_ids[raw_idx])
-        markers_out.append(
-            {
-                "x": round(x, 1),
-                "y_total": round(_y_on("total", bucket_idx), 1),
-                "y_agent": round(_y_on(agent_key, bucket_idx), 1),
-                "y_category": round(_y_on(category_key, bucket_idx), 1),
-                "y_invocation": round(_y_on(inv_key, bucket_idx), 1),
-                "uuid": m["uuid"],
-                "kind": m["kind"],
-                "inc_cost": format_cost(m["inc_usd"]),
-                "cum_cost": format_cost(m["cum_usd"]),
-                "idx": raw_idx,
-            }
+    # Per-bucket customdata: [first_uuid, last_uuid, msg_count]. Box-select
+    # reads first-of-leftmost and last-of-rightmost so the resolved range
+    # always covers every raw message under the dragged region.
+    bucket_customdata: list[list[object]] = []
+    for bidx in range(points):
+        raw_first = bidx * bucket_size
+        raw_last = min((bidx + 1) * bucket_size, n_messages) - 1
+        bucket_customdata.append(
+            [uuids[raw_first], uuids[raw_last], raw_last - raw_first + 1]
         )
 
+    _ensure_template()
+    fig = go.Figure()
+    view_map: dict[str, list[int]] = {
+        "total": [],
+        "agent": [],
+        "category": [],
+        "invocations": [],
+    }
+    # Per-view label spec: (trace_name, color, last_y). Used after all
+    # traces are added to compute spread label positions and emit one
+    # annotation per visible series, tagged with `meta=view` so the JS
+    # toggle can flip annotation visibility alongside trace visibility.
+    view_label_specs: dict[str, list[tuple[str, str, float]]] = {
+        "total": [],
+        "agent": [],
+        "category": [],
+        "invocations": [],
+    }
+    x_axis = list(range(points))
+
+    def _add_series(*, name: str, color: str, ys: list[float], view: str) -> None:
+        view_map[view].append(len(fig.data))
+        if ys:
+            view_label_specs[view].append((name, color, ys[-1]))
+        fig.add_trace(
+            go.Scatter(
+                x=x_axis,
+                y=ys,
+                mode="lines",
+                name=name,
+                line={"color": color, "width": 1.5},
+                customdata=bucket_customdata,
+                hovertemplate=(
+                    f"<b>{name}</b><br>"
+                    "msg %{customdata[2]} in bucket<br>"
+                    "cum $%{y:.4f}<extra></extra>"
+                ),
+            )
+        )
+
+    _add_series(
+        name="Total", color=_MAIN_AGENT_COLOR, ys=cumulatives["total"], view="total"
+    )
+    _add_series(
+        name="Main", color=_MAIN_AGENT_COLOR, ys=cumulatives["main"], view="agent"
+    )
+    _add_series(
+        name="Subagent", color=_AGENT_SUB_COLOR, ys=cumulatives["sub"], view="agent"
+    )
+    _add_series(
+        name="Read", color=_CATEGORY_READ_COLOR, ys=cumulatives["read"], view="category"
+    )
+    _add_series(
+        name="Created",
+        color=_CATEGORY_CREATED_COLOR,
+        ys=cumulatives["created"],
+        view="category",
+    )
+    _add_series(
+        name="Conversation",
+        color=_CATEGORY_CONVERSATION_COLOR,
+        ys=cumulatives["conversation"],
+        view="category",
+    )
+    for s in invocation_series:
+        ys = cumulatives.get(s["key"], [])
+        if not ys:
+            continue
+        _add_series(name=s["name"], color=s["color"], ys=ys, view="invocations")
+
+    total_cum = cumulatives["total"]
+    marker_x: list[int] = []
+    marker_y: list[float] = []
+    marker_color: list[str] = []
+    marker_customdata: list[list[object]] = []
+    for m in raw_markers:
+        raw_idx = m["idx"]
+        bucket_idx = min(raw_idx // bucket_size, points - 1)
+        marker_x.append(bucket_idx)
+        marker_y.append(total_cum[bucket_idx])
+        marker_color.append(
+            _SPIKE_MARKER_COLOR if m["kind"] == "spike" else _SLOPE_MARKER_COLOR
+        )
+        marker_customdata.append(
+            [
+                m["uuid"],
+                m["kind"],
+                format_cost(m["inc_usd"]),
+                format_cost(m["cum_usd"]),
+            ]
+        )
+    marker_trace_idx = len(fig.data)
+    fig.add_trace(
+        go.Scatter(
+            x=marker_x,
+            y=marker_y,
+            mode="markers",
+            name="Markers",
+            marker={
+                "color": marker_color,
+                "size": 14,
+                "symbol": "line-ns",
+                "line": {"color": marker_color, "width": 3},
+            },
+            customdata=marker_customdata,
+            hovertemplate=(
+                "<b>%{customdata[1]}</b><br>"
+                "inc %{customdata[2]}<br>"
+                "cum %{customdata[3]}<extra></extra>"
+            ),
+        )
+    )
+
+    # Plotly's `visible` accepts ``True | False | "legendonly"`` — typed
+    # as the union so ty doesn't widen the literal-string list.
+    visible: list[bool | str] = ["legendonly"] * len(fig.data)
+    for tidx in view_map["total"]:
+        visible[tidx] = True
+    visible[marker_trace_idx] = True
+    for tidx, v in enumerate(visible):
+        fig.data[tidx].visible = v
+
+    # Per-view label annotations with vertical spreading + leader lines.
+    # The JS view-toggle flips visibility per annotation index using the
+    # returned ``annotation_view_map`` since Plotly's Annotation type
+    # doesn't accept custom meta tags.
+    label_annotations, annotation_view_map = _build_label_annotations(
+        view_label_specs, x_max=points - 1, default_view="total"
+    )
+
+    fig.update_layout(
+        template="tufte",
+        showlegend=False,
+        hovermode="closest",
+        dragmode="select",
+        selectdirection="h",
+        xaxis_title="Message #"
+        if bucket_size == 1
+        else f"Bucket # ({bucket_size}/bucket)",
+        yaxis_title="Cumulative cost (USD)",
+        # Right margin reserves room for direct labels on the line ends.
+        margin={"l": 60, "r": 130, "t": 20, "b": 60},
+        annotations=label_annotations,
+    )
+
     return {
-        "width": width,
-        "height": height,
-        "max": max_cost,
         "messages": n_messages,
         "points": points,
-        "polylines": polylines,
+        "bucket_size": bucket_size,
+        "figure_json": fig.to_json(),
+        "view_map": view_map,
+        "annotation_view_map": annotation_view_map,
+        "marker_trace": marker_trace_idx,
         "invocation_series": invocation_series,
         "invocation_summary": invocation_summary,
         "has_subagents": bool(ranked),
-        "markers": markers_out,
     }
 
 
 def _build_chart_from_attrib(
     attrib_rows: list[tuple],
     subagent_type_timeline: list[tuple],
-    total_cost: float,
 ) -> dict:
     """Extract per-message arrays from the attribution query and render chart.
 
@@ -1369,7 +1654,6 @@ def _build_chart_from_attrib(
         categories,
         invocation_ids,
         invocation_types,
-        total_cost,
     )
 
 
@@ -1458,5 +1742,33 @@ async def session_detail(
             }
             if file_metrics
             else None,
+        },
+    )
+
+
+async def cost_bloat_panel(
+    request: Request,
+    session_id: str,
+    from_uuid: str | None = None,
+    to_uuid: str | None = None,
+) -> HTMLResponse:
+    """Re-render the bloat-rollup + top-contributors block for a uuid range.
+
+    HTMX swaps the result into ``#session-cost-bloat-panel``. When both
+    ``from_uuid`` and ``to_uuid`` are supplied, the tables scope to that
+    inclusive range; with neither, they cover the whole session.
+    """
+    db = conn(request)
+    range_filter: tuple[str, str] | None = None
+    if from_uuid and to_uuid:
+        range_filter = (from_uuid, to_uuid)
+    cost_ctx = _build_cost_context(db, session_id, range_filter=range_filter)
+    return templates.TemplateResponse(
+        request,
+        "_session_cost_bloat.html",
+        {
+            "cost_ctx": cost_ctx,
+            "session_id": session_id,
+            "parent": parent(request),
         },
     )

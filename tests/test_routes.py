@@ -1634,43 +1634,37 @@ def test_session_cost_subagent_attribution():
 # --- Phase 1: Cost chart (multi-series + inflection markers) tests ---
 
 
-def test_session_cost_tab_has_view_toggle():
-    """Cost tab renders an Alpine view-toggle with three click handlers."""
+def test_session_cost_tab_has_chart_view_map():
+    """Cost tab embeds a Plotly figure with a four-view map for the toggle JS."""
     with tempfile.TemporaryDirectory() as tmp, _patched_client(Path(tmp)) as client:
         response = client.get(f"/sessions/{SID}?tab=cost")
         assert response.status_code == 200
         text = response.text
-        assert "x-data" in text
-        # Assert on click handlers — these only exist on the toggle buttons,
-        # unlike the word "Total" which appears in the Bloat rollup too.
-        assert "view = 'total'" in text
-        assert "view = 'agent'" in text
-        assert "view = 'category'" in text
-        assert "By agent" in text
-        assert "By category" in text
+        # Chart container carries the data attrs the JS reads.
+        assert 'id="session-cost-chart"' in text
+        assert 'data-on-click="session-cost-marker"' in text
+        # data-view-map JSON is HTML-escaped to &quot; — check both forms.
+        assert "data-view-map=" in text
+        for view_key in ("total", "agent", "category", "invocations"):
+            assert view_key in text
+        # The figure_json blob lives in a script tag of this id.
+        assert 'id="session-cost-chart-data"' in text
 
 
-def test_session_cost_tab_has_multi_polylines():
-    """Cost tab renders six polylines (total + main/sub + read/created/conv).
-
-    The sample fixture has varied cost categories (Read, Created from Bash/Edit,
-    Conversation from sidechain), so every series should emit non-empty points.
-    """
+def test_session_cost_chart_uses_plotly():
+    """Chart renders as a Plotly figure JSON, not hand-rolled SVG polylines."""
     with tempfile.TemporaryDirectory() as tmp, _patched_client(Path(tmp)) as client:
         response = client.get(f"/sessions/{SID}?tab=cost")
         assert response.status_code == 200
         text = response.text
-        # Three x-show'd groups for the three views.
-        assert "view === 'total'" in text
-        assert "view === 'agent'" in text
-        assert "view === 'category'" in text
-        # At least six polylines total — one per series. Each must have a
-        # non-empty points= attribute (empty polylines indicate a bug where
-        # a series had no matching messages or bucketing broke).
-        assert text.count("<polyline") >= 6
-        # Empty polylines render as points="" — assert at least the total,
-        # main, and read/conversation series have coordinates.
-        assert 'points=""' not in text or text.count('points=""') < 6
+        # No more SVG polyline rendering for the cost chart.
+        assert "<polyline" not in text
+        # Figure JSON is embedded for the client-side bootstrap.
+        assert 'application/json" id="session-cost-chart-data"' in text
+        # Plotly-shaped JSON: at least the trace data and the layout.
+        # Use a simple substring check instead of parsing.
+        assert '"data"' in text
+        assert '"type": "scatter"' in text or '"type":"scatter"' in text
 
 
 def _spikey_cost_jsonl(tmp_dir: Path, session_id: str) -> Path:
@@ -1711,8 +1705,13 @@ def _spikey_cost_jsonl(tmp_dir: Path, session_id: str) -> Path:
     return write_jsonl(tmp_dir, session_id, lines)
 
 
-def test_session_cost_tab_marker_links_to_message():
-    """Spike marker renders as an <a href> deep-linking to a message anchor."""
+def test_session_cost_chart_marker_in_customdata():
+    """Spike detection emits a marker trace whose customdata carries kind+uuid.
+
+    The client-side click handler reads ``customdata[0]`` (uuid) and fires
+    the HTMX bloat-filter request — so missing customdata = broken
+    interactivity.
+    """
     sid = "spiky-session-000000-0000-000000000001"
     with tempfile.TemporaryDirectory() as tmp_str:
         tmp = Path(tmp_str)
@@ -1732,75 +1731,12 @@ def test_session_cost_tab_marker_links_to_message():
             response = client.get(f"/sessions/{sid}?tab=cost")
             assert response.status_code == 200
             text = response.text
-            assert f'href="/sessions/{sid}?tab=messages#msg-' in text
-
-
-def test_session_cost_tab_markers_render_as_vertical_ticks():
-    """Markers are <line> (vertical tick), not <circle>.
-
-    ``preserveAspectRatio="none"`` on the chart stretches circles into
-    ellipses — so markers use vertical ticks with ``vector-effect=
-    non-scaling-stroke`` to render at a consistent weight instead.
-    """
-    sid = "spiky-session-000000-0000-000000000002"
-    with tempfile.TemporaryDirectory() as tmp_str:
-        tmp = Path(tmp_str)
-        _spikey_cost_jsonl(tmp, sid)
-        db_path = tmp / "test.duckdb"
-        with (
-            patch.dict(
-                os.environ,
-                {
-                    "INTROSPECT_DB_PATH": str(db_path),
-                    "INTROSPECT_JSONL_GLOB": glob_pattern(tmp),
-                    "INTROSPECT_DAYS": "0",
-                },
-            ),
-            TestClient(app) as client,
-        ):
-            response = client.get(f"/sessions/{sid}?tab=cost")
-            assert response.status_code == 200
-            text = response.text
-            # Anchor present → at least one marker is rendered in some view.
-            assert f'href="/sessions/{sid}?tab=messages#msg-' in text
-            # Shape changed: no <circle> markers, <line> ticks instead.
-            assert "<circle" not in text
-            assert "<line " in text
-            # Anti-stretch guard so ticks render cleanly in the stretched SVG.
-            assert 'vector-effect="non-scaling-stroke"' in text
-
-
-def test_session_cost_tab_marker_groups_per_view():
-    """Markers are wrapped in per-view <g x-show> groups.
-
-    Otherwise a spike detected on the Total curve would float off the line
-    when the user switches to the By agent or By category view.
-    """
-    sid = "spiky-session-000000-0000-000000000003"
-    with tempfile.TemporaryDirectory() as tmp_str:
-        tmp = Path(tmp_str)
-        _spikey_cost_jsonl(tmp, sid)
-        db_path = tmp / "test.duckdb"
-        with (
-            patch.dict(
-                os.environ,
-                {
-                    "INTROSPECT_DB_PATH": str(db_path),
-                    "INTROSPECT_JSONL_GLOB": glob_pattern(tmp),
-                    "INTROSPECT_DAYS": "0",
-                },
-            ),
-            TestClient(app) as client,
-        ):
-            response = client.get(f"/sessions/{sid}?tab=cost")
-            assert response.status_code == 200
-            text = response.text
-            # Each view has its own marker group so ticks track the series
-            # actually being rendered.
-            anchor_prefix = f'href="/sessions/{sid}?tab=messages#msg-'
-            # At least 3 anchors to the same uuid (one per view: total, agent,
-            # category). Subagent fixture has no Task calls so no 'agents' view.
-            assert text.count(anchor_prefix) >= 3
+            # Marker overlay trace named "Markers" with at least one spike.
+            assert '"name": "Markers"' in text or '"name":"Markers"' in text
+            assert '"spike"' in text
+            # Spike assistant uuid (a2 = the big-usage message) appears in
+            # the figure JSON's customdata blob.
+            assert '"a2"' in text
 
 
 def _subagent_with_task_call_jsonl(tmp_dir: Path, session_id: str) -> Path:
@@ -1882,20 +1818,19 @@ def _subagent_with_task_call_jsonl(tmp_dir: Path, session_id: str) -> Path:
 
 
 def test_session_cost_tab_hides_invocations_view_without_task_calls():
-    """No Task/Agent tool calls → 'By invocation' toggle absent."""
+    """No Task/Agent tool calls → has-subagents flag off, summary table absent."""
     with tempfile.TemporaryDirectory() as tmp, _patched_client(Path(tmp)) as client:
         response = client.get(f"/sessions/{SID}?tab=cost")
         assert response.status_code == 200
         text = response.text
-        # No Task call in the sample fixture, so the per-invocation view hides
-        # and the summary table doesn't render.
-        assert "view = 'invocations'" not in text
-        assert "By invocation" not in text
+        # data-has-subagents drives whether the JS toolbar renders the
+        # "By invocation" button.
+        assert 'data-has-subagents="0"' in text
         assert "Subagent invocations by cost" not in text
 
 
 def test_session_cost_tab_shows_invocations_view_with_subagent_type():
-    """Task call with subagent_type → per-invocation toggle, legend, table."""
+    """Task call with subagent_type → has-subagents flag on, table + trace name."""
     sid = "subagent-session-00000-0000-000000000001"
     with tempfile.TemporaryDirectory() as tmp_str:
         tmp = Path(tmp_str)
@@ -1915,12 +1850,10 @@ def test_session_cost_tab_shows_invocations_view_with_subagent_type():
             response = client.get(f"/sessions/{sid}?tab=cost")
             assert response.status_code == 200
             text = response.text
-            assert "view = 'invocations'" in text
-            assert "By invocation" in text
-            # Legend renders the rank + subagent_type verbatim ("#1 Explore").
+            assert 'data-has-subagents="1"' in text
+            # Legend trace name "#1 Explore" appears in the figure JSON, and
+            # the same string drives the summary-table row.
             assert "#1 Explore" in text
-            # Top-invocations table renders, with a link to the first sidechain
-            # message of the expensive invocation.
             assert "Subagent invocations by cost" in text
 
 
@@ -2055,6 +1988,138 @@ def test_slope_detector_handles_single_positive_delta():
     uuids = [f"u{i}" for i in range(len(inc))]
     markers = _detect_inflection_points(uuids, inc, cum)
     assert all(m["kind"] != "slope" for m in markers), markers
+
+
+# --- Phase 1b: Bloat partial endpoint tests ---------------------------
+
+
+def _first_assistant_uuid(client, session_id: str) -> str:
+    """Pull an assistant uuid from the cost tab's figure JSON.
+
+    The figure customdata carries each bucket's first/last raw uuid, so any
+    valid assistant uuid in the session ends up in the rendered HTML. This
+    helper grabs the first one for use as a filter range endpoint.
+    """
+    response = client.get(f"/sessions/{session_id}?tab=cost")
+    text = response.text
+    # Bucket customdata shape: ["uuid1", "uuid2", n] — pull first quoted token
+    # that follows "customdata" in the figure JSON.
+    m = re.search(r'"customdata":\s*\[\s*\[\s*"([^"]+)"', text)
+    assert m, "could not locate a uuid in figure customdata"
+    return m.group(1)
+
+
+def test_session_cost_bloat_partial_unfiltered():
+    """GET /sessions/{sid}/cost/bloat with no range params returns rollup."""
+    with tempfile.TemporaryDirectory() as tmp, _patched_client(Path(tmp)) as client:
+        response = client.get(f"/sessions/{SID}/cost/bloat")
+        assert response.status_code == 200
+        text = response.text
+        assert 'id="session-cost-bloat-panel"' in text
+        # Headers from the bloat partial.
+        assert "Bloat attribution" in text
+        assert "Top contributors" in text
+        # No filter banner when unfiltered.
+        assert "Showing" not in text or "Clear filter" not in text
+
+
+def test_session_cost_bloat_partial_filtered():
+    """GET with from_uuid + to_uuid scopes the rollup and shows the filter banner."""
+    with tempfile.TemporaryDirectory() as tmp, _patched_client(Path(tmp)) as client:
+        uuid = _first_assistant_uuid(client, SID)
+        response = client.get(
+            f"/sessions/{SID}/cost/bloat",
+            params={"from_uuid": uuid, "to_uuid": uuid},
+        )
+        assert response.status_code == 200
+        text = response.text
+        assert "Showing" in text
+        assert "Clear filter" in text
+
+
+def test_session_cost_bloat_partial_invalid_uuid():
+    """Bad uuid → 404 (linear scan over attrib_rows finds nothing)."""
+    with tempfile.TemporaryDirectory() as tmp, _patched_client(Path(tmp)) as client:
+        response = client.get(
+            f"/sessions/{SID}/cost/bloat",
+            params={"from_uuid": "not-a-real-uuid", "to_uuid": "also-fake"},
+        )
+        assert response.status_code == 404
+
+
+def test_session_cost_top_contributor_links_to_message():
+    """Top-contributors row links its 'Worst message' cell to #msg-{uuid}.
+
+    The sample fixture has a Bash + sidechain reply that drives at least
+    one cache-write bucket; that bucket should expose a top_uuid anchor.
+    """
+    with tempfile.TemporaryDirectory() as tmp, _patched_client(Path(tmp)) as client:
+        response = client.get(f"/sessions/{SID}/cost/bloat")
+        assert response.status_code == 200
+        text = response.text
+        # If the fixture produced any cache writes, the contributors table
+        # must have at least one anchor to the worst-offender message. If
+        # not, the table renders the "no bloat data" fallback — also fine.
+        if "No bloat data" in text:
+            pytest.skip("sample fixture produced no cache writes")
+        assert f'href="/sessions/{SID}?tab=messages#msg-' in text
+
+
+def test_session_cost_chart_serializes_uuid_columns():
+    """Regression: DuckDB types uuid-shaped values as UUID, not VARCHAR.
+
+    The cost-attribution SQL must cast both ``session_id`` and ``uuid``
+    to VARCHAR — Plotly's JSON encoder doesn't know how to serialize a
+    Python ``uuid.UUID`` and the chart fails to render on real session
+    data (whose uuids look like ``aff6d25c-43a8-4d49-...``).
+    """
+    sid = "11111111-2222-3333-4444-555555555555"
+    with tempfile.TemporaryDirectory() as tmp_str:
+        tmp = Path(tmp_str)
+        usage = {"input_tokens": 100, "output_tokens": 20}
+        # Use uuid-shaped per-message uuids so DuckDB infers UUID type
+        # for the uuid column (matches production data shape).
+        lines: list[dict] = [
+            make_user_message(
+                sid,
+                "aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaa1",
+                None,
+                "2026-04-21T10:00:00.000Z",
+                "hello",
+                tool_use_result={"content": "seed"},
+            ),
+        ]
+        lines.extend(
+            make_assistant_message(
+                sid,
+                f"bbbbbbbb-bbbb-bbbb-bbbb-bbbbbbbbbb{i:02d}",
+                "aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaa1",
+                f"2026-04-21T10:00:{i + 1:02d}.000Z",
+                [{"type": "text", "text": f"msg{i}"}],
+                model="claude-opus-4-7",
+                msg_id=f"msg-uuid-{i}",
+                usage=usage,
+            )
+            for i in range(7)
+        )
+        write_jsonl(tmp, sid, lines)
+        db_path = tmp / "test.duckdb"
+        with (
+            patch.dict(
+                os.environ,
+                {
+                    "INTROSPECT_DB_PATH": str(db_path),
+                    "INTROSPECT_JSONL_GLOB": glob_pattern(tmp),
+                    "INTROSPECT_DAYS": "0",
+                },
+            ),
+            TestClient(app) as client,
+        ):
+            response = client.get(f"/sessions/{sid}?tab=cost")
+            assert response.status_code == 200
+            # The figure JSON must contain the uuid as a string (not a
+            # serialised UUID object).
+            assert "bbbbbbbb-bbbb-bbbb-bbbb-bbbbbbbbbb00" in response.text
 
 
 # --- Phase 2: Cost Overview page tests ---
