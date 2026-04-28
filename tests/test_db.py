@@ -13,9 +13,11 @@ from introspect.db import (
     DatabaseLockedError,
     _filter_parseable_files,
     connect_writable,
+    ensure_materialized,
     get_connection,
     get_read_connection,
     materialize_views,
+    read_last_materialized,
 )
 
 from .conftest import (
@@ -530,3 +532,114 @@ def test_filter_parseable_files_keeps_good_skips_bad(caplog):
         assert str(good_path) in result
         assert str(missing_path) not in result
         assert any(str(missing_path) in r.message for r in caplog.records)
+
+
+def test_ensure_materialized_builds_when_db_missing():
+    """ensure_materialized creates a materialized DB on first call and stamps it."""
+    with tempfile.TemporaryDirectory() as tmp:
+        tmp_path = Path(tmp)
+        _write_sample_jsonl(tmp_path)
+
+        db_path = tmp_path / "introspect.duckdb"
+        glob_pat = glob_pattern(tmp_path)
+
+        ts = ensure_materialized(db_path, glob_pat)
+
+        assert ts is not None
+        assert db_path.exists()
+        with duckdb.connect(str(db_path), read_only=True) as conn:
+            stamp = read_last_materialized(conn)
+            assert stamp == ts
+            row = conn.execute("SELECT COUNT(*) FROM raw_messages").fetchone()
+            assert row is not None
+            assert row[0] == 4
+
+
+def test_ensure_materialized_reuses_existing_db():
+    """ensure_materialized does not rebuild when the DB is already materialized."""
+    with tempfile.TemporaryDirectory() as tmp:
+        tmp_path = Path(tmp)
+        _write_sample_jsonl(tmp_path)
+
+        db_path = tmp_path / "introspect.duckdb"
+        glob_pat = glob_pattern(tmp_path)
+
+        first = ensure_materialized(db_path, glob_pat)
+        second = ensure_materialized(db_path, glob_pat)
+
+        assert first is not None
+        assert second == first
+
+
+def test_ensure_materialized_handles_empty_glob():
+    """An empty Claude home (no JSONL files) materializes empty stub tables."""
+    with tempfile.TemporaryDirectory() as tmp:
+        tmp_path = Path(tmp)
+        db_path = tmp_path / "introspect.duckdb"
+        glob_pat = str(tmp_path / "missing" / "**" / "*.jsonl")
+
+        ts = ensure_materialized(db_path, glob_pat)
+
+        assert ts is not None
+        with duckdb.connect(str(db_path), read_only=True) as conn:
+            for view in (
+                "raw_messages",
+                "raw_data",
+                "logical_sessions",
+                "tool_calls",
+                "session_stats",
+                "search_corpus",
+            ):
+                row = conn.execute(f"SELECT COUNT(*) FROM {view}").fetchone()
+                assert row is not None
+                assert row[0] == 0, f"{view} should be empty on no-JSONL build"
+
+
+def test_empty_stub_raw_messages_columns_match_real_materialization():
+    """``raw_messages`` schema must match in real and empty-stub paths.
+
+    All derived views read from ``raw_messages``, so a missing column would
+    silently break a consumer in the empty-stub case. ``raw_data`` is
+    intentionally excluded — it's a ``SELECT *`` over the JSONL and its column
+    set varies with whatever fields Claude Code happens to emit.
+    """
+    with (
+        tempfile.TemporaryDirectory() as real_tmp,
+        tempfile.TemporaryDirectory() as empty_tmp,
+    ):
+        real_path = Path(real_tmp)
+        _write_sample_jsonl(real_path)
+        real_db = real_path / "real.duckdb"
+        real_conn = duckdb.connect(str(real_db))
+        try:
+            materialize_views(real_conn, glob_pattern(real_path))
+        finally:
+            real_conn.close()
+
+        empty_path = Path(empty_tmp)
+        empty_db = empty_path / "empty.duckdb"
+        empty_conn = duckdb.connect(str(empty_db))
+        try:
+            materialize_views(
+                empty_conn, str(empty_path / "missing" / "**" / "*.jsonl")
+            )
+        finally:
+            empty_conn.close()
+
+        def _columns(db: Path, table: str) -> list[str]:
+            with duckdb.connect(str(db), read_only=True) as conn:
+                rows = conn.execute(
+                    "SELECT column_name FROM information_schema.columns "
+                    "WHERE table_schema = 'main' AND table_name = ? "
+                    "ORDER BY column_name",
+                    [table],
+                ).fetchall()
+            return [r[0] for r in rows]
+
+        real_cols = set(_columns(real_db, "raw_messages"))
+        empty_cols = set(_columns(empty_db, "raw_messages"))
+        assert real_cols == empty_cols, (
+            "raw_messages columns differ between real and empty-stub paths: "
+            f"only-in-real={sorted(real_cols - empty_cols)}, "
+            f"only-in-empty={sorted(empty_cols - real_cols)}"
+        )

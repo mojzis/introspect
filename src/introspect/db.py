@@ -3,11 +3,13 @@
 import contextlib
 import glob
 import logging
+from datetime import UTC, datetime
 from pathlib import Path
 
 import duckdb
 
 from introspect.projects import resolve_project_map
+from introspect.search import build_search_corpus
 from introspect.sql_fragments import (
     COMMAND_LIST_SUBQUERY,
     FILE_READS_SUBQUERY,
@@ -128,11 +130,7 @@ def get_read_connection(
     if db_path.exists():
         try:
             conn = duckdb.connect(str(db_path), read_only=True)
-            tables = conn.execute(
-                "SELECT table_name FROM information_schema.tables "
-                "WHERE table_name = 'raw_messages' AND table_type = 'BASE TABLE'"
-            ).fetchall()
-            if tables:
+            if _has_materialized_raw_messages(conn):
                 return conn
             conn.close()
         except duckdb.Error:
@@ -209,13 +207,21 @@ def materialize_views(
         "raw_messages",
         "raw_data",
         "search_corpus",
+        "materialize_meta",
     ):
         with contextlib.suppress(duckdb.CatalogException):
             conn.execute(f"DROP VIEW IF EXISTS {name}")
         with contextlib.suppress(duckdb.CatalogException):
             conn.execute(f"DROP TABLE IF EXISTS {name}")
 
-    _load_raw_tables(conn, jsonl_glob, day_filter, and_day_filter)
+    # ``read_json_auto`` raises IOException when no files match the glob, so
+    # an empty Claude home (fresh install, sandboxed CI) needs explicit empty
+    # stubs to keep the rest of the pipeline working without special-casing
+    # every consumer.
+    if next(glob.iglob(jsonl_glob, recursive=True), None) is not None:  # noqa: PTH207
+        _load_raw_tables(conn, jsonl_glob, day_filter, and_day_filter)
+    else:
+        _create_empty_raw_tables(conn)
 
     # Add indexes for common query patterns
     conn.execute("CREATE INDEX idx_rm_session ON raw_messages(session_id)")
@@ -227,6 +233,137 @@ def materialize_views(
     _create_indexes(conn, _DERIVED_INDEXES)
     _create_session_stats(conn, materialize=True)
     _create_indexes(conn, _SESSION_STATS_INDEXES)
+    _record_materialized_at(conn)
+
+
+# Empty-stub schema used when the JSONL glob matches nothing. The column types
+# and names mirror what ``read_json_auto`` produces over the real records, so
+# downstream views compile and execute (returning zero rows) unchanged.
+_EMPTY_RAW_DATA_SQL = """
+    CREATE TABLE raw_data AS
+    SELECT
+        NULL::VARCHAR AS filename,
+        NULL::VARCHAR AS type,
+        NULL::VARCHAR AS timestamp,
+        NULL::VARCHAR AS sessionId,
+        NULL::VARCHAR AS uuid,
+        NULL::VARCHAR AS parentUuid,
+        NULL::BOOLEAN AS isSidechain,
+        NULL::VARCHAR AS cwd,
+        NULL::VARCHAR AS version,
+        NULL::VARCHAR AS entrypoint,
+        NULL::VARCHAR AS gitBranch,
+        NULL::JSON AS message,
+        NULL::JSON AS toolUseResult,
+    WHERE FALSE
+"""
+
+_EMPTY_RAW_MESSAGES_SQL = """
+    CREATE TABLE raw_messages AS
+    SELECT
+        NULL::VARCHAR AS file_path,
+        NULL::VARCHAR AS type,
+        NULL::TIMESTAMP AS timestamp,
+        NULL::VARCHAR AS session_id,
+        NULL::VARCHAR AS uuid,
+        NULL::VARCHAR AS parent_uuid,
+        NULL::BOOLEAN AS is_sidechain,
+        NULL::VARCHAR AS cwd,
+        NULL::VARCHAR AS version,
+        NULL::VARCHAR AS entrypoint,
+        NULL::VARCHAR AS git_branch,
+        NULL::VARCHAR AS role,
+        NULL::VARCHAR AS model,
+        NULL::JSON AS message,
+        NULL::JSON AS tool_use_result,
+    WHERE FALSE
+"""
+
+
+def _create_empty_raw_tables(conn: duckdb.DuckDBPyConnection) -> None:
+    """Create empty ``raw_data`` and ``raw_messages`` tables matching the
+    schemas produced by ``read_json_auto`` over real Claude Code logs."""
+    conn.execute(_EMPTY_RAW_DATA_SQL)
+    conn.execute(_EMPTY_RAW_MESSAGES_SQL)
+
+
+def _record_materialized_at(conn: duckdb.DuckDBPyConnection) -> None:
+    """Stamp the DB with the current materialization timestamp (UTC)."""
+    conn.execute("""
+        CREATE TABLE materialize_meta (
+            materialized_at TIMESTAMP NOT NULL
+        )
+    """)
+    conn.execute("INSERT INTO materialize_meta VALUES (?)", [datetime.now(UTC)])
+
+
+def read_last_materialized(conn: duckdb.DuckDBPyConnection) -> datetime | None:
+    """Return the timestamp recorded by the most recent ``materialize_views``.
+
+    Returns ``None`` when the DB has no ``materialize_meta`` table (older
+    builds, lazy-view connections, or partially-built DBs).
+    """
+    has_meta = conn.execute(
+        "SELECT 1 FROM information_schema.tables "
+        "WHERE table_name = 'materialize_meta' AND table_type = 'BASE TABLE'"
+    ).fetchone()
+    if not has_meta:
+        return None
+    # ``materialize_meta`` holds exactly one row by construction —
+    # ``materialize_views`` drops and recreates the table on every call.
+    row = conn.execute("SELECT materialized_at FROM materialize_meta").fetchone()
+    return row[0] if row else None
+
+
+def ensure_materialized(
+    db_path: Path = DEFAULT_DB_PATH,
+    jsonl_glob: str = DEFAULT_JSONL_GLOB,
+    *,
+    days: int = 0,
+    resolve_projects: bool = True,
+) -> datetime | None:
+    """Make sure the on-disk DB has materialized tables; build them if not.
+
+    Returns the ``materialized_at`` timestamp recorded in the DB, or ``None``
+    if the DB is materialized but predates the ``materialize_meta`` table.
+
+    Reuses an existing materialized DB when present (cheap read-only probe).
+    Only acquires a write lock when a build is actually needed, so this stays
+    safe to call from CLI commands while a server holds the read DB.
+
+    Raises:
+        DatabaseLockedError: if a build is needed but another process holds
+            the write lock.
+    """
+    if db_path.exists():
+        try:
+            with contextlib.closing(
+                duckdb.connect(str(db_path), read_only=True)
+            ) as probe:
+                if _has_materialized_raw_messages(probe):
+                    return read_last_materialized(probe)
+        except duckdb.Error:
+            # Fall through to rebuild — a corrupt or incompatible file will
+            # be replaced by the writable connection below.
+            pass
+
+    db_path.parent.mkdir(parents=True, exist_ok=True)
+    conn = connect_writable(db_path)
+    try:
+        materialize_views(conn, jsonl_glob, days, resolve_projects=resolve_projects)
+        build_search_corpus(conn)
+        return read_last_materialized(conn)
+    finally:
+        conn.close()
+
+
+def _has_materialized_raw_messages(conn: duckdb.DuckDBPyConnection) -> bool:
+    """True when ``raw_messages`` exists as a base table in ``conn``."""
+    row = conn.execute(
+        "SELECT 1 FROM information_schema.tables "
+        "WHERE table_name = 'raw_messages' AND table_type = 'BASE TABLE'"
+    ).fetchone()
+    return row is not None
 
 
 def _load_raw_tables(

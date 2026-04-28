@@ -1,5 +1,6 @@
 """CLI interface for introspect."""
 
+from datetime import UTC, datetime
 from pathlib import Path
 
 import typer
@@ -11,6 +12,7 @@ from introspect.db import (
     DEFAULT_JSONL_GLOB,
     DatabaseLockedError,
     connect_writable,
+    ensure_materialized,
     get_read_connection,
     materialize_views,
 )
@@ -27,8 +29,65 @@ def _truncate_sid(val) -> str:
     return s[:SID_TRUNCATE] + "..." if len(s) > SID_TRUNCATE else s
 
 
-def _db(db_path: Path = DEFAULT_DB_PATH, jsonl_glob: str = DEFAULT_JSONL_GLOB):
+_JUST_NOW_SECONDS = 30
+_SECONDS_PER_MINUTE = 60
+_SECONDS_PER_HOUR = 3600
+_SECONDS_PER_DAY = 86400
+
+
+def _format_relative(dt: datetime | None) -> str:
+    """Render ``dt`` as a coarse relative time (``"5m ago"``, ``"just now"``, ...)."""
+    if dt is None:
+        return "never"
+    if dt.tzinfo is None:
+        dt = dt.replace(tzinfo=UTC)
+    delta = (datetime.now(UTC) - dt).total_seconds()
+    if delta < _JUST_NOW_SECONDS:
+        return "just now"
+    if delta < _SECONDS_PER_HOUR:
+        return f"{int(delta // _SECONDS_PER_MINUTE)}m ago"
+    if delta < _SECONDS_PER_DAY:
+        return f"{int(delta // _SECONDS_PER_HOUR)}h ago"
+    return f"{int(delta // _SECONDS_PER_DAY)}d ago"
+
+
+def _db(
+    db_path: Path | None = None,
+    jsonl_glob: str | None = None,
+):
+    """Return a read connection, materializing the DB on first use.
+
+    The CLI shares its DB with ``introspect serve``; if the server has already
+    built the on-disk tables we reuse them. Otherwise we build them now so
+    every command sees the same fast path. A header line tells the user when
+    the data was last materialized so stale results are obvious.
+
+    Defaults are resolved at call time (rather than via parameter defaults)
+    so that ``monkeypatch.setattr("introspect.cli.DEFAULT_DB_PATH", ...)`` in
+    tests redirects this code path the same way it redirects ``materialize``.
+    """
+    if db_path is None:
+        db_path = DEFAULT_DB_PATH
+    if jsonl_glob is None:
+        jsonl_glob = DEFAULT_JSONL_GLOB
+    try:
+        materialized_at = ensure_materialized(db_path, jsonl_glob)
+    except DatabaseLockedError as e:
+        _print_lock_error(e.db_path)
+        raise typer.Exit(code=1) from None
+    _print_materialized_banner(materialized_at)
     return get_read_connection(db_path, jsonl_glob)
+
+
+def _print_materialized_banner(materialized_at: datetime | None) -> None:
+    """Print the 'last materialized' header above command output."""
+    if materialized_at is None:
+        console.print("[dim]Last materialized: unknown[/dim]")
+        return
+    iso = materialized_at.strftime("%Y-%m-%d %H:%M:%S")
+    console.print(
+        f"[dim]Last materialized: {iso} ({_format_relative(materialized_at)})[/dim]"
+    )
 
 
 def _print_lock_error(db_path: Path) -> None:
@@ -506,11 +565,19 @@ def mcp():
 @app.command()
 def refresh():
     """Rebuild the search corpus table and FTS index."""
-    conn = _db()
+    db_path = DEFAULT_DB_PATH
+    jsonl_glob = DEFAULT_JSONL_GLOB
+    try:
+        ensure_materialized(db_path, jsonl_glob)
+        conn = connect_writable(db_path)
+    except DatabaseLockedError as e:
+        _print_lock_error(e.db_path)
+        raise typer.Exit(code=1) from None
     try:
         console.print("[dim]Rebuilding search index...[/dim]")
         build_search_corpus(conn)
-        count = conn.execute("SELECT COUNT(*) FROM search_corpus").fetchone()[0]
+        row = conn.execute("SELECT COUNT(*) FROM search_corpus").fetchone()
+        count = row[0] if row else 0
         console.print(f"[green]Search index rebuilt with {count} entries.[/green]")
     finally:
         conn.close()
