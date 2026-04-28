@@ -4,6 +4,7 @@ import socket
 import tempfile
 from pathlib import Path
 
+import pytest
 from typer.testing import CliRunner
 
 from introspect.cli import _find_available_port, app
@@ -11,6 +12,84 @@ from introspect.cli import _find_available_port, app
 runner = CliRunner()
 
 _UVICORN_SHOULD_NOT_RUN = "uvicorn.run should not be called in this test"
+
+
+# Read commands that should work end-to-end against an empty DB. ``materialize``
+# is exercised explicitly elsewhere; ``serve`` / ``devserve`` / ``mcp`` start
+# long-running processes; ``query`` requires a SQL string. The remaining
+# commands all run a default query and exercise different views.
+_EMPTY_DB_COMMANDS: tuple[tuple[str, ...], ...] = (
+    ("sessions",),
+    ("tools",),
+    ("stats",),
+    ("raw",),
+    ("tables",),
+    ("search", "anything"),
+    ("refresh",),
+)
+
+
+@pytest.mark.parametrize("command", _EMPTY_DB_COMMANDS)
+def test_cli_command_works_on_empty_db(monkeypatch, command):
+    """CLI read commands succeed when no DB and no JSONL files exist yet.
+
+    Auto-materialization must build empty stub tables instead of crashing on
+    ``read_json_auto``'s "no files found" error, and every command must print
+    the "Last materialized" banner so users see when the data was last built.
+    """
+    with tempfile.TemporaryDirectory() as tmp:
+        db_path = Path(tmp) / "introspect.duckdb"
+        glob_pat = str(Path(tmp) / "claude" / "**" / "*.jsonl")
+        # Glob points at a non-existent directory; nothing matches.
+        monkeypatch.setattr("introspect.cli.DEFAULT_DB_PATH", db_path)
+        monkeypatch.setattr("introspect.cli.DEFAULT_JSONL_GLOB", glob_pat)
+
+        result = runner.invoke(app, list(command))
+
+        assert result.exit_code == 0, result.output
+        # ``refresh`` deliberately skips the banner — it rebuilds the index
+        # using its own writable connection rather than going through ``_db``.
+        if command != ("refresh",):
+            assert "Last materialized" in result.output, result.output
+        # The DB file should now exist and contain the materialize_meta stamp.
+        assert db_path.exists()
+
+
+_MATERIALIZED_BANNER_PREFIX = "Last materialized: "
+
+
+def _extract_banner_timestamp(output: str) -> str:
+    """Pull the ``YYYY-MM-DD HH:MM:SS`` field out of the banner line."""
+    for line in output.splitlines():
+        if _MATERIALIZED_BANNER_PREFIX in line:
+            tail = line.split(_MATERIALIZED_BANNER_PREFIX, 1)[1]
+            # The banner is "<iso> (<relative>)" — slice off everything after the
+            # timestamp so the relative-time portion (which moves with wall clock)
+            # doesn't make the comparison flaky.
+            return tail.split(" (", 1)[0].strip()
+    pytest.fail(f"banner not present in CLI output: {output!r}")
+
+
+def test_cli_reuses_existing_materialized_db(monkeypatch):
+    """A second CLI invocation prints the prior timestamp instead of rebuilding."""
+    with tempfile.TemporaryDirectory() as tmp:
+        db_path = Path(tmp) / "introspect.duckdb"
+        glob_pat = str(Path(tmp) / "claude" / "**" / "*.jsonl")
+        monkeypatch.setattr("introspect.cli.DEFAULT_DB_PATH", db_path)
+        monkeypatch.setattr("introspect.cli.DEFAULT_JSONL_GLOB", glob_pat)
+
+        first = runner.invoke(app, ["sessions"])
+        assert first.exit_code == 0, first.output
+        first_ts = _extract_banner_timestamp(first.output)
+
+        second = runner.invoke(app, ["sessions"])
+        assert second.exit_code == 0, second.output
+        second_ts = _extract_banner_timestamp(second.output)
+
+        assert first_ts == second_ts, (
+            "second invocation should reuse the existing materialized DB; "
+            f"banner went from {first_ts!r} to {second_ts!r}"
+        )
 
 
 def test_materialize_shows_friendly_message_when_db_locked(monkeypatch, mock_locked_db):
