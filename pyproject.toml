@@ -1,5 +1,5 @@
 [project]
-name = "introspect"
+name = "introspy"
 version = "0.1.0"
 description = "Explore and search Claude Code conversation logs"
 requires-python = ">=3.11"
