@@ -146,3 +146,14 @@ help = "Install git hooks"
 [tool.poe.tasks.claude]
 cmd = "claude --mcp-config .claude/mcp.json"
 help = "Start Claude connected to the introspect MCP server (requires `introspect serve` running)"
+
+[tool.poe.tasks.release]
+shell = """
+  uv version --bump ${level:-patch} && \
+  v=$(uv version --short) && \
+  git commit -am "Release v$v" && \
+  git tag "v$v" && \
+  git push origin HEAD "v$v"
+"""
+interpreter = "bash"
+help = "Bump version (level=patch|minor|major, default patch), commit, tag, push"
