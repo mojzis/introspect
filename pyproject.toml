@@ -17,6 +17,7 @@ dependencies = [
 
 [project.scripts]
 introspect = "introspect.cli:app"
+introspy = "introspect.cli:app"
 
 [build-system]
 requires = ["hatchling"]
