@@ -1,9 +1,11 @@
 {% extends parent %}
 {% block title %}Sessions - Introspect{% endblock %}
 
-{# Build query string helper — keeps all current params, overrides given ones #}
-{% macro qs(page=page, page_size=page_size, sort=sort, order=order, model=filter_model, project=filter_project, branch=filter_branch, command=filter_command, q=filter_q) -%}
-page={{ page }}&page_size={{ page_size }}&sort={{ sort }}&order={{ order }}&model={{ model }}&project={{ project }}&branch={{ branch }}&command={{ command }}&q={{ q }}
+{# Build query string helper — keeps all current params, overrides given ones.
+   Uses kwargs + context-var fallback because Jinja2 macro defaults cannot
+   reference template context variables when the template uses {% extends %}. #}
+{% macro qs() -%}
+page={{ kwargs.get("page", page) }}&page_size={{ kwargs.get("page_size", page_size) }}&sort={{ kwargs.get("sort", sort) }}&order={{ kwargs.get("order", order) }}&model={{ kwargs.get("model", filter_model) }}&project={{ kwargs.get("project", filter_project) }}&branch={{ kwargs.get("branch", filter_branch) }}&command={{ kwargs.get("command", filter_command) }}&q={{ kwargs.get("q", filter_q) }}
 {%- endmacro %}
 
 {# Sortable column header #}
