@@ -16,6 +16,7 @@ import pytest
 from fastapi.testclient import TestClient
 
 from introspect.api.handlers._helpers import clean_title
+from introspect.api.handlers.sessions import _cache_miss_premium_usd
 from introspect.api.main import app
 
 from .conftest import (
@@ -823,6 +824,137 @@ def test_session_detail_time_only_timestamp_with_title():
             # The visible span must not itself contain the date — only the
             # adjacent title attribute should.
             assert ">2026-04-15 09:30:47<" not in text
+
+
+def test_cache_miss_premium_usd_legacy_fallback():
+    """When cc_5m and cc_1h are both 0 but cc_total is set, bill at 5m rate."""
+    # opus-4-6: cache_write_5m=6.25, cache_read=0.50; premium=5.75 per 1M.
+    legacy = _cache_miss_premium_usd(
+        model="claude-opus-4-6", cc_total=8500, cc_5m=0, cc_1h=0
+    )
+    assert legacy == pytest.approx(8500 * 5.75 / 1_000_000)
+
+    # Same totals, but explicit 5m breakdown — same cost.
+    explicit = _cache_miss_premium_usd(
+        model="claude-opus-4-6", cc_total=8500, cc_5m=8500, cc_1h=0
+    )
+    assert explicit == pytest.approx(legacy)
+
+    # Unknown model → zero rates → zero premium.
+    assert (
+        _cache_miss_premium_usd(model="<synthetic>", cc_total=8500, cc_5m=0, cc_1h=0)
+        == 0.0
+    )
+
+
+_CACHE_LOSS_SID = "deadbeef-aaaa-bbbb-cccc-fedcba987654"
+
+
+def _cache_loss_session_jsonl(tmp_dir: Path, *, gap_minutes: int = 6) -> Path:
+    """Two-turn session where the user pauses ``gap_minutes`` between turns.
+
+    First turn warms the cache (cache_creation > 0). The second user prompt
+    arrives ``gap_minutes`` after the first assistant reply; the second
+    assistant reply rebuilds the cache (cache_creation > cache_read).
+    """
+    t0 = datetime(2026, 4, 15, 9, 30, 0, tzinfo=UTC)
+    t1 = t0 + timedelta(seconds=2)  # first asst reply
+    t2 = t1 + timedelta(minutes=gap_minutes)  # late user prompt
+    t3 = t2 + timedelta(seconds=2)  # second asst reply (cache rebuild)
+
+    def _ts(d: datetime) -> str:
+        return d.strftime("%Y-%m-%dT%H:%M:%S.000Z")
+
+    lines = [
+        make_user_message(
+            _CACHE_LOSS_SID,
+            "u1",
+            None,
+            _ts(t0),
+            "first prompt",
+            tool_use_result={"content": "seed"},
+        ),
+        make_assistant_message(
+            _CACHE_LOSS_SID,
+            "a1",
+            "u1",
+            _ts(t1),
+            [{"type": "text", "text": "first reply"}],
+            usage={
+                "input_tokens": 100,
+                "output_tokens": 50,
+                "cache_read_input_tokens": 0,
+                "cache_creation_input_tokens": 8000,
+            },
+        ),
+        make_user_message(_CACHE_LOSS_SID, "u2", "a1", _ts(t2), "second prompt"),
+        make_assistant_message(
+            _CACHE_LOSS_SID,
+            "a2",
+            "u2",
+            _ts(t3),
+            [{"type": "text", "text": "second reply"}],
+            msg_id="msg2",
+            usage={
+                "input_tokens": 120,
+                "output_tokens": 40,
+                # Cache rebuild: low read, big write.
+                "cache_read_input_tokens": 500,
+                "cache_creation_input_tokens": 8500,
+            },
+        ),
+    ]
+    return write_jsonl(tmp_dir, _CACHE_LOSS_SID, lines)
+
+
+@contextmanager
+def _cache_loss_client(tmp_path: Path, *, gap_minutes: int = 6):
+    _cache_loss_session_jsonl(tmp_path, gap_minutes=gap_minutes)
+    db_path = tmp_path / "test.duckdb"
+    with (
+        patch.dict(
+            os.environ,
+            {
+                "INTROSPECT_DB_PATH": str(db_path),
+                "INTROSPECT_JSONL_GLOB": glob_pattern(tmp_path),
+                "INTROSPECT_DAYS": "0",
+            },
+        ),
+        TestClient(app) as client,
+    ):
+        yield client
+
+
+def test_session_detail_marks_cache_loss_event():
+    """A >5min gap with cache rebuild surfaces a divider + header chip."""
+    with tempfile.TemporaryDirectory() as tmp_str:
+        tmp = Path(tmp_str)
+        with _cache_loss_client(tmp, gap_minutes=6) as client:
+            response = client.get(f"/sessions/{_CACHE_LOSS_SID}?tab=messages")
+            assert response.status_code == 200
+            text = response.text
+            assert 'class="cache-loss-divider"' in text
+            assert "6 min gap" in text
+            assert "cache lost" in text
+            # Header chip on session_detail.html.
+            assert "Cache losses" in text
+            assert "1 ·" in text
+            # opus-4-6 5m write premium is (6.25 - 0.50)/1M per token,
+            # * 8500 ≈ $0.04887 → format_cost rounds to "$0.05".
+            assert "~$0.05 wasted" in text
+
+
+def test_session_detail_no_cache_loss_under_threshold():
+    """Gap under 5 min should not produce a divider or header chip."""
+    with tempfile.TemporaryDirectory() as tmp_str:
+        tmp = Path(tmp_str)
+        with _cache_loss_client(tmp, gap_minutes=4) as client:
+            response = client.get(f"/sessions/{_CACHE_LOSS_SID}?tab=messages")
+            assert response.status_code == 200
+            text = response.text
+            # The CSS class is defined in <style>; check the rendered element.
+            assert 'class="cache-loss-divider"' not in text
+            assert "Cache losses" not in text
 
 
 def test_session_detail_assistant_token_badge():
