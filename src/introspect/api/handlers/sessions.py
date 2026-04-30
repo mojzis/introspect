@@ -5,13 +5,18 @@ import logging
 import math
 import re
 from pathlib import PurePosixPath
+from typing import Any
 
 import nolegend
 import plotly.graph_objects as go
 from fastapi import HTTPException, Request
 from fastapi.responses import HTMLResponse
 
-from introspect.pricing import compute_cost_usd, rates_for
+from introspect.pricing import (
+    CACHE_TTL_SECONDS,
+    cache_miss_premium_usd,
+    compute_cost_usd,
+)
 from introspect.search import ensure_search_corpus, fts_available
 
 from ._helpers import (
@@ -359,75 +364,75 @@ async def sessions(  # noqa: PLR0913
     )
 
 
-# Anthropic's default ephemeral cache TTL. A pause longer than this between
-# the previous assistant turn and the next user prompt means the 5m cache
-# entry is gone and the next API call has to rebuild it from scratch.
-CACHE_TTL_SECONDS = 300
-
-
-def _cache_miss_premium_usd(
+def cache_loss_event_rows(
+    db,
     *,
-    model: str | None,
-    cc_total: int,
-    cc_5m: int,
-    cc_1h: int,
-) -> float:
-    """USD premium paid for cache-write tokens that would have been cache-reads.
-
-    Mirrors the legacy-schema fallback in ``fetch_token_usage``: when
-    ``cache_creation_input_tokens`` is set but neither 5m nor 1h split is
-    present, bill the total at the 5m rate.
-    """
-    eff_5m, eff_1h = int(cc_5m or 0), int(cc_1h or 0)
-    if eff_5m == 0 and eff_1h == 0 and cc_total:
-        eff_5m = int(cc_total)
-    rates = rates_for(model)
-    premium_5m = max(rates.cache_write_5m - rates.cache_read, 0.0)
-    premium_1h = max(rates.cache_write_1h - rates.cache_read, 0.0)
-    return (eff_5m * premium_5m + eff_1h * premium_1h) / 1_000_000
-
-
-def _detect_cache_loss_events(db, session_id: str) -> list[dict]:
-    """Return cache-loss events for a session.
+    session_id: str | None = None,
+    timestamp_window: tuple[str, str] | None = None,
+) -> list[tuple]:
+    """Run the shared cache-loss detection query and return raw rows.
 
     A cache-loss event is anchored on a human prompt whose timestamp is more
-    than ``CACHE_TTL_SECONDS`` after the previous non-sidechain assistant API
-    call, where the next non-sidechain assistant API call had to rebuild the
-    cache (``cache_creation_tokens > cache_read_tokens``). Sidechain turns
-    (subagents) are excluded — they have their own cache lifetimes.
+    than ``pricing.CACHE_TTL_SECONDS`` after the previous non-sidechain
+    assistant API call, where the next non-sidechain assistant API call had
+    to rebuild the cache (``cache_creation_tokens > cache_read_tokens``).
+    Sidechain turns (subagents) are excluded — they have their own cache
+    lifetimes.
 
-    The cost estimate is the *premium* paid for missing the cache: tokens
-    that, on a hot cache, would have been read at ``cache_read`` rates but
-    instead had to be written at ``cache_write_5m`` / ``cache_write_1h``
-    rates. This is a conservative lower bound — it doesn't model the
-    secondary loss on subsequent turns reading the rebuilt cache.
+    Returns one tuple per event::
+
+        (user_uuid, user_ts, prev_asst_ts, next_asst_uuid,
+         model, cache_creation_tokens, cache_creation_5m, cache_creation_1h)
+
+    Optional ``session_id`` scopes both CTEs to that session. Optional
+    ``timestamp_window`` is a half-open ``(start, end)`` filter applied to
+    the rebuild assistant's timestamp, so portfolio-level callers can scope
+    by day or hour and have totals line up with the cost chart.
     """
-    rows = db.execute(
-        """
+    session_clause = ""
+    # ``session_clause`` is interpolated into both CTEs (human_prompts and
+    # asst), so when set we need two bound values for the two ``?`` slots.
+    session_params: list[Any] = []
+    if session_id is not None:
+        session_clause = "AND session_id = ?"
+        session_params = [session_id, session_id]
+
+    window_clause = ""
+    window_params: list[Any] = []
+    if timestamp_window is not None:
+        start, end = timestamp_window
+        window_clause = "AND a.timestamp >= ? AND a.timestamp < ?"
+        window_params = [start, end]
+
+    return db.execute(
+        f"""
         WITH human_prompts AS (
-            SELECT uuid, timestamp
+            SELECT session_id, uuid, timestamp
             FROM session_messages_enriched
-            WHERE session_id = ?
-              AND kind = 'human_prompt'
+            WHERE kind = 'human_prompt'
               AND NOT is_sidechain
               AND block_idx = 0
+              {session_clause}
         ),
         asst AS (
-            SELECT uuid, timestamp, model,
+            SELECT session_id, uuid, timestamp, model,
                    cache_read_tokens, cache_creation_tokens,
                    cache_creation_5m, cache_creation_1h
             FROM assistant_message_costs
-            WHERE session_id = ?
-              AND NOT is_sidechain
+            WHERE NOT is_sidechain
+              {session_clause}
         ),
         joined AS (
             SELECT
+                h.session_id,
                 h.uuid AS user_uuid,
                 h.timestamp AS user_ts,
                 (SELECT MAX(a.timestamp) FROM asst a
-                  WHERE a.timestamp < h.timestamp) AS prev_asst_ts,
+                  WHERE a.session_id = h.session_id
+                    AND a.timestamp < h.timestamp) AS prev_asst_ts,
                 (SELECT a.uuid FROM asst a
-                  WHERE a.timestamp >= h.timestamp
+                  WHERE a.session_id = h.session_id
+                    AND a.timestamp >= h.timestamp
                   ORDER BY a.timestamp ASC LIMIT 1) AS next_asst_uuid
             FROM human_prompts h
         )
@@ -437,30 +442,41 @@ def _detect_cache_loss_events(db, session_id: str) -> list[dict]:
             j.prev_asst_ts,
             j.next_asst_uuid,
             a.model,
-            a.cache_read_tokens,
             a.cache_creation_tokens,
             a.cache_creation_5m,
             a.cache_creation_1h
         FROM joined j
-        JOIN asst a ON a.uuid = j.next_asst_uuid
+        JOIN asst a
+          ON a.uuid = j.next_asst_uuid
+         AND a.session_id = j.session_id
         WHERE j.prev_asst_ts IS NOT NULL
           AND j.next_asst_uuid IS NOT NULL
           AND a.cache_creation_tokens > a.cache_read_tokens
-          AND date_diff('second', j.prev_asst_ts, j.user_ts) > ?
+          AND date_diff('second', j.prev_asst_ts, j.user_ts) > {CACHE_TTL_SECONDS}
+          {window_clause}
         ORDER BY j.user_ts ASC
-        """,
-        [session_id, session_id, CACHE_TTL_SECONDS],
+        """,  # noqa: S608
+        [*session_params, *window_params],
     ).fetchall()
 
+
+def _detect_cache_loss_events(db, session_id: str) -> list[dict]:
+    """Per-session cache-loss events with the fields the messages view needs.
+
+    Cost estimate is the *premium* paid for missing the cache: tokens that,
+    on a hot cache, would have been read at ``cache_read`` rates but instead
+    had to be written at ``cache_write_5m`` / ``cache_write_1h`` rates. This
+    is a conservative lower bound — it doesn't model the secondary loss on
+    subsequent turns reading the rebuilt cache.
+    """
     events: list[dict] = []
-    for row in rows:
+    for row in cache_loss_event_rows(db, session_id=session_id):
         (
             user_uuid,
             user_ts,
             prev_asst_ts,
             next_asst_uuid,
             model,
-            _cache_read,
             cc_total,
             cc_5m,
             cc_1h,
@@ -470,7 +486,7 @@ def _detect_cache_loss_events(db, session_id: str) -> list[dict]:
                 "user_uuid": user_uuid,
                 "next_assistant_uuid": next_asst_uuid,
                 "gap_seconds": int((user_ts - prev_asst_ts).total_seconds()),
-                "lost_cost_usd": _cache_miss_premium_usd(
+                "lost_cost_usd": cache_miss_premium_usd(
                     model=model,
                     cc_total=int(cc_total or 0),
                     cc_5m=int(cc_5m or 0),

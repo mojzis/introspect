@@ -40,6 +40,7 @@ import duckdb
 from fastapi import HTTPException, Request
 from fastapi.responses import HTMLResponse
 
+from introspect.pricing import cache_miss_premium_usd
 from introspect.sql_fragments import session_cost_subquery_filtered
 
 from ._helpers import (
@@ -58,6 +59,7 @@ from .cost_breakdown import (
     DEFAULT_BREAKDOWN,
     build_daily_panel_context,
 )
+from .sessions import cache_loss_event_rows
 
 # Type alias: half-open ISO-formatted timestamp window (inclusive start,
 # exclusive end). ``None`` means no filter.
@@ -73,6 +75,11 @@ PARETO_CUTOFF = 0.80
 # 100k-token floor filters out trivial ones where 10% is meaningless.
 HUGE_READS_COST_FRACTION = 0.10
 HUGE_READS_MIN_TOKENS = 100_000
+
+# Suppress the "X% of total" suffix on the cache-loss stat card when the
+# share rounds below this threshold — at that point the percentage is
+# noisier than informative.
+CACHE_LOSS_PCT_DISPLAY_THRESHOLD = 0.1
 
 
 def _window_for(day: str | None, hour: str | None) -> TimeWindow | None:
@@ -131,6 +138,43 @@ def _build_panel_context(
         "subagent_split": _build_subagent_split(db, cost_rows),
         "huge_reads_split": _build_huge_reads_split(db, cost_rows, window),
         "skill_split": _build_skill_split(db, cost_rows),
+        "cache_loss": _aggregate_cache_loss(
+            db, window, total_cost_usd=pareto["total_cost_usd"]
+        ),
+    }
+
+
+def _aggregate_cache_loss(
+    db: duckdb.DuckDBPyConnection,
+    window: TimeWindow | None,
+    *,
+    total_cost_usd: float,
+) -> dict[str, Any]:
+    """Sum the cache-miss premium across all cache-loss events in ``window``.
+
+    Reuses ``cache_loss_event_rows`` so the detection rule stays in lockstep
+    with the per-session marker. Window filters on the *rebuild* assistant
+    timestamp, so totals line up with the cost chart's bucketing.
+    """
+    rows = cache_loss_event_rows(db, timestamp_window=window)
+    # Row layout: (user_uuid, user_ts, prev_asst_ts, next_asst_uuid,
+    #              model, cc_total, cc_5m, cc_1h)
+    cost_usd = sum(
+        cache_miss_premium_usd(
+            model=row[4],
+            cc_total=int(row[5] or 0),
+            cc_5m=int(row[6] or 0),
+            cc_1h=int(row[7] or 0),
+        )
+        for row in rows
+    )
+    pct_of_total = 100.0 * cost_usd / total_cost_usd if total_cost_usd > 0 else 0.0
+    return {
+        "count": len(rows),
+        "cost_usd": cost_usd,
+        "cost": format_cost(cost_usd),
+        "pct_of_total": pct_of_total,
+        "show_pct": pct_of_total >= CACHE_LOSS_PCT_DISPLAY_THRESHOLD,
     }
 
 

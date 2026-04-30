@@ -34,6 +34,12 @@
             <div class="value">{{ pareto.total_session_count }}</div>
             <div class="label">Sessions with cost</div>
         </div>
+        {% if cache_loss and cache_loss.count %}
+        <div class="stat-card" title="Premium paid for prompt-cache rebuilds after &gt;5 min pauses, summed across all cache-loss events in this window.">
+            <div class="value">{{ cache_loss.cost }}</div>
+            <div class="label">Wasted on cache misses ({{ cache_loss.count }} event{{ 's' if cache_loss.count != 1 else '' }}{% if cache_loss.show_pct %} · {{ "%.1f"|format(cache_loss.pct_of_total) }}%{% endif %})</div>
+        </div>
+        {% endif %}
     </div>
     <p style="margin-top:0.8rem;">
         These <strong>{{ pareto.pareto_session_count }}</strong> sessions

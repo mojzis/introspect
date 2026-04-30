@@ -16,8 +16,8 @@ import pytest
 from fastapi.testclient import TestClient
 
 from introspect.api.handlers._helpers import clean_title
-from introspect.api.handlers.sessions import _cache_miss_premium_usd
 from introspect.api.main import app
+from introspect.pricing import cache_miss_premium_usd
 
 from .conftest import (
     glob_pattern,
@@ -829,20 +829,20 @@ def test_session_detail_time_only_timestamp_with_title():
 def test_cache_miss_premium_usd_legacy_fallback():
     """When cc_5m and cc_1h are both 0 but cc_total is set, bill at 5m rate."""
     # opus-4-6: cache_write_5m=6.25, cache_read=0.50; premium=5.75 per 1M.
-    legacy = _cache_miss_premium_usd(
+    legacy = cache_miss_premium_usd(
         model="claude-opus-4-6", cc_total=8500, cc_5m=0, cc_1h=0
     )
     assert legacy == pytest.approx(8500 * 5.75 / 1_000_000)
 
     # Same totals, but explicit 5m breakdown — same cost.
-    explicit = _cache_miss_premium_usd(
+    explicit = cache_miss_premium_usd(
         model="claude-opus-4-6", cc_total=8500, cc_5m=8500, cc_1h=0
     )
     assert explicit == pytest.approx(legacy)
 
     # Unknown model → zero rates → zero premium.
     assert (
-        _cache_miss_premium_usd(model="<synthetic>", cc_total=8500, cc_5m=0, cc_1h=0)
+        cache_miss_premium_usd(model="<synthetic>", cc_total=8500, cc_5m=0, cc_1h=0)
         == 0.0
     )
 
@@ -850,24 +850,30 @@ def test_cache_miss_premium_usd_legacy_fallback():
 _CACHE_LOSS_SID = "deadbeef-aaaa-bbbb-cccc-fedcba987654"
 
 
-def _cache_loss_session_jsonl(tmp_dir: Path, *, gap_minutes: int = 6) -> Path:
-    """Two-turn session where the user pauses ``gap_minutes`` between turns.
+def _cache_loss_session_lines(
+    session_id: str,
+    *,
+    gap_minutes: int,
+    timestamp_day: str = "2026-04-21",
+) -> list[dict]:
+    """Build a 4-message JSONL with a single cache-loss event.
 
-    First turn warms the cache (cache_creation > 0). The second user prompt
-    arrives ``gap_minutes`` after the first assistant reply; the second
-    assistant reply rebuilds the cache (cache_creation > cache_read).
+    First turn warms the cache (``cache_creation_input_tokens=8000``). The
+    second user prompt arrives ``gap_minutes`` after the first assistant
+    reply; the second assistant reply rebuilds the cache (cache_creation
+    8500 > cache_read 500).
     """
-    t0 = datetime(2026, 4, 15, 9, 30, 0, tzinfo=UTC)
-    t1 = t0 + timedelta(seconds=2)  # first asst reply
-    t2 = t1 + timedelta(minutes=gap_minutes)  # late user prompt
-    t3 = t2 + timedelta(seconds=2)  # second asst reply (cache rebuild)
+    t0 = datetime.fromisoformat(f"{timestamp_day}T09:30:00+00:00")
+    t1 = t0 + timedelta(seconds=2)
+    t2 = t1 + timedelta(minutes=gap_minutes)
+    t3 = t2 + timedelta(seconds=2)
 
     def _ts(d: datetime) -> str:
         return d.strftime("%Y-%m-%dT%H:%M:%S.000Z")
 
-    lines = [
+    return [
         make_user_message(
-            _CACHE_LOSS_SID,
+            session_id,
             "u1",
             None,
             _ts(t0),
@@ -875,7 +881,7 @@ def _cache_loss_session_jsonl(tmp_dir: Path, *, gap_minutes: int = 6) -> Path:
             tool_use_result={"content": "seed"},
         ),
         make_assistant_message(
-            _CACHE_LOSS_SID,
+            session_id,
             "a1",
             "u1",
             _ts(t1),
@@ -887,9 +893,9 @@ def _cache_loss_session_jsonl(tmp_dir: Path, *, gap_minutes: int = 6) -> Path:
                 "cache_creation_input_tokens": 8000,
             },
         ),
-        make_user_message(_CACHE_LOSS_SID, "u2", "a1", _ts(t2), "second prompt"),
+        make_user_message(session_id, "u2", "a1", _ts(t2), "second prompt"),
         make_assistant_message(
-            _CACHE_LOSS_SID,
+            session_id,
             "a2",
             "u2",
             _ts(t3),
@@ -898,12 +904,18 @@ def _cache_loss_session_jsonl(tmp_dir: Path, *, gap_minutes: int = 6) -> Path:
             usage={
                 "input_tokens": 120,
                 "output_tokens": 40,
-                # Cache rebuild: low read, big write.
                 "cache_read_input_tokens": 500,
                 "cache_creation_input_tokens": 8500,
             },
         ),
     ]
+
+
+def _cache_loss_session_jsonl(tmp_dir: Path, *, gap_minutes: int = 6) -> Path:
+    """Write a single-session cache-loss fixture to ``tmp_dir``."""
+    lines = _cache_loss_session_lines(
+        _CACHE_LOSS_SID, gap_minutes=gap_minutes, timestamp_day="2026-04-15"
+    )
     return write_jsonl(tmp_dir, _CACHE_LOSS_SID, lines)
 
 
@@ -2784,6 +2796,79 @@ def test_cost_overview_portfolio_hour_without_day_returns_400():
         def _check(client):
             response = client.get("/cost-overview/portfolio?hour=14")
             assert response.status_code == 400
+
+        _run_with_client(tmp, _check)
+
+
+def test_cost_overview_cache_loss_stat_card():
+    """Cost overview surfaces the cache-loss premium when events exist."""
+    sid = "sess-loss-01-aaaa-aaaa-aaaaaaaaaaaa"
+    specs = [(sid, _cache_loss_session_lines(sid, gap_minutes=6))]
+    with tempfile.TemporaryDirectory() as tmp_str:
+        tmp = Path(tmp_str)
+        _cost_overview_setup(tmp, specs)
+
+        def _check(client):
+            response = client.get("/cost-overview")
+            assert response.status_code == 200
+            text = response.text
+            assert "Wasted on cache misses" in text
+            # opus-4-6 5m write premium = (6.25 - 0.50)/1M * 8500 ≈ $0.0489.
+            # format_cost rounds to "$0.05".
+            assert "$0.05" in text
+            assert "1 event" in text
+
+        _run_with_client(tmp, _check)
+
+
+def test_cost_overview_cache_loss_card_hidden_without_events():
+    """No cache-loss events → no stat card, no 'Wasted' label."""
+    sid = "sess-loss-02-aaaa-aaaa-aaaaaaaaaaaa"
+    # Same shape, but 4-min gap: under threshold.
+    specs = [(sid, _cache_loss_session_lines(sid, gap_minutes=4))]
+    with tempfile.TemporaryDirectory() as tmp_str:
+        tmp = Path(tmp_str)
+        _cost_overview_setup(tmp, specs)
+
+        def _check(client):
+            response = client.get("/cost-overview")
+            assert response.status_code == 200
+            assert "Wasted on cache misses" not in response.text
+
+        _run_with_client(tmp, _check)
+
+
+def test_cost_overview_cache_loss_respects_window():
+    """Windowed portfolio query only counts events whose rebuild lands inside."""
+    sid_in = "sess-loss-in-aaaa-aaaa-aaaaaaaaaaaa"
+    sid_out = "sess-loss-out-aaaa-aaaa-aaaaaaaaaaa"
+    specs = [
+        (
+            sid_in,
+            _cache_loss_session_lines(
+                sid_in, gap_minutes=6, timestamp_day="2026-04-21"
+            ),
+        ),
+        (
+            sid_out,
+            _cache_loss_session_lines(
+                sid_out, gap_minutes=6, timestamp_day="2026-04-22"
+            ),
+        ),
+    ]
+    with tempfile.TemporaryDirectory() as tmp_str:
+        tmp = Path(tmp_str)
+        _cost_overview_setup(tmp, specs)
+
+        def _check(client):
+            response = client.get("/cost-overview/portfolio?day=2026-04-21")
+            assert response.status_code == 200
+            text = response.text
+            # In-window event surfaces.
+            assert "Wasted on cache misses" in text
+            assert "1 event" in text
+            # Out-of-window event does not — count would say "2 event" if it did.
+            assert "2 event" not in text
 
         _run_with_client(tmp, _check)
 
