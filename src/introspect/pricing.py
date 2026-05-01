@@ -107,6 +107,34 @@ def rates_for(model: str | None) -> Rates:
     return _ZERO_RATES
 
 
+# Anthropic's default ephemeral cache TTL. A pause longer than this between
+# the previous assistant turn and the next user prompt means the 5m cache
+# entry is gone and the next API call has to rebuild it from scratch.
+CACHE_TTL_SECONDS = 300
+
+
+def cache_miss_premium_usd(
+    *,
+    model: str | None,
+    cc_total: int,
+    cc_5m: int,
+    cc_1h: int,
+) -> float:
+    """USD premium paid for cache-write tokens that would have been cache-reads.
+
+    Mirrors the legacy-schema fallback used elsewhere: when
+    ``cache_creation_input_tokens`` is set but neither 5m nor 1h split is
+    present, bill the total at the 5m rate.
+    """
+    eff_5m, eff_1h = int(cc_5m or 0), int(cc_1h or 0)
+    if eff_5m == 0 and eff_1h == 0 and cc_total:
+        eff_5m = int(cc_total)
+    r = rates_for(model)
+    premium_5m = max(r.cache_write_5m - r.cache_read, 0.0)
+    premium_1h = max(r.cache_write_1h - r.cache_read, 0.0)
+    return (eff_5m * premium_5m + eff_1h * premium_1h) / _PER_MILLION
+
+
 def compute_cost_usd(  # noqa: PLR0913
     *,
     model: str | None,

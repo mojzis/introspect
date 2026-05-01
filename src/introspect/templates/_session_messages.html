@@ -51,6 +51,12 @@
          {% if msg.kind == 'subagent_prompt' %}x-show="!onlyHuman"{% endif %}>
 
         {% if msg.kind == 'human_prompt' %}
+            {% if msg.cache_loss_event %}
+            <div class="cache-loss-divider"
+                 title="The previous turn was more than 5 min ago — the prompt cache likely expired and the next assistant reply paid {{ msg.cache_loss_cost }} extra to rebuild it.">
+                <span>cache lost · {{ msg.cache_loss_gap_minutes }} min gap · ~{{ msg.cache_loss_cost }} wasted</span>
+            </div>
+            {% endif %}
             <div class="msg-kind-label">you <span class="msg-time" title="{{ msg.timestamp_full }}">{{ msg.timestamp }}</span></div>
             {{ clamp_body(msg.text, msg.text_needs_collapse, msg.text_line_count, msg.text_char_count, 'msg-text-human') }}
 

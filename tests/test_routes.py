@@ -17,6 +17,7 @@ from fastapi.testclient import TestClient
 
 from introspect.api.handlers._helpers import clean_title
 from introspect.api.main import app
+from introspect.pricing import cache_miss_premium_usd
 
 from .conftest import (
     glob_pattern,
@@ -823,6 +824,149 @@ def test_session_detail_time_only_timestamp_with_title():
             # The visible span must not itself contain the date — only the
             # adjacent title attribute should.
             assert ">2026-04-15 09:30:47<" not in text
+
+
+def test_cache_miss_premium_usd_legacy_fallback():
+    """When cc_5m and cc_1h are both 0 but cc_total is set, bill at 5m rate."""
+    # opus-4-6: cache_write_5m=6.25, cache_read=0.50; premium=5.75 per 1M.
+    legacy = cache_miss_premium_usd(
+        model="claude-opus-4-6", cc_total=8500, cc_5m=0, cc_1h=0
+    )
+    assert legacy == pytest.approx(8500 * 5.75 / 1_000_000)
+
+    # Same totals, but explicit 5m breakdown — same cost.
+    explicit = cache_miss_premium_usd(
+        model="claude-opus-4-6", cc_total=8500, cc_5m=8500, cc_1h=0
+    )
+    assert explicit == pytest.approx(legacy)
+
+    # Unknown model → zero rates → zero premium.
+    assert (
+        cache_miss_premium_usd(model="<synthetic>", cc_total=8500, cc_5m=0, cc_1h=0)
+        == 0.0
+    )
+
+
+_CACHE_LOSS_SID = "deadbeef-aaaa-bbbb-cccc-fedcba987654"
+
+
+def _cache_loss_session_lines(
+    session_id: str,
+    *,
+    gap_minutes: int,
+    timestamp_day: str = "2026-04-21",
+) -> list[dict]:
+    """Build a 4-message JSONL with a single cache-loss event.
+
+    First turn warms the cache (``cache_creation_input_tokens=8000``). The
+    second user prompt arrives ``gap_minutes`` after the first assistant
+    reply; the second assistant reply rebuilds the cache (cache_creation
+    8500 > cache_read 500).
+    """
+    t0 = datetime.fromisoformat(f"{timestamp_day}T09:30:00+00:00")
+    t1 = t0 + timedelta(seconds=2)
+    t2 = t1 + timedelta(minutes=gap_minutes)
+    t3 = t2 + timedelta(seconds=2)
+
+    def _ts(d: datetime) -> str:
+        return d.strftime("%Y-%m-%dT%H:%M:%S.000Z")
+
+    return [
+        make_user_message(
+            session_id,
+            "u1",
+            None,
+            _ts(t0),
+            "first prompt",
+            tool_use_result={"content": "seed"},
+        ),
+        make_assistant_message(
+            session_id,
+            "a1",
+            "u1",
+            _ts(t1),
+            [{"type": "text", "text": "first reply"}],
+            usage={
+                "input_tokens": 100,
+                "output_tokens": 50,
+                "cache_read_input_tokens": 0,
+                "cache_creation_input_tokens": 8000,
+            },
+        ),
+        make_user_message(session_id, "u2", "a1", _ts(t2), "second prompt"),
+        make_assistant_message(
+            session_id,
+            "a2",
+            "u2",
+            _ts(t3),
+            [{"type": "text", "text": "second reply"}],
+            msg_id="msg2",
+            usage={
+                "input_tokens": 120,
+                "output_tokens": 40,
+                "cache_read_input_tokens": 500,
+                "cache_creation_input_tokens": 8500,
+            },
+        ),
+    ]
+
+
+def _cache_loss_session_jsonl(tmp_dir: Path, *, gap_minutes: int = 6) -> Path:
+    """Write a single-session cache-loss fixture to ``tmp_dir``."""
+    lines = _cache_loss_session_lines(
+        _CACHE_LOSS_SID, gap_minutes=gap_minutes, timestamp_day="2026-04-15"
+    )
+    return write_jsonl(tmp_dir, _CACHE_LOSS_SID, lines)
+
+
+@contextmanager
+def _cache_loss_client(tmp_path: Path, *, gap_minutes: int = 6):
+    _cache_loss_session_jsonl(tmp_path, gap_minutes=gap_minutes)
+    db_path = tmp_path / "test.duckdb"
+    with (
+        patch.dict(
+            os.environ,
+            {
+                "INTROSPECT_DB_PATH": str(db_path),
+                "INTROSPECT_JSONL_GLOB": glob_pattern(tmp_path),
+                "INTROSPECT_DAYS": "0",
+            },
+        ),
+        TestClient(app) as client,
+    ):
+        yield client
+
+
+def test_session_detail_marks_cache_loss_event():
+    """A >5min gap with cache rebuild surfaces a divider + header chip."""
+    with tempfile.TemporaryDirectory() as tmp_str:
+        tmp = Path(tmp_str)
+        with _cache_loss_client(tmp, gap_minutes=6) as client:
+            response = client.get(f"/sessions/{_CACHE_LOSS_SID}?tab=messages")
+            assert response.status_code == 200
+            text = response.text
+            assert 'class="cache-loss-divider"' in text
+            assert "6 min gap" in text
+            assert "cache lost" in text
+            # Header chip on session_detail.html.
+            assert "Cache losses" in text
+            assert "1 ·" in text
+            # opus-4-6 5m write premium is (6.25 - 0.50)/1M per token,
+            # * 8500 ≈ $0.04887 → format_cost rounds to "$0.05".
+            assert "~$0.05 wasted" in text
+
+
+def test_session_detail_no_cache_loss_under_threshold():
+    """Gap under 5 min should not produce a divider or header chip."""
+    with tempfile.TemporaryDirectory() as tmp_str:
+        tmp = Path(tmp_str)
+        with _cache_loss_client(tmp, gap_minutes=4) as client:
+            response = client.get(f"/sessions/{_CACHE_LOSS_SID}?tab=messages")
+            assert response.status_code == 200
+            text = response.text
+            # The CSS class is defined in <style>; check the rendered element.
+            assert 'class="cache-loss-divider"' not in text
+            assert "Cache losses" not in text
 
 
 def test_session_detail_assistant_token_badge():
@@ -2652,6 +2796,125 @@ def test_cost_overview_portfolio_hour_without_day_returns_400():
         def _check(client):
             response = client.get("/cost-overview/portfolio?hour=14")
             assert response.status_code == 400
+
+        _run_with_client(tmp, _check)
+
+
+def test_cost_overview_renders_with_titleless_session():
+    """Sessions filtered out of ``session_titles`` must not crash the panel.
+
+    Regression: the Pareto template slices ``session_id[:8]`` when ``title``
+    is empty. DuckDB sometimes returns ``session_id`` as ``uuid.UUID`` (not
+    subscriptable), so the dict builder must coerce to ``str``.
+    """
+    # UUID-shaped id so DuckDB infers the column as UUID (the production
+    # type that breaks ``session_id[:8]`` slicing); a non-UUID-shaped id
+    # would silently fall back to VARCHAR and not reproduce the bug.
+    sid = "deadbeef-1234-5678-9abc-def012345678"
+    # First user message is ``/clear`` — session_titles filters it out, so
+    # the LEFT JOIN yields NULL/'' for first_prompt and the template falls
+    # through to the session_id slice.
+    lines = [
+        make_user_message(
+            sid,
+            "u1",
+            None,
+            "2026-04-21T10:00:00.000Z",
+            "/clear",
+            tool_use_result={"content": "seed"},
+        ),
+        make_assistant_message(
+            sid,
+            "a1",
+            "u1",
+            "2026-04-21T10:00:01.000Z",
+            [{"type": "text", "text": "ok"}],
+            model="claude-opus-4-7",
+            usage={"input_tokens": 1_000_000, "output_tokens": 0},
+        ),
+    ]
+    with tempfile.TemporaryDirectory() as tmp_str:
+        tmp = Path(tmp_str)
+        write_jsonl(tmp, sid, lines)
+
+        def _check(client):
+            response = client.get("/cost-overview")
+            assert response.status_code == 200
+            # Title fallback rendered the first 8 chars of the session_id.
+            assert sid[:8] in response.text
+
+        _run_with_client(tmp, _check)
+
+
+def test_cost_overview_cache_loss_stat_card():
+    """Cost overview surfaces the cache-loss premium when events exist."""
+    sid = "sess-loss-01-aaaa-aaaa-aaaaaaaaaaaa"
+    specs = [(sid, _cache_loss_session_lines(sid, gap_minutes=6))]
+    with tempfile.TemporaryDirectory() as tmp_str:
+        tmp = Path(tmp_str)
+        _cost_overview_setup(tmp, specs)
+
+        def _check(client):
+            response = client.get("/cost-overview")
+            assert response.status_code == 200
+            text = response.text
+            assert "Wasted on cache misses" in text
+            # opus-4-6 5m write premium = (6.25 - 0.50)/1M * 8500 ≈ $0.0489.
+            # format_cost rounds to "$0.05".
+            assert "$0.05" in text
+            assert "1 event" in text
+
+        _run_with_client(tmp, _check)
+
+
+def test_cost_overview_cache_loss_card_hidden_without_events():
+    """No cache-loss events → no stat card, no 'Wasted' label."""
+    sid = "sess-loss-02-aaaa-aaaa-aaaaaaaaaaaa"
+    # Same shape, but 4-min gap: under threshold.
+    specs = [(sid, _cache_loss_session_lines(sid, gap_minutes=4))]
+    with tempfile.TemporaryDirectory() as tmp_str:
+        tmp = Path(tmp_str)
+        _cost_overview_setup(tmp, specs)
+
+        def _check(client):
+            response = client.get("/cost-overview")
+            assert response.status_code == 200
+            assert "Wasted on cache misses" not in response.text
+
+        _run_with_client(tmp, _check)
+
+
+def test_cost_overview_cache_loss_respects_window():
+    """Windowed portfolio query only counts events whose rebuild lands inside."""
+    sid_in = "sess-loss-in-aaaa-aaaa-aaaaaaaaaaaa"
+    sid_out = "sess-loss-out-aaaa-aaaa-aaaaaaaaaaa"
+    specs = [
+        (
+            sid_in,
+            _cache_loss_session_lines(
+                sid_in, gap_minutes=6, timestamp_day="2026-04-21"
+            ),
+        ),
+        (
+            sid_out,
+            _cache_loss_session_lines(
+                sid_out, gap_minutes=6, timestamp_day="2026-04-22"
+            ),
+        ),
+    ]
+    with tempfile.TemporaryDirectory() as tmp_str:
+        tmp = Path(tmp_str)
+        _cost_overview_setup(tmp, specs)
+
+        def _check(client):
+            response = client.get("/cost-overview/portfolio?day=2026-04-21")
+            assert response.status_code == 200
+            text = response.text
+            # In-window event surfaces.
+            assert "Wasted on cache misses" in text
+            assert "1 event" in text
+            # Out-of-window event does not — count would say "2 event" if it did.
+            assert "2 event" not in text
 
         _run_with_client(tmp, _check)
 

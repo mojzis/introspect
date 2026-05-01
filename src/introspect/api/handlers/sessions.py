@@ -5,13 +5,18 @@ import logging
 import math
 import re
 from pathlib import PurePosixPath
+from typing import Any
 
 import nolegend
 import plotly.graph_objects as go
 from fastapi import HTTPException, Request
 from fastapi.responses import HTMLResponse
 
-from introspect.pricing import compute_cost_usd
+from introspect.pricing import (
+    CACHE_TTL_SECONDS,
+    cache_miss_premium_usd,
+    compute_cost_usd,
+)
 from introspect.search import ensure_search_corpus, fts_available
 
 from ._helpers import (
@@ -359,8 +364,147 @@ async def sessions(  # noqa: PLR0913
     )
 
 
-def _build_messages_context(db, session_id: str) -> list[dict]:
+def cache_loss_event_rows(
+    db,
+    *,
+    session_id: str | None = None,
+    timestamp_window: tuple[str, str] | None = None,
+) -> list[tuple]:
+    """Run the shared cache-loss detection query and return raw rows.
+
+    A cache-loss event is anchored on a human prompt whose timestamp is more
+    than ``pricing.CACHE_TTL_SECONDS`` after the previous non-sidechain
+    assistant API call, where the next non-sidechain assistant API call had
+    to rebuild the cache (``cache_creation_tokens > cache_read_tokens``).
+    Sidechain turns (subagents) are excluded — they have their own cache
+    lifetimes.
+
+    Returns one tuple per event::
+
+        (user_uuid, user_ts, prev_asst_ts, next_asst_uuid,
+         model, cache_creation_tokens, cache_creation_5m, cache_creation_1h)
+
+    Optional ``session_id`` scopes both CTEs to that session. Optional
+    ``timestamp_window`` is a half-open ``(start, end)`` filter applied to
+    the rebuild assistant's timestamp, so portfolio-level callers can scope
+    by day or hour and have totals line up with the cost chart.
+    """
+    session_clause = ""
+    # ``session_clause`` is interpolated into both CTEs (human_prompts and
+    # asst), so when set we need two bound values for the two ``?`` slots.
+    session_params: list[Any] = []
+    if session_id is not None:
+        session_clause = "AND session_id = ?"
+        session_params = [session_id, session_id]
+
+    window_clause = ""
+    window_params: list[Any] = []
+    if timestamp_window is not None:
+        start, end = timestamp_window
+        window_clause = "AND a.timestamp >= ? AND a.timestamp < ?"
+        window_params = [start, end]
+
+    return db.execute(
+        f"""
+        WITH human_prompts AS (
+            SELECT session_id, uuid, timestamp
+            FROM session_messages_enriched
+            WHERE kind = 'human_prompt'
+              AND NOT is_sidechain
+              AND block_idx = 0
+              {session_clause}
+        ),
+        asst AS (
+            SELECT session_id, uuid, timestamp, model,
+                   cache_read_tokens, cache_creation_tokens,
+                   cache_creation_5m, cache_creation_1h
+            FROM assistant_message_costs
+            WHERE NOT is_sidechain
+              {session_clause}
+        ),
+        joined AS (
+            SELECT
+                h.session_id,
+                h.uuid AS user_uuid,
+                h.timestamp AS user_ts,
+                (SELECT MAX(a.timestamp) FROM asst a
+                  WHERE a.session_id = h.session_id
+                    AND a.timestamp < h.timestamp) AS prev_asst_ts,
+                (SELECT a.uuid FROM asst a
+                  WHERE a.session_id = h.session_id
+                    AND a.timestamp >= h.timestamp
+                  ORDER BY a.timestamp ASC LIMIT 1) AS next_asst_uuid
+            FROM human_prompts h
+        )
+        SELECT
+            j.user_uuid,
+            j.user_ts,
+            j.prev_asst_ts,
+            j.next_asst_uuid,
+            a.model,
+            a.cache_creation_tokens,
+            a.cache_creation_5m,
+            a.cache_creation_1h
+        FROM joined j
+        JOIN asst a
+          ON a.uuid = j.next_asst_uuid
+         AND a.session_id = j.session_id
+        WHERE j.prev_asst_ts IS NOT NULL
+          AND j.next_asst_uuid IS NOT NULL
+          AND a.cache_creation_tokens > a.cache_read_tokens
+          AND date_diff('second', j.prev_asst_ts, j.user_ts) > {CACHE_TTL_SECONDS}
+          {window_clause}
+        ORDER BY j.user_ts ASC
+        """,  # noqa: S608
+        [*session_params, *window_params],
+    ).fetchall()
+
+
+def _detect_cache_loss_events(db, session_id: str) -> list[dict]:
+    """Per-session cache-loss events with the fields the messages view needs.
+
+    Cost estimate is the *premium* paid for missing the cache: tokens that,
+    on a hot cache, would have been read at ``cache_read`` rates but instead
+    had to be written at ``cache_write_5m`` / ``cache_write_1h`` rates. This
+    is a conservative lower bound — it doesn't model the secondary loss on
+    subsequent turns reading the rebuilt cache.
+    """
+    events: list[dict] = []
+    for row in cache_loss_event_rows(db, session_id=session_id):
+        (
+            user_uuid,
+            user_ts,
+            prev_asst_ts,
+            next_asst_uuid,
+            model,
+            cc_total,
+            cc_5m,
+            cc_1h,
+        ) = row
+        events.append(
+            {
+                "user_uuid": user_uuid,
+                "next_assistant_uuid": next_asst_uuid,
+                "gap_seconds": int((user_ts - prev_asst_ts).total_seconds()),
+                "lost_cost_usd": cache_miss_premium_usd(
+                    model=model,
+                    cc_total=int(cc_total or 0),
+                    cc_5m=int(cc_5m or 0),
+                    cc_1h=int(cc_1h or 0),
+                ),
+                "cache_creation_tokens": int(cc_total or 0),
+            }
+        )
+    return events
+
+
+def _build_messages_context(
+    db,
+    session_id: str,
+    cache_loss_events: list[dict] | None = None,
+) -> list[dict]:
     """Build the parsed message list shown in the Messages tab."""
+    loss_by_uuid = {e["user_uuid"]: e for e in (cache_loss_events or [])}
     cur = db.execute(
         """
         SELECT
@@ -483,6 +627,15 @@ def _build_messages_context(db, session_id: str) -> list[dict]:
                 "tokens_title": tokens_title,
             }
         )
+    for msg in parsed_messages:
+        if msg["kind"] != "human_prompt" or not msg["is_first_block"]:
+            continue
+        event = loss_by_uuid.get(msg["uuid"])
+        if event is None:
+            continue
+        msg["cache_loss_event"] = True
+        msg["cache_loss_gap_minutes"] = max(1, event["gap_seconds"] // 60)
+        msg["cache_loss_cost"] = format_cost(event["lost_cost_usd"])
     return parsed_messages
 
 
@@ -1715,10 +1868,18 @@ async def session_detail(
         [session_id, session_id, session_cwd or ""],
     ).fetchone()
 
+    cache_loss_events = _detect_cache_loss_events(db, session_id)
+    cache_loss_summary = {
+        "count": len(cache_loss_events),
+        "cost": format_cost(sum(e["lost_cost_usd"] for e in cache_loss_events)),
+    }
+
     parsed_messages: list[dict] = []
     cost_ctx: dict = {}
     if active_tab == "messages":
-        parsed_messages = _build_messages_context(db, session_id)
+        parsed_messages = _build_messages_context(
+            db, session_id, cache_loss_events=cache_loss_events
+        )
     else:  # "cost"
         cost_ctx = _build_cost_context(db, session_id)
 
@@ -1734,6 +1895,7 @@ async def session_detail(
             "tool_summary": tool_summary,
             "active_tab": active_tab,
             "cost_ctx": cost_ctx,
+            "cache_loss_summary": cache_loss_summary,
             "file_metrics": {
                 "files_read": file_metrics[0] or 0,
                 "files_edited": file_metrics[1] or 0,
