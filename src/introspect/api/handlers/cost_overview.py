@@ -334,7 +334,10 @@ def _build_pareto(
 
         out_rows.append(
             {
-                "session_id": session_id,
+                # str() coerces UUID columns DuckDB sometimes returns as
+                # uuid.UUID — the template slices ``session_id[:8]`` as a
+                # title fallback, which fails on UUID instances.
+                "session_id": str(session_id),
                 "title": clean_title(raw_title)[:120],
                 "project": project,
                 "started_at": str(started_at)[:16] if started_at else "",
