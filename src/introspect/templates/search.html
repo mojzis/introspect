@@ -1,28 +1,29 @@
 {% extends parent %}
 {% block title %}Search - Introspect{% endblock %}
 {% block content %}
-<h1>Search</h1>
 
-<div class="card">
-    <form action="/search" method="get" style="display:flex;gap:0.5rem;">
-        <input type="search" name="q" value="{{ query }}" placeholder="Search conversations..." style="flex:1;" />
-        <button type="submit">Search</button>
-    </form>
-    <p style="margin-top:0.5rem;font-size:0.85rem;color:#888;">
-        {% if fts_loaded %}
-        <span style="color:#2a7;font-weight:600;">FTS</span> Full-text search (BM25) active
-        {% else %}
-        <span style="color:#b73;font-weight:600;">FTS</span> Full-text search unavailable — using ILIKE fallback
-        {% endif %}
-    </p>
+<div class="panel" style="margin-bottom:10px;">
+    <div class="pb">
+        <form action="/search" method="get" style="display:flex;gap:6px;align-items:center;">
+            <input type="search" name="q" value="{{ query }}" placeholder="Search conversations…" style="flex:1;" />
+            <button type="submit">search</button>
+        </form>
+        <p style="margin-top:6px;font-size:11px;color:var(--dim2);">
+            {% if fts_loaded %}
+            <span style="color:var(--green);font-weight:600;">FTS</span> Full-text search (BM25) active
+            {% else %}
+            <span style="color:var(--amber);font-weight:600;">FTS</span> Full-text search unavailable — using ILIKE fallback
+            {% endif %}
+        </p>
+    </div>
 </div>
 
 {% if query %}
-<p style="margin-bottom:1rem;color:#666;">{{ results|length }}{% if has_next %}+{% endif %} result(s) for "{{ query }}"{% if page > 1 %} (page {{ page }}){% endif %}</p>
+<p style="margin-bottom:8px;font-size:12px;color:var(--dim2);">{{ results|length }}{% if has_next %}+{% endif %} result(s) for "{{ query }}"{% if page > 1 %} (page {{ page }}){% endif %}</p>
 {% endif %}
 
 {% if results %}
-<div class="card">
+<div class="panel">
     <table>
         <thead>
             <tr>
@@ -40,15 +41,15 @@
         <tbody>
             {% for r in results %}
             <tr>
-                <td><span class="truncate">{{ r.project }}</span></td>
-                <td><span class="truncate">{{ r.branch }}</span></td>
-                <td><a href="/sessions/{{ r.session_id }}" hx-get="/sessions/{{ r.session_id }}" hx-target="#content" hx-push-url="true"><span class="truncate" style="max-width:250px;" title="{{ r.title }}">{{ r.title or '(no title)' }}</span></a></td>
-                <td style="white-space:nowrap;">{{ r.date }}</td>
-                <td style="white-space:nowrap;">{{ r.duration }}</td>
-                <td>{{ r.model }}</td>
-                <td>{{ r.role }}</td>
-                <td style="max-width:400px;overflow:hidden;text-overflow:ellipsis;">{{ r.snippet }}</td>
-                <td>{{ '%.4f'|format(r.score) if r.score is not none else '' }}</td>
+                <td><span class="truncate" style="color:var(--dim2);">{{ r.project }}</span></td>
+                <td><span class="truncate" style="color:var(--dim2);">{{ r.branch }}</span></td>
+                <td><a href="/sessions/{{ r.session_id }}" hx-get="/sessions/{{ r.session_id }}" hx-target="#content" hx-push-url="true"><span class="truncate" style="max-width:220px;" title="{{ r.title }}">{{ r.title or '(no title)' }}</span></a></td>
+                <td style="white-space:nowrap;color:var(--dim2);">{{ r.date }}</td>
+                <td style="white-space:nowrap;color:var(--dim2);">{{ r.duration }}</td>
+                <td style="color:var(--dim2);font-size:11px;">{{ r.model }}</td>
+                <td><span class="bg {% if r.role == 'user' %}info{% else %}ok{% endif %}">{{ r.role }}</span></td>
+                <td style="max-width:360px;overflow:hidden;text-overflow:ellipsis;color:var(--dim);">{{ r.snippet }}</td>
+                <td style="color:var(--dim2);">{{ '%.4f'|format(r.score) if r.score is not none else '' }}</td>
             </tr>
             {% endfor %}
         </tbody>
@@ -57,14 +58,16 @@
 
 <div class="pagination">
     {% if page > 1 %}
-    <a href="/search?q={{ query }}&page={{ page - 1 }}" hx-get="/search?q={{ query }}&page={{ page - 1 }}" hx-target="#content" hx-push-url="true">Prev</a>
+    <a href="/search?q={{ query }}&page={{ page - 1 }}" hx-get="/search?q={{ query }}&page={{ page - 1 }}" hx-target="#content" hx-push-url="true">← prev</a>
     {% endif %}
     <span class="current">Page {{ page }}</span>
     {% if has_next %}
-    <a href="/search?q={{ query }}&page={{ page + 1 }}" hx-get="/search?q={{ query }}&page={{ page + 1 }}" hx-target="#content" hx-push-url="true">Next</a>
+    <a href="/search?q={{ query }}&page={{ page + 1 }}" hx-get="/search?q={{ query }}&page={{ page + 1 }}" hx-target="#content" hx-push-url="true">next →</a>
     {% endif %}
 </div>
+
 {% elif query %}
-<div class="card"><p>No results found.</p></div>
+<div class="panel"><div class="pb" style="color:var(--dim2);">No results found.</div></div>
 {% endif %}
+
 {% endblock %}

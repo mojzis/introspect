@@ -1,62 +1,44 @@
 {% extends parent %}
 {% block title %}Raw Data - Introspect{% endblock %}
 {% block content %}
+
 <style>
-    .raw-record { background: #fff; border-radius: 8px; padding: 0.5rem 0.75rem; margin-bottom: 0.5rem; box-shadow: 0 1px 3px rgba(0,0,0,0.08); }
-    .raw-record-header { font-weight: 700; color: #1a1a2e; margin-bottom: 0.25rem; font-size: 0.82rem; border-bottom: 2px solid #e0e0e0; padding-bottom: 0.25rem; }
-    .raw-field { display: flex; gap: 0.5rem; padding: 1px 0; border-bottom: 1px solid #f8f8f8; align-items: baseline; font-size: 0.82rem; line-height: 1.4; }
-    .raw-field:last-child { border-bottom: none; }
-    .raw-field-name { min-width: 120px; max-width: 120px; font-weight: 600; color: #555; font-family: monospace; font-size: 0.78rem; flex-shrink: 0; }
-    .raw-field-value { flex: 1; word-break: break-word; font-family: monospace; font-size: 0.78rem; color: #333; }
-    .raw-field-preview { cursor: pointer; color: #3b5bdb; }
-    .raw-field-preview:hover { text-decoration: underline; }
-    .raw-detail-panel { position: fixed; top: 0; right: 0; width: 50vw; height: 100vh; background: #fff; box-shadow: -4px 0 20px rgba(0,0,0,0.15); z-index: 1000; display: flex; flex-direction: column; }
-    .raw-detail-header { display: flex; justify-content: space-between; align-items: center; padding: 1rem 1.25rem; background: #1a1a2e; color: #fff; }
-    .raw-detail-header h3 { margin: 0; font-size: 1rem; font-family: monospace; }
-    .raw-detail-close { background: none; border: none; color: #fff; font-size: 1.5rem; cursor: pointer; padding: 0 0.5rem; }
-    .raw-detail-close:hover { color: #ff8080; background: none; }
-    .raw-detail-body { flex: 1; overflow: auto; padding: 1.25rem; }
-    .raw-detail-body pre { white-space: pre-wrap; word-break: break-word; font-size: 0.82rem; line-height: 1.5; }
-    .raw-overlay { position: fixed; top: 0; left: 0; width: 100%; height: 100%; background: rgba(0,0,0,0.3); z-index: 999; }
-    .json-key { color: #881391; }
-    .json-string { color: #1a6; }
-    .json-number { color: #1740eb; }
-    .json-bool { color: #d63384; }
-    .json-null { color: #999; }
+    .json-key    { color: var(--violet); }
+    .json-string { color: var(--green); }
+    .json-number { color: var(--blue); }
+    .json-bool   { color: var(--amber); }
+    .json-null   { color: var(--dim2); }
 </style>
 
 <div x-data="rawDataViewer()">
-    <h1>Raw Data</h1>
-    <p style="color: #666; font-size: 0.9rem; margin-bottom: 1rem;">{{ total }} records &middot; {{ columns|length }} columns &middot; unfiltered JSONL</p>
 
-    <div class="filter-bar">
-        <form method="get" action="/raw" style="display: flex; gap: 0.75rem; align-items: center; flex-wrap: wrap;">
-            <label>Session: <input type="text" name="session" value="{{ filter_session }}" placeholder="Session ID prefix..." style="width: 200px;"></label>
-            <label>Type:
-                <select name="type" style="padding: 0.4rem 0.5rem; border: 1px solid #ccc; border-radius: 4px; font-size: 0.9rem;">
+    <div class="filter-bar" style="margin-bottom:10px;">
+        <form method="get" action="/raw" style="display:flex;gap:6px;align-items:center;flex-wrap:wrap;">
+            <label style="gap:4px;">Session: <input type="text" name="session" value="{{ filter_session }}" placeholder="ID prefix…" style="width:180px;"></label>
+            <label style="gap:4px;">Type:
+                <select name="type">
                     <option value="">All</option>
                     {% for t in record_types %}
                     <option value="{{ t }}" {% if t == filter_type %}selected{% endif %}>{{ t }}</option>
                     {% endfor %}
                 </select>
             </label>
-            <button type="submit">Filter</button>
+            <button type="submit">filter</button>
             {% if filter_session or filter_type %}
-            <a href="/raw" class="btn" style="background: #666;" hx-get="/raw" hx-target="#content" hx-push-url="true">Clear</a>
+            <a href="/raw" hx-get="/raw" hx-target="#content" hx-push-url="true" class="tool-btn tool-btn-sm">× clear</a>
             {% endif %}
         </form>
+        <span style="font-size:11px;color:var(--dim2);">{{ total }} records · {{ columns|length }} columns · raw JSONL</span>
     </div>
 
     {% for record in records %}
     <div class="raw-record">
-        <div class="raw-record-header">Record {{ (page - 1) * 20 + loop.index }} of {{ total }}</div>
         {% for field in record %}
         <div class="raw-field">
-            <div class="raw-field-name">{{ field.column }}</div>
-            <div class="raw-field-value">
+            <div class="raw-key">{{ field.column }}</div>
+            <div class="raw-val{% if field.long %} is-long{% endif %}">
                 {% if field.long %}
-                    <span class="raw-field-preview"
-                          @click="showDetail('{{ field.column }}', $el)"
+                    <span @click="showDetail('{{ field.column }}', $el)"
                           data-full="{{ field.value|e }}">{{ field.preview|e }}</span>
                 {% else %}
                     {{ field.value }}
@@ -68,7 +50,7 @@
     {% endfor %}
 
     {% if total == 0 %}
-    <div class="card" style="text-align: center; color: #999;">No records found.</div>
+    <div class="panel"><div class="pb" style="color:var(--dim2);text-align:center;">No records found.</div></div>
     {% endif %}
 
     {% if total_pages > 1 %}
@@ -76,7 +58,7 @@
         {% if page > 1 %}
         <a href="/raw?page={{ page - 1 }}&session={{ filter_session }}&type={{ filter_type }}"
            hx-get="/raw?page={{ page - 1 }}&session={{ filter_session }}&type={{ filter_type }}"
-           hx-target="#content" hx-push-url="true">&laquo; Prev</a>
+           hx-target="#content" hx-push-url="true">← prev</a>
         {% endif %}
         {% for p in range(1, total_pages + 1) %}
             {% if p == page %}
@@ -86,27 +68,28 @@
                    hx-get="/raw?page={{ p }}&session={{ filter_session }}&type={{ filter_type }}"
                    hx-target="#content" hx-push-url="true">{{ p }}</a>
             {% elif p == 4 or p == total_pages - 2 %}
-                <span>&hellip;</span>
+                <span>…</span>
             {% endif %}
         {% endfor %}
         {% if page < total_pages %}
         <a href="/raw?page={{ page + 1 }}&session={{ filter_session }}&type={{ filter_type }}"
            hx-get="/raw?page={{ page + 1 }}&session={{ filter_session }}&type={{ filter_type }}"
-           hx-target="#content" hx-push-url="true">Next &raquo;</a>
+           hx-target="#content" hx-push-url="true">next →</a>
         {% endif %}
     </div>
     {% endif %}
 
-    <!-- Detail side panel -->
+    <!-- Side panel -->
     <template x-if="detailOpen">
         <div>
-            <div class="raw-overlay" @click="closeDetail()"></div>
-            <div class="raw-detail-panel">
-                <div class="raw-detail-header">
-                    <h3 x-text="detailField"></h3>
-                    <button class="raw-detail-close" @click="closeDetail()">&times;</button>
+            <div style="position:fixed;top:0;left:0;width:100%;height:100%;background:rgba(0,0,0,0.5);z-index:299;"
+                 @click="closeDetail()"></div>
+            <div class="raw-panel">
+                <div class="raw-panel-header">
+                    <span style="color:var(--cyan);" x-text="detailField"></span>
+                    <button @click="closeDetail()" style="margin-left:auto;border:none;background:none;color:var(--dim2);font-size:16px;cursor:pointer;padding:0 4px;">&times;</button>
                 </div>
-                <div class="raw-detail-body">
+                <div class="raw-panel-body">
                     <pre x-html="detailHtml"></pre>
                 </div>
             </div>
@@ -133,17 +116,13 @@ function rawDataViewer() {
         },
 
         formatValue(str) {
-            // Decode HTML entities
             const txt = document.createElement('textarea');
             txt.innerHTML = str;
             const decoded = txt.value;
-
-            // Try to parse and syntax-highlight JSON
             try {
                 const obj = JSON.parse(decoded);
                 return this.syntaxHighlight(JSON.stringify(obj, null, 2));
             } catch(e) {
-                // Not JSON — render as text with newlines
                 return this.escapeHtml(decoded);
             }
         },
@@ -172,4 +151,5 @@ function rawDataViewer() {
     }
 }
 </script>
+
 {% endblock %}

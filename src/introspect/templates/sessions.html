@@ -13,15 +13,14 @@ page={{ page }}&page_size={{ page_size }}&sort={{ sort }}&order={{ order }}&mode
 {% if sort == col %}
   {% set arrow = ' ▲' if order == 'asc' else ' ▼' %}
 {% endif %}
-<th><a href="/sessions?{{ qs(page=1, sort=col, order=new_order) }}" hx-get="/sessions?{{ qs(page=1, sort=col, order=new_order) }}" hx-target="#content" hx-push-url="true" style="color:#555;text-decoration:none;white-space:nowrap;">{{ label }}{{ arrow }}</a></th>
+<th><a href="/sessions?{{ qs(page=1, sort=col, order=new_order) }}" hx-get="/sessions?{{ qs(page=1, sort=col, order=new_order) }}" hx-target="#content" hx-push-url="true" style="color:var(--dim2);text-decoration:none;white-space:nowrap;">{{ label }}{{ arrow }}</a></th>
 {% endmacro %}
 
 {% block content %}
-<h1>Sessions <span style="font-size:0.9rem;color:#666;">({{ total }} total)</span></h1>
 
-{# ── Filter bar ── #}
 <div class="filter-bar">
-    <form action="/sessions" method="get" style="display:inline-flex;gap:0.3rem;margin-right:0.5rem;">
+    {# Text search #}
+    <form action="/sessions" method="get" style="display:inline-flex;gap:4px;align-items:center;">
         <input type="hidden" name="page" value="1" />
         <input type="hidden" name="page_size" value="{{ page_size }}" />
         <input type="hidden" name="sort" value="{{ sort }}" />
@@ -30,40 +29,58 @@ page={{ page }}&page_size={{ page_size }}&sort={{ sort }}&order={{ order }}&mode
         <input type="hidden" name="project" value="{{ filter_project }}" />
         <input type="hidden" name="branch" value="{{ filter_branch }}" />
         <input type="hidden" name="command" value="{{ filter_command }}" />
-        <input type="search" name="q" value="{{ filter_q }}" placeholder="Search content..." style="padding:0.4rem 0.6rem;border:1px solid #ccc;border-radius:4px;font-size:0.85rem;width:160px;" />
-        <button type="submit" style="padding:0.4rem 0.6rem;font-size:0.85rem;">Search</button>
+        <input type="search" name="q" value="{{ filter_q }}" placeholder="Search content..." style="width:180px;" />
+        <button type="submit">go</button>
     </form>
-    <select onchange="window.location='/sessions?{{ qs(page=1) }}'.replace('model={{ filter_model }}', 'model='+this.value)" style="padding:0.4rem 0.6rem;border:1px solid #ccc;border-radius:4px;font-size:0.85rem;">
+
+    {# Model filter #}
+    <select onchange="window.location='/sessions?{{ qs(page=1) }}'.replace('model={{ filter_model }}', 'model='+this.value)" style="max-width:160px;">
         <option value="">All models</option>
         {% for m in models %}
         <option value="{{ m }}" {{ 'selected' if m == filter_model else '' }}>{{ m }}</option>
         {% endfor %}
     </select>
-    <select onchange="window.location='/sessions?{{ qs(page=1) }}'.replace('project={{ filter_project }}', 'project='+this.value)" style="padding:0.4rem 0.6rem;border:1px solid #ccc;border-radius:4px;font-size:0.85rem;">
+
+    {# Project filter #}
+    <select onchange="window.location='/sessions?{{ qs(page=1) }}'.replace('project={{ filter_project }}', 'project='+this.value)">
         <option value="">All projects</option>
         {% for p in projects %}
         <option value="{{ p }}" {{ 'selected' if p == filter_project else '' }}>{{ p }}</option>
         {% endfor %}
     </select>
-    <select onchange="window.location='/sessions?{{ qs(page=1) }}'.replace('branch={{ filter_branch }}', 'branch='+this.value)" style="padding:0.4rem 0.6rem;border:1px solid #ccc;border-radius:4px;font-size:0.85rem;">
+
+    {# Branch filter #}
+    <select onchange="window.location='/sessions?{{ qs(page=1) }}'.replace('branch={{ filter_branch }}', 'branch='+this.value)">
         <option value="">All branches</option>
         {% for b in branches %}
         <option value="{{ b }}" {{ 'selected' if b == filter_branch else '' }}>{{ b }}</option>
         {% endfor %}
     </select>
-    <select onchange="window.location='/sessions?{{ qs(page=1) }}'.replace('command={{ filter_command }}', 'command='+encodeURIComponent(this.value))" style="padding:0.4rem 0.6rem;border:1px solid #ccc;border-radius:4px;font-size:0.85rem;">
+
+    {# Command filter #}
+    <select onchange="window.location='/sessions?{{ qs(page=1) }}'.replace('command={{ filter_command }}', 'command='+encodeURIComponent(this.value))">
         <option value="">All commands</option>
         {% for c in commands_list %}
         <option value="{{ c }}" {{ 'selected' if c == filter_command else '' }}>{{ c }}</option>
         {% endfor %}
     </select>
+
+    {# Active filter chips + clear #}
+    {% if filter_model %}<span class="filter-chip">model: {{ filter_model }}</span>{% endif %}
+    {% if filter_project %}<span class="filter-chip">project: {{ filter_project }}</span>{% endif %}
+    {% if filter_branch %}<span class="filter-chip">branch: {{ filter_branch }}</span>{% endif %}
+    {% if filter_command %}<span class="filter-chip">cmd: {{ filter_command }}</span>{% endif %}
+    {% if filter_q %}<span class="filter-chip">q: {{ filter_q }}</span>{% endif %}
     {% if filter_model or filter_project or filter_branch or filter_command or filter_q %}
-    <a href="/sessions?{{ qs(page=1, model='', project='', branch='', command='', q='') }}" hx-get="/sessions?{{ qs(page=1, model='', project='', branch='', command='', q='') }}" hx-target="#content" hx-push-url="true" class="tool-btn tool-btn-sm">Clear filters</a>
+    <a href="/sessions?{{ qs(page=1, model='', project='', branch='', command='', q='') }}" hx-get="/sessions?{{ qs(page=1, model='', project='', branch='', command='', q='') }}" hx-target="#content" hx-push-url="true" class="tool-btn tool-btn-sm">× clear</a>
     {% endif %}
 </div>
 
-{# ── Sessions table ── #}
-<div class="card">
+<div class="panel">
+    <div class="ph">
+        Sessions
+        <span class="right">{{ total }} total</span>
+    </div>
     <table>
         <thead>
             <tr>
@@ -89,43 +106,42 @@ page={{ page }}&page_size={{ page_size }}&sort={{ sort }}&order={{ order }}&mode
         <tbody>
             {% for s in sessions %}
             <tr>
-                <td><span class="truncate">{{ s.project }}</span></td>
-                <td><span class="truncate">{{ s.branch }}</span></td>
-                <td><a href="/sessions/{{ s.id }}" hx-get="/sessions/{{ s.id }}" hx-target="#content" hx-push-url="true"><span class="truncate" style="max-width:350px;" title="{{ s.title }}">{{ s.title or '(no title)' }}</span></a></td>
-                <td style="white-space:nowrap;">{{ s.date }}</td>
-                <td style="white-space:nowrap;">{{ s.start_time }}</td>
-                <td style="white-space:nowrap;">{{ s.end_time }}</td>
+                <td><span class="truncate" style="color:var(--dim2);">{{ s.project }}</span></td>
+                <td><span class="truncate" style="color:var(--dim2);">{{ s.branch }}</span></td>
+                <td><a href="/sessions/{{ s.id }}" hx-get="/sessions/{{ s.id }}" hx-target="#content" hx-push-url="true"><span class="truncate" style="max-width:300px;" title="{{ s.title }}">{{ s.title or '(no title)' }}</span></a></td>
+                <td style="color:var(--dim2);white-space:nowrap;">{{ s.date }}</td>
+                <td style="color:var(--dim2);white-space:nowrap;">{{ s.start_time }}</td>
+                <td style="color:var(--dim2);white-space:nowrap;">{{ s.end_time }}</td>
                 <td style="white-space:nowrap;">{{ s.duration }}</td>
-                <td>{{ s.user_msgs }}</td>
-                <td>{{ s.asst_msgs }}</td>
-                <td>{% if s.tool_count %}<a href="/tools?session={{ s.id }}" hx-get="/tools?session={{ s.id }}" hx-target="#content" hx-push-url="true">{{ s.tool_count }}</a>{% else %}0{% endif %}</td>
-                <td>{{ s.files_read }}</td>
-                <td>{{ s.files_edited }}</td>
-                <td>{{ s.files_read_only }}</td>
-                <td>{{ s.files_outside }}</td>
-                <td>{% if s.commands %}{% for c in s.commands.split(', ') %}<span class="tool-btn tool-btn-sm" style="font-size:0.75rem;padding:0.1rem 0.4rem;margin:0.1rem;">{{ c }}</span>{% endfor %}{% endif %}</td>
-                <td style="white-space:nowrap;text-align:right;">{% if s.cost %}<a href="/sessions/{{ s.id }}?tab=cost" hx-get="/sessions/{{ s.id }}?tab=cost" hx-target="#content" hx-push-url="true">{{ s.cost }}</a>{% else %}—{% endif %}</td>
-                <td>{{ s.model }}</td>
+                <td style="text-align:right;">{{ s.user_msgs }}</td>
+                <td style="text-align:right;">{{ s.asst_msgs }}</td>
+                <td style="text-align:right;">{% if s.tool_count %}<a href="/tools?session={{ s.id }}" hx-get="/tools?session={{ s.id }}" hx-target="#content" hx-push-url="true">{{ s.tool_count }}</a>{% else %}<span style="color:var(--dim2);">0</span>{% endif %}</td>
+                <td style="text-align:right;color:var(--dim2);">{{ s.files_read }}</td>
+                <td style="text-align:right;color:var(--dim2);">{{ s.files_edited }}</td>
+                <td style="text-align:right;color:var(--dim2);">{{ s.files_read_only }}</td>
+                <td style="text-align:right;color:var(--dim2);">{{ s.files_outside }}</td>
+                <td>{% if s.commands %}{% for c in s.commands.split(', ') %}<span class="tool-btn tool-btn-sm" style="font-size:10px;padding:1px 5px;margin:1px;">{{ c }}</span>{% endfor %}{% endif %}</td>
+                <td style="white-space:nowrap;text-align:right;">{% if s.cost %}<a href="/sessions/{{ s.id }}?tab=cost" hx-get="/sessions/{{ s.id }}?tab=cost" hx-target="#content" hx-push-url="true" style="color:var(--green);">{{ s.cost }}</a>{% else %}<span style="color:var(--dim2);">—</span>{% endif %}</td>
+                <td style="color:var(--dim2);white-space:nowrap;font-size:11px;">{{ s.model }}</td>
             </tr>
             {% endfor %}
         </tbody>
     </table>
 </div>
 
-{# ── Pagination + page size ── #}
 <div class="pagination">
     {% if page > 1 %}
-    <a href="/sessions?{{ qs(page=page - 1) }}" hx-get="/sessions?{{ qs(page=page - 1) }}" hx-target="#content" hx-push-url="true">Prev</a>
+    <a href="/sessions?{{ qs(page=page - 1) }}" hx-get="/sessions?{{ qs(page=page - 1) }}" hx-target="#content" hx-push-url="true">← prev</a>
     {% endif %}
     <span class="current">Page {{ page }} of {{ total_pages }}</span>
     {% if page < total_pages %}
-    <a href="/sessions?{{ qs(page=page + 1) }}" hx-get="/sessions?{{ qs(page=page + 1) }}" hx-target="#content" hx-push-url="true">Next</a>
+    <a href="/sessions?{{ qs(page=page + 1) }}" hx-get="/sessions?{{ qs(page=page + 1) }}" hx-target="#content" hx-push-url="true">next →</a>
     {% endif %}
-    <span style="margin-left:1rem;font-size:0.85rem;color:#666;">
-        Show
+    <span style="margin-left:10px;font-size:11px;color:var(--dim2);">
+        show
         {% for ps in page_sizes %}
             {% if ps == page_size %}
-                <strong>{{ ps }}</strong>
+                <strong style="color:var(--amber);">{{ ps }}</strong>
             {% else %}
                 <a href="/sessions?{{ qs(page=1, page_size=ps) }}" hx-get="/sessions?{{ qs(page=1, page_size=ps) }}" hx-target="#content" hx-push-url="true">{{ ps }}</a>
             {% endif %}
@@ -134,4 +150,5 @@ page={{ page }}&page_size={{ page_size }}&sort={{ sort }}&order={{ order }}&mode
         per page
     </span>
 </div>
+
 {% endblock %}

@@ -1,44 +1,49 @@
 {% extends parent %}
-{% block title %}Session {{ session_id[:12] }} - Introspect{% endblock %}
+{% block title %}{{ (session[0]|string)[:12] if session else session_id[:12] }} - Introspect{% endblock %}
 {% block content %}
-<h1>Session Detail</h1>
 
 {% if session %}
-<div class="card" style="padding:0.75rem 1rem;">
-    <div style="display:grid;grid-template-columns:repeat(auto-fill,minmax(220px,1fr));gap:0.4rem 1.5rem;">
-        <div><span class="meta-label">Session</span> {{ (session[0]|string)[:12] }}</div>
+<div class="panel" style="margin-bottom:10px;">
+    <div class="ph">
+        <span style="color:var(--amber);font-weight:600;">{{ (session[0]|string)[:12] }}</span>
+        <span style="color:var(--dim2);margin:0 6px;">·</span>
+        <span style="color:var(--dim);">{{ (session[1]|string)[:19] }}</span>
+        {% if session[3] %}<span style="color:var(--dim2);margin:0 6px;">·</span><span style="color:var(--dim);">{{ session[3] }}</span>{% endif %}
+        {% if session[6] %}<span style="color:var(--dim2);margin:0 6px;">·</span><span style="color:var(--dim2);font-size:11px;">{{ session[6] }}</span>{% endif %}
+    </div>
+    <div class="pb" style="display:grid;grid-template-columns:repeat(auto-fill,minmax(200px,1fr));gap:4px 16px;font-size:12px;">
         <div><span class="meta-label">Started</span> {{ (session[1]|string)[:19] }}</div>
         <div><span class="meta-label">Ended</span> {{ (session[2]|string)[:19] }}</div>
         <div><span class="meta-label">Duration</span> {{ session[3] or '—' }}</div>
         <div><span class="meta-label">Messages</span> {{ session[4] or 0 }} user / {{ session[5] or 0 }} asst</div>
         <div><span class="meta-label">Model</span> {{ session[6] or '—' }}</div>
-        {% if session[7] %}<div><span class="meta-label">CWD</span> {{ session[7] }}</div>{% endif %}
-        {% if session[8] %}<div><span class="meta-label">Branch</span> {{ session[8] }}</div>{% endif %}
+        {% if session[7] %}<div><span class="meta-label">CWD</span> <span style="color:var(--dim2);">{{ session[7] }}</span></div>{% endif %}
+        {% if session[8] %}<div><span class="meta-label">Branch</span> <span style="color:var(--cyan);">{{ session[8] }}</span></div>{% endif %}
         {% if token_usage and token_usage.input %}
         <div><span class="meta-label">Input Tokens</span> {{ "{:,}".format(token_usage.input or 0) }}</div>
         <div><span class="meta-label">Output Tokens</span> {{ "{:,}".format(token_usage.output or 0) }}</div>
         {% if token_usage.cache_creation %}<div><span class="meta-label">Cache Write</span> {{ "{:,}".format(token_usage.cache_creation) }}</div>{% endif %}
         {% if token_usage.cache_read %}<div><span class="meta-label">Cache Read</span> {{ "{:,}".format(token_usage.cache_read) }}</div>{% endif %}
-        <div><span class="meta-label">Est. Cost</span> {{ token_usage.cost or '—' }}</div>
+        <div><span class="meta-label">Est. Cost</span> <span style="color:var(--amber);">{{ token_usage.cost or '—' }}</span></div>
         {% endif %}
         {% if cache_loss_summary and cache_loss_summary.count %}
         <div><span class="meta-label">Cache losses</span> {{ cache_loss_summary.count }} · ~{{ cache_loss_summary.cost }} wasted</div>
         {% endif %}
         {% if tool_summary and tool_summary[0] > 0 %}
-        <div><span class="meta-label">Tools</span> {{ tool_summary[0] }} tool call{{ 's' if tool_summary[0] != 1 else '' }}{% if tool_summary[1] > 0 %} ({{ tool_summary[1] }} failed){% endif %}{% if tool_summary[2] %} — {{ tool_summary[2] }}{% endif %}</div>
+        <div><span class="meta-label">Tools</span> {{ tool_summary[0] }} tool call{{ 's' if tool_summary[0] != 1 else '' }}{% if tool_summary[1] > 0 %} <span style="color:var(--red);">({{ tool_summary[1] }} failed)</span>{% endif %}{% if tool_summary[2] %} — {{ tool_summary[2] }}{% endif %}</div>
         {% endif %}
         {% if file_metrics and (file_metrics.files_read or file_metrics.files_edited) %}
-        <div><span class="meta-label">Files</span> {{ file_metrics.files_read }} read{% if file_metrics.files_read_only %} ({{ file_metrics.files_read_only }} read-only){% endif %} / {{ file_metrics.files_edited }} edited{% if file_metrics.files_outside %} ({{ file_metrics.files_outside }} outside project){% endif %}</div>
+        <div><span class="meta-label">Files</span> {{ file_metrics.files_read }} read{% if file_metrics.files_read_only %} ({{ file_metrics.files_read_only }} read-only){% endif %} / {{ file_metrics.files_edited }} edited{% if file_metrics.files_outside %} <span style="color:var(--amber);">({{ file_metrics.files_outside }} outside project)</span>{% endif %}</div>
         {% endif %}
     </div>
 </div>
 
-<div class="tab-strip" style="display:flex;gap:0.5rem;border-bottom:1px solid #ddd;margin:1rem 0;">
+<div class="tab-strip">
     {% for slug, label in [('messages','Messages'),('cost','Cost')] %}
     <a href="/sessions/{{ session_id }}?tab={{ slug }}"
        hx-get="/sessions/{{ session_id }}?tab={{ slug }}"
        hx-target="#content" hx-push-url="true"
-       style="padding:0.4rem 0.8rem;text-decoration:none;color:#333;{% if active_tab == slug %}border-bottom:2px solid #333;font-weight:600;{% endif %}">
+       class="{% if active_tab == slug %}active-tab{% endif %}">
         {{ label }}
     </a>
     {% endfor %}
@@ -52,8 +57,9 @@
 {% include '_session_cost.html' %}
 {% endif %}
 {% else %}
-<div class="card">
-    <p>Session not found: {{ session_id }}</p>
+<div class="panel">
+    <div class="pb"><p>Session not found: {{ session_id }}</p></div>
 </div>
 {% endif %}
+
 {% endblock %}

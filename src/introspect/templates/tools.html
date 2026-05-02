@@ -6,81 +6,76 @@
 {%- endmacro %}
 
 {% block content %}
-<h1>Tool Calls</h1>
 
-<div class="card">
-    <div class="filter-bar" style="flex-wrap:wrap;">
-        <a href="/tools?{{ tool_qs() }}"
-           hx-get="/tools?{{ tool_qs() }}"
-           hx-target="#content" hx-push-url="true"
-           class="tool-btn{% if not filter_name %} tool-btn-active{% endif %}">
-            All
-        </a>
-        {% for tn in tool_names %}
-        <a href="/tools?{{ tool_qs(name=tn[0]) }}"
-           hx-get="/tools?{{ tool_qs(name=tn[0]) }}"
-           hx-target="#content" hx-push-url="true"
-           class="tool-btn{% if filter_name == tn[0] %} tool-btn-active{% endif %}">
-            {{ tn[0] }} <span class="tool-btn-count">{{ tn[1] }}</span>
-            <span class="tool-btn-count" style="background:#e0ffe0;color:#080;">{{ '%.0f'|format(tn[2]) }}%</span>
-        </a>
+<div class="filter-bar">
+    <a href="/tools?{{ tool_qs() }}"
+       hx-get="/tools?{{ tool_qs() }}"
+       hx-target="#content" hx-push-url="true"
+       class="tool-btn{% if not filter_name %} tool-btn-active{% endif %}">All</a>
+    {% for tn in tool_names %}
+    <a href="/tools?{{ tool_qs(name=tn[0]) }}"
+       hx-get="/tools?{{ tool_qs(name=tn[0]) }}"
+       hx-target="#content" hx-push-url="true"
+       class="tool-btn{% if filter_name == tn[0] %} tool-btn-active{% endif %}">
+        {{ tn[0] }} <span class="tool-btn-count">{{ tn[1] }}</span>
+        <span class="tool-btn-count" style="color:var(--green);">{{ '%.0f'|format(tn[2]) }}%</span>
+    </a>
+    {% endfor %}
+</div>
+
+<div class="filter-bar">
+    <form action="/tools" method="get" style="display:inline-flex;gap:4px;align-items:center;">
+        {% if filter_name %}<input type="hidden" name="name" value="{{ filter_name }}" />{% endif %}
+        {% if filter_failed %}<input type="hidden" name="failed" value="true" />{% endif %}
+        {% if filter_session %}<input type="hidden" name="session" value="{{ filter_session }}" />{% endif %}
+        {% if filter_project %}<input type="hidden" name="project" value="{{ filter_project }}" />{% endif %}
+        <input type="search" name="q" value="{{ filter_q }}" placeholder="Search description / input..." style="width:220px;" />
+        <button type="submit">go</button>
+    </form>
+    <select onchange="window.location='/tools?{{ tool_qs(page=1) }}'.replace('project={{ filter_project }}', 'project='+encodeURIComponent(this.value))">
+        <option value="">All projects</option>
+        {% for p in projects %}
+        <option value="{{ p }}" {{ 'selected' if p == filter_project else '' }}>{{ p }}</option>
         {% endfor %}
-    </div>
-    <div class="filter-bar" style="margin-top:0.5rem;">
-        <form action="/tools" method="get" style="display:inline-flex;gap:0.3rem;margin-right:0.5rem;">
-            {% if filter_name %}<input type="hidden" name="name" value="{{ filter_name }}" />{% endif %}
-            {% if filter_failed %}<input type="hidden" name="failed" value="true" />{% endif %}
-            {% if filter_session %}<input type="hidden" name="session" value="{{ filter_session }}" />{% endif %}
-            {% if filter_project %}<input type="hidden" name="project" value="{{ filter_project }}" />{% endif %}
-            <input type="search" name="q" value="{{ filter_q }}" placeholder="Search description / input..." style="padding:0.4rem 0.6rem;border:1px solid #ccc;border-radius:4px;font-size:0.85rem;width:200px;" />
-            <button type="submit" style="padding:0.4rem 0.6rem;font-size:0.85rem;">Search</button>
-        </form>
-        <select onchange="window.location='/tools?{{ tool_qs(page=1) }}'.replace('project={{ filter_project }}', 'project='+encodeURIComponent(this.value))" style="padding:0.4rem 0.6rem;border:1px solid #ccc;border-radius:4px;font-size:0.85rem;">
-            <option value="">All projects</option>
-            {% for p in projects %}
-            <option value="{{ p }}" {{ 'selected' if p == filter_project else '' }}>{{ p }}</option>
-            {% endfor %}
-        </select>
-        <a href="/tools?{{ tool_qs(name=filter_name, failed=not filter_failed) }}"
-           hx-get="/tools?{{ tool_qs(name=filter_name, failed=not filter_failed) }}"
-           hx-target="#content" hx-push-url="true"
-           class="tool-btn tool-btn-sm{% if filter_failed %} tool-btn-active{% endif %}">
-            {% if filter_failed %}Show all{% else %}Failed only{% endif %}
-        </a>
-        {% if filter_session %}
-        <a href="/tools?{{ tool_qs(session='') }}"
-           hx-get="/tools?{{ tool_qs(session='') }}"
-           hx-target="#content" hx-push-url="true"
-           class="tool-btn tool-btn-sm tool-btn-active"
-           title="{{ filter_session }}">
-            Session: {{ filter_session[:12] }}... &times;
-        </a>
-        {% endif %}
-        {% if filter_q %}
-        <a href="/tools?{{ tool_qs(q='') }}"
-           hx-get="/tools?{{ tool_qs(q='') }}"
-           hx-target="#content" hx-push-url="true"
-           class="tool-btn tool-btn-sm tool-btn-active">
-            Search: {{ filter_q[:20] }}{% if filter_q|length > 20 %}...{% endif %} &times;
-        </a>
-        {% endif %}
-    </div>
+    </select>
+    <a href="/tools?{{ tool_qs(name=filter_name, failed=not filter_failed) }}"
+       hx-get="/tools?{{ tool_qs(name=filter_name, failed=not filter_failed) }}"
+       hx-target="#content" hx-push-url="true"
+       class="tool-btn tool-btn-sm{% if filter_failed %} tool-btn-active{% endif %}">
+        {% if filter_failed %}show all{% else %}failed only{% endif %}
+    </a>
+    {% if filter_session %}
+    <a href="/tools?{{ tool_qs(session='') }}"
+       hx-get="/tools?{{ tool_qs(session='') }}"
+       hx-target="#content" hx-push-url="true"
+       class="tool-btn tool-btn-sm tool-btn-active" title="{{ filter_session }}">
+        session: {{ filter_session[:12] }}… &times;
+    </a>
+    {% endif %}
+    {% if filter_q %}
+    <a href="/tools?{{ tool_qs(q='') }}"
+       hx-get="/tools?{{ tool_qs(q='') }}"
+       hx-target="#content" hx-push-url="true"
+       class="tool-btn tool-btn-sm tool-btn-active">
+        Search: {{ filter_q[:20] }}{% if filter_q|length > 20 %}…{% endif %} &times;
+    </a>
+    {% endif %}
 </div>
 
 {% if stats %}
-<div class="stat-grid">
+<div class="stat-grid" style="grid-template-columns:repeat(2,minmax(120px,180px));">
     <div class="stat-card">
         <div class="value">{{ stats[0] }}</div>
         <div class="label">Matching Calls</div>
     </div>
     <div class="stat-card">
-        <div class="value">{{ stats[1] }}</div>
+        <div class="value" style="color:{% if stats[1] > 0 %}var(--red){% else %}var(--green){% endif %};">{{ stats[1] }}</div>
         <div class="label">Failed</div>
     </div>
 </div>
 {% endif %}
 
-<div class="card">
+<div class="panel">
     <table>
         <thead>
             <tr>
@@ -97,20 +92,20 @@
         <tbody>
             {% for tc in tool_calls %}
             <tr>
-                <td><a href="/sessions/{{ tc[0] }}#tc-{{ tc[8] }}" hx-get="/sessions/{{ tc[0] }}" hx-target="#content" hx-push-url="/sessions/{{ tc[0] }}#tc-{{ tc[8] }}"><span class="truncate" style="max-width:250px;" title="{{ clean_title(tc[7] or '')|e }}">{{ (clean_title(tc[7] or '') or (tc[0]|string)[:12] + '...')|truncate(50) }}</span></a></td>
-                <td>{{ tc[9] or '' }}</td>
-                <td style="white-space:nowrap;">{{ tc[1] }}</td>
-                <td>{{ tc[2] or '' }}</td>
+                <td><a href="/sessions/{{ tc[0] }}#tc-{{ tc[8] }}" hx-get="/sessions/{{ tc[0] }}" hx-target="#content" hx-push-url="/sessions/{{ tc[0] }}#tc-{{ tc[8] }}"><span class="truncate" style="max-width:220px;" title="{{ clean_title(tc[7] or '')|e }}">{{ (clean_title(tc[7] or '') or (tc[0]|string)[:12] + '…')|truncate(50) }}</span></a></td>
+                <td style="color:var(--dim2);">{{ tc[9] or '' }}</td>
+                <td style="white-space:nowrap;color:var(--dim2);">{{ tc[1] }}</td>
+                <td style="color:var(--cyan);">{{ tc[2] or '' }}</td>
                 <td>
                     {% if tc[3] == 'true' %}
-                    <span class="badge badge-error">FAILED</span>
+                    <span class="bg err">FAILED</span>
                     {% else %}
-                    <span class="badge badge-ok">OK</span>
+                    <span class="bg ok">OK</span>
                     {% endif %}
                 </td>
-                <td style="max-width:250px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;">{{ tc[4] or '' }}</td>
-                <td style="max-width:300px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;">{{ tc[5] or '' }}</td>
-                <td>{{ tc[6] or '' }}</td>
+                <td style="max-width:220px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;color:var(--dim2);">{{ tc[4] or '' }}</td>
+                <td style="max-width:260px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;color:var(--dim2);">{{ tc[5] or '' }}</td>
+                <td style="color:var(--dim2);">{{ tc[6] or '' }}</td>
             </tr>
             {% endfor %}
         </tbody>
@@ -119,11 +114,12 @@
 
 <div class="pagination">
     {% if page > 1 %}
-    <a href="/tools?{{ tool_qs(name=filter_name, page=page - 1) }}" hx-get="/tools?{{ tool_qs(name=filter_name, page=page - 1) }}" hx-target="#content" hx-push-url="true">Prev</a>
+    <a href="/tools?{{ tool_qs(name=filter_name, page=page - 1) }}" hx-get="/tools?{{ tool_qs(name=filter_name, page=page - 1) }}" hx-target="#content" hx-push-url="true">← prev</a>
     {% endif %}
     <span class="current">Page {{ page }} of {{ total_pages }}</span>
     {% if page < total_pages %}
-    <a href="/tools?{{ tool_qs(name=filter_name, page=page + 1) }}" hx-get="/tools?{{ tool_qs(name=filter_name, page=page + 1) }}" hx-target="#content" hx-push-url="true">Next</a>
+    <a href="/tools?{{ tool_qs(name=filter_name, page=page + 1) }}" hx-get="/tools?{{ tool_qs(name=filter_name, page=page + 1) }}" hx-target="#content" hx-push-url="true">next →</a>
     {% endif %}
 </div>
+
 {% endblock %}

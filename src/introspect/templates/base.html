@@ -5,89 +5,419 @@
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
     <title>{% block title %}Introspect{% endblock %}</title>
     <link rel="icon" type="image/svg+xml" href="/favicon.ico">
+    <link rel="preconnect" href="https://fonts.googleapis.com">
+    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+    <link href="https://fonts.googleapis.com/css2?family=IBM+Plex+Mono:wght@400;500;600&display=swap" rel="stylesheet">
     <script src="https://unpkg.com/htmx.org@2.0.4"></script>
     <script defer src="https://unpkg.com/alpinejs@3.14.8/dist/cdn.min.js"></script>
     <script src="https://cdn.plot.ly/plotly-3.5.0.min.js" charset="utf-8"></script>
     <style>
-        * { box-sizing: border-box; margin: 0; padding: 0; }
-        body { font-family: system-ui, -apple-system, sans-serif; background: #f5f5f5; color: #333; line-height: 1.5; }
-        nav { background: #1a1a2e; color: #fff; padding: 0.75rem 1.5rem; display: flex; align-items: center; gap: 2rem; }
-        nav .brand { font-weight: 700; font-size: 1.2rem; color: #e0e0ff; text-decoration: none; }
-        nav a { color: #c0c0e0; text-decoration: none; padding: 0.25rem 0.5rem; border-radius: 4px; }
-        nav a:hover, nav a.active { color: #fff; background: rgba(255,255,255,0.1); }
-        .container { margin: 1.5rem auto; padding: 0 1.5rem; }
-        .card { background: #fff; border-radius: 8px; padding: 1.25rem; margin-bottom: 1rem; box-shadow: 0 1px 3px rgba(0,0,0,0.08); }
-        table { width: 100%; border-collapse: collapse; font-size: 0.9rem; }
-        th { text-align: left; padding: 0.5rem; border-bottom: 2px solid #e0e0e0; font-weight: 600; color: #555; }
-        td { padding: 0.5rem; border-bottom: 1px solid #eee; }
-        tr:hover { background: #f9f9ff; }
-        a { color: #3b5bdb; }
-        .stat-grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(180px, 1fr)); gap: 1rem; margin-bottom: 1rem; }
-        .stat-card { background: #fff; border-radius: 8px; padding: 1rem; text-align: center; box-shadow: 0 1px 3px rgba(0,0,0,0.08); }
-        .stat-card .value { font-size: 2rem; font-weight: 700; color: #1a1a2e; }
-        .stat-card .label { font-size: 0.85rem; color: #666; }
-        .pagination { display: flex; gap: 0.5rem; justify-content: center; margin: 1rem 0; }
-        .pagination a, .pagination span { padding: 0.4rem 0.8rem; border-radius: 4px; border: 1px solid #ddd; text-decoration: none; color: #333; }
-        .pagination a:hover { background: #e8e8ff; }
-        .pagination .current { background: #1a1a2e; color: #fff; border-color: #1a1a2e; }
-        .badge { display: inline-block; padding: 0.15rem 0.5rem; border-radius: 10px; font-size: 0.75rem; font-weight: 600; }
-        .badge-error { background: #ffe0e0; color: #c00; }
-        .badge-ok { background: #e0ffe0; color: #060; }
-        input[type="text"], input[type="search"] { padding: 0.5rem 0.75rem; border: 1px solid #ccc; border-radius: 4px; font-size: 0.95rem; }
-        button, .btn { padding: 0.5rem 1rem; border: none; border-radius: 4px; background: #1a1a2e; color: #fff; cursor: pointer; font-size: 0.9rem; text-decoration: none; }
-        button:hover, .btn:hover { background: #2a2a4e; }
-        .truncate { max-width: 150px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; display: inline-block; vertical-align: bottom; }
-        h1 { margin-bottom: 1rem; color: #1a1a2e; }
-        h2 { margin-bottom: 0.75rem; color: #1a1a2e; }
-        /* Session detail: left-rail message kinds */
-        .msg-filters { margin-bottom: 1rem; }
-        .msg-filters > label { display: inline-flex; align-items: center; gap: 0.3rem; margin-right: 1.25rem; font-size: 0.85rem; color: #555; }
-        .msg-row { margin: 0.6rem 0; padding: 0.6rem 0.9rem; border-left: 4px solid #e0e0e0; background: #fff; border-radius: 0 6px 6px 0; box-shadow: 0 1px 2px rgba(0,0,0,0.04); }
-        .msg-row.is-sidechain { margin-left: 2rem; border-left-style: dashed; background: #fafaff; }
-        .msg-kind-label { font-size: 0.75rem; color: #666; margin-bottom: 0.35rem; display: flex; align-items: center; gap: 0.4rem; flex-wrap: wrap; }
-        .msg-time { font-size: 0.7rem; color: #999; margin-left: auto; }
-        .msg-text { white-space: pre-wrap; word-break: break-word; margin: 0; font-size: 0.88rem; }
-        .msg-text-human { font-size: 0.95rem; font-weight: 500; color: #1a1a2e; }
-        .msg-text-error { color: #a00; }
-        .msg-text-clamp { max-height: calc(3 * 1.35em); overflow: hidden; position: relative; cursor: pointer; mask-image: linear-gradient(to bottom, black 70%, transparent 100%); -webkit-mask-image: linear-gradient(to bottom, black 70%, transparent 100%); }
-        .msg-text-meta { font-size: 0.72rem; color: #888; margin-top: 0.25rem; cursor: pointer; user-select: none; }
-        .msg-text-meta:hover { color: #555; }
-        .token-badge { font-family: ui-monospace, SFMono-Regular, Menlo, monospace; color: #888; font-size: 0.72rem; padding: 0.05rem 0.35rem; border-radius: 4px; background: rgba(0,0,0,0.03); }
-        .kind-human_prompt { border-left-color: #3b5bdb; background: #eef2ff; padding-top: 0.85rem; padding-bottom: 0.85rem; }
-        .kind-subagent_prompt { border-left-color: #8a5ad0; background: #f6f1ff; }
-        .kind-agent_text { border-left-color: #999; }
-        .kind-agent_thinking { border-left-color: #c0a000; border-left-style: dashed; background: #fffbe6; font-size: 0.85rem; color: #766; }
-        .kind-agent_tool_call { border-left-color: #c86b1a; background: #fff7f0; font-family: ui-monospace, SFMono-Regular, Menlo, monospace; font-size: 0.85rem; padding: 0.35rem 0.9rem; }
-        .tool-call-line { display: flex; align-items: center; gap: 0.5rem; cursor: pointer; user-select: none; }
-        .tool-call-line:hover { background: rgba(200,107,26,0.06); }
-        .tool-call-line strong { color: #c86b1a; }
-        .tool-hint { color: #555; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; flex: 1; min-width: 0; }
-        .tool-chevron { color: #c86b1a; font-size: 0.9rem; }
-        .slash-divider { display: flex; align-items: center; gap: 0.5rem; color: #888; font-size: 0.78rem; font-family: ui-monospace, monospace; padding: 0.25rem 0; margin: 0.5rem 0; }
-        .slash-divider::before, .slash-divider::after { content: ''; flex: 1; height: 1px; background: #d0d0d8; }
-        .cache-loss-divider { display: flex; align-items: center; gap: 0.5rem; color: #b35400; font-size: 0.75rem; font-family: ui-monospace, monospace; padding: 0.2rem 0; margin: 0.4rem 0 0.3rem; cursor: help; }
-        .cache-loss-divider::before, .cache-loss-divider::after { content: ''; flex: 1; height: 1px; background: #f0c89c; }
-        .cache-loss-divider span { background: #fff3e6; border: 1px solid #f0c89c; padding: 0.1rem 0.45rem; border-radius: 4px; }
-        .kind-slash_command { border-left: none; background: transparent; box-shadow: none; padding: 0; margin: 0; }
-        .sidechain-badge { background: #e0d8f0; color: #5a3a8a; font-size: 0.65rem; padding: 0.08rem 0.4rem; border-radius: 8px; font-weight: 600; text-transform: uppercase; letter-spacing: 0.02em; }
-        .exec-time { color: #888; font-size: 0.75rem; }
-        .tool-section-label { font-size: 0.7rem; color: #888; text-transform: uppercase; letter-spacing: 0.04em; margin-top: 0.5rem; margin-bottom: 0.2rem; }
-        .tool-call-summary { color: #666; }
-        .meta-label { color: #888; }
-        pre { white-space: pre-wrap; word-break: break-word; margin: 0; font-size: 0.85rem; }
-        .filter-bar { display: flex; gap: 0.75rem; align-items: center; flex-wrap: wrap; margin-bottom: 1rem; }
-        label { font-size: 0.9rem; display: flex; align-items: center; gap: 0.3rem; }
-        .tool-btn { display: inline-flex; align-items: center; gap: 0.35rem; padding: 0.3rem 0.7rem; border-radius: 6px; border: 1px solid #ddd; background: #fff; color: #333; font-size: 0.85rem; text-decoration: none; cursor: pointer; white-space: nowrap; }
-        .tool-btn:hover { background: #e8e8ff; border-color: #b0b0d0; color: #333; }
-        .tool-btn-active { background: #1a1a2e; color: #fff; border-color: #1a1a2e; }
-        .tool-btn-active:hover { background: #2a2a4e; border-color: #2a2a4e; }
-        .tool-btn-count { background: #e8e8f0; color: #555; font-size: 0.75rem; padding: 0.1rem 0.4rem; border-radius: 10px; font-weight: 600; }
-        .tool-btn-active .tool-btn-count { background: rgba(255,255,255,0.2); color: #fff; }
-        .tool-btn-sm { font-size: 0.8rem; padding: 0.2rem 0.6rem; }
-        #loading-overlay { display: none; position: fixed; top: 0; left: 0; right: 0; bottom: 0; background: rgba(245,245,245,0.7); z-index: 1000; justify-content: center; align-items: center; }
+        /* ── Design tokens ─────────────────────────────────────────── */
+        :root {
+            --bg:      #0b0d0e;
+            --bg2:     #131516;
+            --bg3:     #1a1d1e;
+            --border:  #2a2e30;
+            --fg:      #d8d4c2;
+            --dim:     #b8bdc2;
+            --dim2:    #7a8a85;
+            --amber:   #f3c469;
+            --green:   #7fc97f;
+            --red:     #ff6e54;
+            --cyan:    #7dd3c0;
+            --violet:  #c5a7e8;
+            --blue:    #7aa6e0;
+            --chrome-h: 28px;
+            --tab-h:    34px;
+            --cmd-h:    26px;
+        }
+
+        /* ── Reset ─────────────────────────────────────────────────── */
+        *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
+        html { scroll-behavior: smooth; }
+        body {
+            font-family: 'IBM Plex Mono', 'Menlo', 'Consolas', monospace;
+            background: var(--bg);
+            color: var(--fg);
+            font-size: 13px;
+            line-height: 1.5;
+            min-height: 100vh;
+        }
+
+        /* ── Statusline ────────────────────────────────────────────── */
+        .statusline {
+            position: sticky;
+            top: 0;
+            z-index: 200;
+            height: var(--chrome-h);
+            background: var(--bg3);
+            border-bottom: 1px solid var(--border);
+            display: flex;
+            align-items: center;
+            gap: 0;
+            font-size: 11px;
+            overflow: hidden;
+        }
+        .sl-seg {
+            padding: 0 10px;
+            height: 100%;
+            display: flex;
+            align-items: center;
+            gap: 6px;
+            border-right: 1px solid var(--border);
+            white-space: nowrap;
+        }
+        .sl-seg:last-child { border-right: none; }
+        .sl-brand {
+            background: var(--amber);
+            color: #0b0d0e;
+            font-weight: 600;
+            letter-spacing: 0.08em;
+        }
+        .sl-mode {
+            color: var(--amber);
+            font-weight: 500;
+            min-width: 80px;
+        }
+        .sl-path { color: var(--dim); flex: 1; overflow: hidden; text-overflow: ellipsis; }
+        .sl-path b { color: var(--fg); }
+        .sl-right { margin-left: auto; border-right: none; border-left: 1px solid var(--border); gap: 0; padding: 0; }
+        .sl-dot { width: 7px; height: 7px; border-radius: 50%; background: var(--green); display: inline-block; }
+        .dim { color: var(--dim2); }
+
+        /* ── Tabline ───────────────────────────────────────────────── */
+        .tabline {
+            position: sticky;
+            top: var(--chrome-h);
+            z-index: 199;
+            height: var(--tab-h);
+            background: var(--bg2);
+            border-bottom: 1px solid var(--border);
+            display: flex;
+            align-items: stretch;
+            overflow: hidden;
+        }
+        .tab {
+            display: inline-flex;
+            align-items: center;
+            gap: 5px;
+            padding: 0 14px;
+            height: 100%;
+            border: none;
+            border-right: 1px solid var(--border);
+            background: transparent;
+            color: var(--dim);
+            font-family: inherit;
+            font-size: 12px;
+            cursor: pointer;
+            text-decoration: none;
+            white-space: nowrap;
+            transition: color 0.1s, background 0.1s;
+            hx-boost: false;
+        }
+        .tab:hover { color: var(--fg); background: var(--bg3); }
+        .tab.active { color: var(--bg); background: var(--amber); }
+        .tab.active .tab-num { background: rgba(0,0,0,0.2); color: var(--bg); }
+        .tab-num {
+            font-size: 10px;
+            background: var(--bg3);
+            color: var(--dim2);
+            border-radius: 3px;
+            padding: 0 4px;
+            font-weight: 600;
+        }
+        .tab-hints {
+            margin-left: auto;
+            display: flex;
+            align-items: center;
+            gap: 14px;
+            padding: 0 12px;
+            font-size: 11px;
+            color: var(--dim2);
+        }
+        .kbd {
+            display: inline-block;
+            background: var(--bg3);
+            border: 1px solid var(--border);
+            border-radius: 3px;
+            padding: 0 4px;
+            font-size: 10px;
+            color: var(--dim);
+            font-family: inherit;
+        }
+
+        /* ── Main content ──────────────────────────────────────────── */
+        #content {
+            padding: 14px 16px;
+            padding-bottom: calc(var(--cmd-h) + 14px);
+        }
+
+        /* ── Command bar ───────────────────────────────────────────── */
+        .cmdbar {
+            position: fixed;
+            bottom: 0;
+            left: 0;
+            right: 0;
+            z-index: 200;
+            height: var(--cmd-h);
+            background: var(--bg3);
+            border-top: 1px solid var(--border);
+            display: flex;
+            align-items: center;
+            gap: 0;
+            font-size: 11px;
+        }
+        .cmdbar-prompt {
+            padding: 0 8px;
+            color: var(--amber);
+            font-weight: 600;
+            border-right: 1px solid var(--border);
+            height: 100%;
+            display: flex;
+            align-items: center;
+        }
+        .cmdbar-hints {
+            display: flex;
+            align-items: center;
+            gap: 14px;
+            padding: 0 12px;
+            color: var(--dim2);
+        }
+        .cmdbar-right {
+            margin-left: auto;
+            display: flex;
+            align-items: center;
+            gap: 14px;
+            padding: 0 12px;
+            border-left: 1px solid var(--border);
+            color: var(--dim2);
+        }
+
+        /* ── Loading overlay ───────────────────────────────────────── */
+        #loading-overlay { display: none; position: fixed; top: 0; left: 0; right: 0; bottom: 0; background: rgba(11,13,14,0.6); z-index: 1000; justify-content: center; align-items: center; }
         #loading-overlay.active { display: flex; }
-        .spinner { width: 36px; height: 36px; border: 3px solid #e0e0e0; border-top-color: #1a1a2e; border-radius: 50%; animation: spin 0.7s linear infinite; }
+        .spinner { width: 28px; height: 28px; border: 2px solid var(--border); border-top-color: var(--amber); border-radius: 50%; animation: spin 0.7s linear infinite; }
         @keyframes spin { to { transform: rotate(360deg); } }
+
+        /* ── Panels ────────────────────────────────────────────────── */
+        .panel {
+            background: var(--bg2);
+            border: 1px solid var(--border);
+            border-radius: 4px;
+            margin-bottom: 10px;
+            overflow: hidden;
+        }
+        .ph {
+            background: var(--bg3);
+            border-bottom: 1px solid var(--border);
+            padding: 6px 12px;
+            font-size: 11px;
+            font-weight: 600;
+            color: var(--dim);
+            letter-spacing: 0.06em;
+            text-transform: uppercase;
+            display: flex;
+            align-items: center;
+            gap: 8px;
+        }
+        .ph .right { margin-left: auto; font-weight: 400; color: var(--dim2); text-transform: none; letter-spacing: 0; }
+        .pb { padding: 10px 12px; }
+
+        /* Legacy .card → panel alias */
+        .card { background: var(--bg2); border: 1px solid var(--border); border-radius: 4px; margin-bottom: 10px; overflow: hidden; padding: 10px 12px; }
+
+        /* ── Tables ────────────────────────────────────────────────── */
+        table { width: 100%; border-collapse: collapse; font-size: 12px; }
+        th {
+            text-align: left;
+            padding: 5px 8px;
+            border-bottom: 1px solid var(--border);
+            color: var(--dim2);
+            font-weight: 500;
+            font-size: 11px;
+            text-transform: uppercase;
+            letter-spacing: 0.05em;
+            white-space: nowrap;
+            background: var(--bg3);
+            position: sticky;
+            top: calc(var(--chrome-h) + var(--tab-h));
+        }
+        td { padding: 5px 8px; border-bottom: 1px solid var(--border); color: var(--fg); vertical-align: top; }
+        tr:last-child td { border-bottom: none; }
+        tr:hover td { background: rgba(243,196,105,0.04); }
+        a { color: var(--amber); text-decoration: none; }
+        a:hover { text-decoration: underline; color: var(--fg); }
+
+        /* ── Stat grid ─────────────────────────────────────────────── */
+        .stat-grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(140px, 1fr)); gap: 8px; margin-bottom: 10px; }
+        .stat-card {
+            background: var(--bg2);
+            border: 1px solid var(--border);
+            border-radius: 4px;
+            padding: 10px 12px;
+        }
+        .stat-card .value { font-size: 1.5rem; font-weight: 600; color: var(--amber); line-height: 1.2; }
+        .stat-card .label { font-size: 11px; color: var(--dim2); margin-top: 3px; }
+
+        /* ── Badges ────────────────────────────────────────────────── */
+        .bg { display: inline-block; padding: 1px 6px; border-radius: 3px; font-size: 11px; font-weight: 600; }
+        .bg.ok   { background: rgba(127,201,127,0.15); color: var(--green); }
+        .bg.err  { background: rgba(255,110,84,0.15);  color: var(--red); }
+        .bg.warn { background: rgba(243,196,105,0.15); color: var(--amber); }
+        .bg.info { background: rgba(122,166,224,0.15); color: var(--blue); }
+        /* Legacy badge aliases */
+        .badge { display: inline-block; padding: 1px 6px; border-radius: 3px; font-size: 11px; font-weight: 600; }
+        .badge-error { background: rgba(255,110,84,0.15); color: var(--red); }
+        .badge-ok    { background: rgba(127,201,127,0.15); color: var(--green); }
+
+        /* ── Filters / chips ───────────────────────────────────────── */
+        .filter-bar { display: flex; gap: 6px; align-items: center; flex-wrap: wrap; margin-bottom: 10px; }
+        .chip {
+            display: inline-flex; align-items: center; gap: 4px;
+            padding: 3px 8px; border-radius: 3px;
+            background: var(--bg3); border: 1px solid var(--border);
+            color: var(--dim); font-size: 11px; cursor: pointer;
+            text-decoration: none; white-space: nowrap;
+            font-family: inherit;
+            transition: color 0.1s, border-color 0.1s, background 0.1s;
+        }
+        .chip:hover { color: var(--fg); border-color: var(--dim2); text-decoration: none; }
+        .chip.on { background: rgba(243,196,105,0.12); border-color: var(--amber); color: var(--amber); }
+        .chip .cnt { color: var(--dim2); font-size: 10px; }
+        .chip.on .cnt { color: var(--amber); opacity: 0.7; }
+
+        /* Legacy tool-btn → chip alias */
+        .tool-btn {
+            display: inline-flex; align-items: center; gap: 4px;
+            padding: 3px 8px; border-radius: 3px;
+            background: var(--bg3); border: 1px solid var(--border);
+            color: var(--dim); font-size: 11px; cursor: pointer;
+            text-decoration: none; white-space: nowrap;
+            font-family: inherit;
+            transition: color 0.1s, border-color 0.1s;
+        }
+        .tool-btn:hover { color: var(--fg); border-color: var(--dim2); text-decoration: none; }
+        .tool-btn-active { background: rgba(243,196,105,0.12); border-color: var(--amber); color: var(--amber); }
+        .tool-btn-active:hover { color: var(--fg); }
+        .tool-btn-sm { font-size: 11px; padding: 2px 7px; }
+        .tool-btn-count { color: var(--dim2); font-size: 10px; }
+        .tool-btn-active .tool-btn-count { color: var(--amber); opacity: 0.7; }
+
+        /* ── Form inputs ───────────────────────────────────────────── */
+        input[type="text"], input[type="search"], select, textarea {
+            background: var(--bg3);
+            border: 1px solid var(--border);
+            border-radius: 3px;
+            color: var(--fg);
+            font-family: inherit;
+            font-size: 12px;
+            padding: 4px 8px;
+            outline: none;
+        }
+        input[type="text"]:focus, input[type="search"]:focus, select:focus, textarea:focus {
+            border-color: var(--amber);
+        }
+        input[type="checkbox"] { accent-color: var(--amber); }
+        select option { background: var(--bg3); }
+        button, .btn {
+            padding: 4px 10px; border: 1px solid var(--border);
+            border-radius: 3px; background: var(--bg3); color: var(--dim);
+            cursor: pointer; font-size: 11px; font-family: inherit;
+            transition: color 0.1s, border-color 0.1s;
+            text-decoration: none; display: inline-block;
+        }
+        button:hover, .btn:hover { color: var(--fg); border-color: var(--dim2); }
+
+        /* ── Pagination ────────────────────────────────────────────── */
+        .pagination { display: flex; gap: 6px; justify-content: flex-start; margin: 10px 0; align-items: center; font-size: 12px; }
+        .pagination a, .pagination span { padding: 3px 8px; border-radius: 3px; border: 1px solid var(--border); text-decoration: none; color: var(--dim); background: var(--bg3); }
+        .pagination a:hover { border-color: var(--amber); color: var(--amber); }
+        .pagination .current { background: rgba(243,196,105,0.12); color: var(--amber); border-color: var(--amber); }
+
+        /* ── Typography ────────────────────────────────────────────── */
+        h1 { font-size: 14px; font-weight: 600; color: var(--fg); margin-bottom: 10px; letter-spacing: 0.04em; }
+        h2 { font-size: 12px; font-weight: 600; color: var(--dim); margin-bottom: 8px; letter-spacing: 0.04em; }
+        label { font-size: 12px; display: inline-flex; align-items: center; gap: 4px; color: var(--dim); }
+        .truncate { max-width: 150px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; display: inline-block; vertical-align: bottom; }
+        pre { white-space: pre-wrap; word-break: break-word; font-family: inherit; font-size: 12px; }
+
+        /* ── Session detail / messages ─────────────────────────────── */
+        .msg-filters { margin-bottom: 10px; display: flex; gap: 8px; flex-wrap: wrap; align-items: center; }
+        .msg-filters > label { display: inline-flex; align-items: center; gap: 4px; font-size: 12px; color: var(--dim); }
+        .msg-row {
+            margin: 4px 0;
+            padding: 6px 10px;
+            border-left: 3px solid var(--border);
+            border-radius: 0 3px 3px 0;
+            font-size: 12px;
+        }
+        .msg-row.is-sidechain { margin-left: 20px; border-left-style: dashed; opacity: 0.9; }
+        .msg-kind-label { font-size: 11px; color: var(--dim2); margin-bottom: 4px; display: flex; align-items: center; gap: 6px; flex-wrap: wrap; }
+        .msg-time { font-size: 10px; color: var(--dim2); margin-left: auto; }
+        .msg-text { white-space: pre-wrap; word-break: break-word; margin: 0; font-size: 12px; color: var(--fg); }
+        .msg-text-human { color: var(--fg); font-size: 13px; }
+        .msg-text-error { color: var(--red); }
+        .msg-text-clamp { max-height: calc(3 * 1.5 * 12px); overflow: hidden; position: relative; cursor: pointer; mask-image: linear-gradient(to bottom, black 70%, transparent 100%); -webkit-mask-image: linear-gradient(to bottom, black 70%, transparent 100%); }
+        .msg-text-meta { font-size: 11px; color: var(--dim2); margin-top: 3px; cursor: pointer; }
+        .msg-text-meta:hover { color: var(--dim); }
+        .token-badge { color: var(--dim2); font-size: 11px; padding: 1px 5px; border-radius: 3px; background: var(--bg3); border: 1px solid var(--border); }
+        .kind-human_prompt { border-left-color: var(--blue); background: rgba(122,166,224,0.05); padding-top: 8px; padding-bottom: 8px; }
+        .kind-subagent_prompt { border-left-color: var(--violet); background: rgba(197,167,232,0.05); }
+        .kind-agent_text { border-left-color: var(--border); background: var(--bg2); }
+        .kind-agent_thinking { border-left-color: var(--amber); border-left-style: dashed; background: rgba(243,196,105,0.04); font-size: 12px; color: var(--dim); }
+        .kind-agent_tool_call { border-left-color: var(--cyan); background: rgba(125,211,192,0.05); font-size: 12px; padding: 4px 10px; }
+        .tool-call-line { display: flex; align-items: center; gap: 6px; cursor: pointer; user-select: none; padding: 2px 0; }
+        .tool-call-line:hover { background: rgba(125,211,192,0.06); }
+        .tool-call-line strong { color: var(--cyan); }
+        .tool-hint { color: var(--dim2); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; flex: 1; min-width: 0; }
+        .tool-chevron { color: var(--cyan); font-size: 11px; }
+        .slash-divider { display: flex; align-items: center; gap: 8px; color: var(--dim2); font-size: 11px; padding: 3px 0; margin: 4px 0; }
+        .slash-divider::before, .slash-divider::after { content: ''; flex: 1; height: 1px; background: var(--border); }
+        .cache-loss-divider { display: flex; align-items: center; gap: 8px; color: var(--amber); font-size: 11px; padding: 2px 0; margin: 3px 0; cursor: help; }
+        .cache-loss-divider::before, .cache-loss-divider::after { content: ''; flex: 1; height: 1px; background: rgba(243,196,105,0.3); }
+        .cache-loss-divider span { background: rgba(243,196,105,0.1); border: 1px solid rgba(243,196,105,0.3); padding: 1px 6px; border-radius: 3px; color: var(--amber); }
+        .kind-slash_command { border-left: none; background: transparent; padding: 0; margin: 0; }
+        .sidechain-badge { background: rgba(197,167,232,0.15); color: var(--violet); font-size: 10px; padding: 1px 5px; border-radius: 8px; font-weight: 600; text-transform: uppercase; letter-spacing: 0.04em; }
+        .exec-time { color: var(--dim2); font-size: 11px; }
+        .tool-section-label { font-size: 10px; color: var(--dim2); text-transform: uppercase; letter-spacing: 0.06em; margin-top: 4px; margin-bottom: 2px; }
+        .tool-call-summary { color: var(--dim); }
+        .meta-label { color: var(--dim2); }
+        .filter-chip { display: inline-flex; align-items: center; gap: 5px; padding: 2px 8px; border-radius: 3px; background: rgba(243,196,105,0.1); border: 1px solid rgba(243,196,105,0.3); color: var(--amber); font-size: 11px; margin-right: 6px; }
+        .filter-chip a { color: var(--amber); font-size: 11px; }
+
+        /* ── Tab strip (session detail) ────────────────────────────── */
+        .tab-strip {
+            display: flex;
+            gap: 0;
+            border-bottom: 1px solid var(--border);
+            margin-bottom: 12px;
+        }
+        .tab-strip a {
+            padding: 6px 14px;
+            text-decoration: none;
+            color: var(--dim2);
+            font-size: 12px;
+            border-bottom: 2px solid transparent;
+            margin-bottom: -1px;
+            transition: color 0.1s;
+        }
+        .tab-strip a:hover { color: var(--dim); text-decoration: none; }
+        .tab-strip a.active-tab { color: var(--amber); border-bottom-color: var(--amber); font-weight: 500; }
+
+        /* ── Cost view toolbar ─────────────────────────────────────── */
+        .cost-view-toolbar { display: flex; gap: 6px; margin-bottom: 8px; }
+
+        /* ── Refresh indicator (restyled for terminal) ─────────────── */
+        .refresh-indicator { display: flex; align-items: center; gap: 6px; }
+        .refresh-muted { color: var(--dim2); font-size: 11px; }
+        .refresh-flash { color: var(--green); font-size: 11px; font-weight: 600; }
+        .refresh-btn { padding: 2px 8px; font-size: 11px; background: var(--bg3); color: var(--amber); border: 1px solid rgba(243,196,105,0.3); border-radius: 3px; cursor: pointer; font-family: inherit; }
+        .refresh-btn:hover { border-color: var(--amber); color: var(--fg); }
+        .refresh-btn[disabled] { opacity: 0.4; cursor: default; }
+        .refresh-window { background: var(--bg3); border: 1px solid var(--border); color: var(--dim); font-family: inherit; font-size: 11px; padding: 1px 4px; border-radius: 3px; }
+        .refresh-form { display: inline-flex; align-items: center; gap: 6px; }
+        @keyframes refreshFlash { 0% { opacity: 0; transform: translateY(-2px); } 100% { opacity: 1; transform: translateY(0); } }
+
         /* Plotly creates a hidden <svg id="js-plotly-tester"> appended
            to <body> to measure text dimensions before laying out axis
            titles and annotations. Without this rule it inherits body's
@@ -102,39 +432,130 @@
         #js-plotly-tester tspan {
             font-family: Georgia, 'Times New Roman', serif;
         }
-        .refresh-indicator { margin-left: auto; font-size: 0.8rem; color: #c0c0e0; display: flex; align-items: center; gap: 0.5rem; }
-        .refresh-btn { padding: 0.2rem 0.6rem; font-size: 0.75rem; background: rgba(255,255,255,0.08); color: #e0e0ff; border: 1px solid rgba(255,255,255,0.15); border-radius: 4px; cursor: pointer; }
-        .refresh-btn:hover { background: rgba(255,255,255,0.15); }
-        .refresh-btn[disabled] { opacity: 0.5; cursor: default; }
-        .refresh-muted { transition: opacity 0.2s ease; }
-        .refresh-flash { color: #7be0a3; font-weight: 600; animation: refreshFlash 0.6s ease-out; display: inline-block; }
-        @keyframes refreshFlash {
-            0%   { opacity: 0; transform: translateY(-3px); }
-            100% { opacity: 1; transform: translateY(0); }
-        }
+
+        /* ── Raw data view ─────────────────────────────────────────── */
+        .raw-record { background: var(--bg2); border: 1px solid var(--border); border-radius: 3px; margin-bottom: 6px; }
+        .raw-field { display: flex; gap: 0; border-bottom: 1px solid var(--border); font-size: 12px; }
+        .raw-field:last-child { border-bottom: none; }
+        .raw-key { min-width: 140px; max-width: 140px; padding: 4px 8px; color: var(--cyan); background: var(--bg3); border-right: 1px solid var(--border); font-size: 11px; }
+        .raw-val { padding: 4px 8px; color: var(--fg); flex: 1; word-break: break-all; }
+        .raw-val.is-long { cursor: pointer; color: var(--amber); }
+        .raw-val.is-long:hover { text-decoration: underline; }
+        .raw-panel { position: fixed; right: 0; top: 0; bottom: 0; width: 50vw; background: var(--bg2); border-left: 1px solid var(--border); z-index: 300; overflow-y: auto; display: flex; flex-direction: column; }
+        .raw-panel-header { background: var(--bg3); border-bottom: 1px solid var(--border); padding: 8px 12px; display: flex; align-items: center; gap: 8px; font-size: 12px; }
+        .raw-panel-body { padding: 12px; flex: 1; }
+        .raw-panel pre { font-size: 12px; color: var(--fg); }
+
+        /* ── Misc ──────────────────────────────────────────────────── */
+        .alert { background: rgba(255,110,84,0.08); border: 1px solid rgba(255,110,84,0.25); border-radius: 4px; padding: 8px 12px; margin-bottom: 10px; font-size: 12px; color: var(--dim); }
+        .alert strong { color: var(--red); }
+        details summary { cursor: pointer; color: var(--dim2); }
+        .split { display: grid; gap: 10px; }
+        .split-2 { grid-template-columns: 1fr 1fr; }
+        .split-3 { grid-template-columns: repeat(3, 1fr); }
     </style>
 </head>
 <body>
     <div id="loading-overlay"><div class="spinner"></div></div>
-    <nav>
-        <a href="/" class="brand" hx-get="/" hx-target="#content" hx-push-url="true">Introspect</a>
-        <a href="/" hx-get="/" hx-target="#content" hx-push-url="true">Dashboard</a>
-        <a href="/sessions" hx-get="/sessions" hx-target="#content" hx-push-url="true">Sessions</a>
-        <a href="/search" hx-get="/search" hx-target="#content" hx-push-url="true">Search</a>
-        <a href="/tools" hx-get="/tools" hx-target="#content" hx-push-url="true">Tools</a>
-        <a href="/bash" hx-get="/bash" hx-target="#content" hx-push-url="true">Bash</a>
-        <a href="/mcps" hx-get="/mcps" hx-target="#content" hx-push-url="true">MCPs</a>
-        <a href="/stats" hx-get="/stats" hx-target="#content" hx-push-url="true">Stats</a>
-        <a href="/cost-overview" hx-get="/cost-overview" hx-target="#content" hx-push-url="true">Cost Overview</a>
-        <a href="/raw" hx-get="/raw" hx-target="#content" hx-push-url="true">Raw Data</a>
-        {% include "_refresh_indicator.html" %}
+
+    <!-- Statusline -->
+    <div class="statusline">
+        <div class="sl-seg sl-brand">INTROSPECT</div>
+        <div class="sl-seg sl-mode" id="sl-mode">NORMAL</div>
+        <div class="sl-seg sl-path">~/.claude/projects</div>
+        <div class="sl-seg sl-right">
+            {% include "_refresh_indicator.html" %}
+            <span style="margin:0 8px;color:var(--border)">|</span>
+            <span class="sl-dot"></span>
+            <span class="dim">db online</span>
+        </div>
+    </div>
+
+    <!-- Tabline / navigation -->
+    <nav class="tabline" id="main-tabs">
+        <a class="tab" data-path="/" href="/" hx-get="/" hx-target="#content" hx-push-url="true">
+            <span class="tab-num">1</span>home
+        </a>
+        <a class="tab" data-path="/sessions" href="/sessions" hx-get="/sessions" hx-target="#content" hx-push-url="true">
+            <span class="tab-num">2</span>sessions
+        </a>
+        <a class="tab" data-path="/search" href="/search" hx-get="/search" hx-target="#content" hx-push-url="true">
+            <span class="tab-num">3</span>search
+        </a>
+        <a class="tab" data-path="/tools" href="/tools" hx-get="/tools" hx-target="#content" hx-push-url="true">
+            <span class="tab-num">4</span>tools
+        </a>
+        <a class="tab" data-path="/bash" href="/bash" hx-get="/bash" hx-target="#content" hx-push-url="true">
+            <span class="tab-num">5</span>bash
+        </a>
+        <a class="tab" data-path="/mcps" href="/mcps" hx-get="/mcps" hx-target="#content" hx-push-url="true">
+            <span class="tab-num">6</span>mcps
+        </a>
+        <a class="tab" data-path="/stats" href="/stats" hx-get="/stats" hx-target="#content" hx-push-url="true">
+            <span class="tab-num">7</span>stats
+        </a>
+        <a class="tab" data-path="/cost-overview" href="/cost-overview" hx-get="/cost-overview" hx-target="#content" hx-push-url="true">
+            <span class="tab-num">8</span>Cost Overview
+        </a>
+        <a class="tab" data-path="/raw" href="/raw" hx-get="/raw" hx-target="#content" hx-push-url="true">
+            <span class="tab-num">9</span>raw
+        </a>
+        <div class="tab-hints">
+            <span><span class="kbd">1</span>–<span class="kbd">9</span> tabs</span>
+            <span><span class="kbd">/</span> search</span>
+            <span><span class="kbd">?</span> help</span>
+        </div>
     </nav>
-    <div class="container" id="content">
+
+    <div id="content">
         {% block content %}{% endblock %}
     </div>
+
+    <!-- Command bar -->
+    <div class="cmdbar">
+        <div class="cmdbar-prompt">:</div>
+        <div class="cmdbar-hints">
+            <span><span class="kbd">j</span>/<span class="kbd">k</span> nav</span>
+            <span><span class="kbd">⏎</span> open</span>
+            <span><span class="kbd">f</span> filter</span>
+            <span><span class="kbd">g</span> top</span>
+        </div>
+    </div>
+
     <script>
-        // Refresh polls hit /refresh-status frequently; suppressing the
-        // overlay for them keeps the page from flickering during a rebuild.
+        // Active tab detection
+        function updateActiveTab() {
+            var path = window.location.pathname;
+            document.querySelectorAll('#main-tabs .tab').forEach(function(tab) {
+                var tp = tab.dataset.path;
+                var isActive = tp === '/'
+                    ? path === '/'
+                    : path === tp || path.startsWith(tp + '/') || path.startsWith(tp + '?');
+                tab.classList.toggle('active', isActive);
+            });
+            // Update mode indicator with current page name
+            var active = document.querySelector('#main-tabs .tab.active');
+            if (active) {
+                document.getElementById('sl-mode').textContent = active.textContent.trim().replace(/^\d+/, '').toUpperCase().trim();
+            }
+        }
+        updateActiveTab();
+        document.body.addEventListener('htmx:afterSettle', updateActiveTab);
+
+        // Keyboard shortcuts 1-9
+        document.addEventListener('keydown', function(e) {
+            if (e.target.matches('input,textarea,select')) return;
+            var map = {
+                '1': '/', '2': '/sessions', '3': '/search',
+                '4': '/tools', '5': '/bash', '6': '/mcps',
+                '7': '/stats', '8': '/cost-overview', '9': '/raw'
+            };
+            if (map[e.key]) {
+                htmx.ajax('GET', map[e.key], {target: '#content', pushUrl: true});
+            }
+        });
+
+        // Loading overlay (suppress for refresh-status polls)
         function isRefreshRequest(evt) {
             var path = evt.detail && evt.detail.requestConfig && evt.detail.requestConfig.path;
             return typeof path === 'string' && path.indexOf('/refresh') === 0;
@@ -158,15 +579,33 @@
         });
     </script>
 
-    <!-- Plotly chart bootstrap.
-         Fragments rendered into the page (initial load + HTMX swaps) carry
-         only the figure JSON in a <script type="application/json"> tag.
-         This block is the single source of truth that finds those tags
-         and initialises Plotly. By living in base.html (not in the
-         swappable fragment) it sidesteps the timing issues caused by
-         inline scripts running mid-swap. -->
+    <!-- Plotly chart bootstrap -->
     <script>
     (function () {
+        // Dark terminal theme defaults for all Plotly charts
+        var DARK = {
+            paper_bgcolor: '#131516',
+            plot_bgcolor:  '#131516',
+            font: { color: '#d8d4c2', family: "'IBM Plex Mono', monospace", size: 11 },
+            xaxis: { gridcolor: '#2a2e30', linecolor: '#2a2e30', tickcolor: '#7a8a85', zerolinecolor: '#2a2e30' },
+            yaxis: { gridcolor: '#2a2e30', linecolor: '#2a2e30', tickcolor: '#7a8a85', zerolinecolor: '#2a2e30' },
+            legend: { bgcolor: 'rgba(19,21,22,0.8)', bordercolor: '#2a2e30', borderwidth: 1 },
+            margin: { t: 20, r: 16, b: 40, l: 60 }
+        };
+        function applyDarkTheme(layout) {
+            layout.paper_bgcolor = DARK.paper_bgcolor;
+            layout.plot_bgcolor  = DARK.plot_bgcolor;
+            layout.font = Object.assign({}, DARK.font, layout.font || {});
+            if (!layout.margin) layout.margin = DARK.margin;
+            ['xaxis','yaxis','xaxis2','yaxis2'].forEach(function(ax) {
+                if (layout[ax] === undefined) return;
+                layout[ax] = Object.assign({}, DARK[ax] || {}, layout[ax]);
+            });
+            if (layout.legend !== undefined) {
+                layout.legend = Object.assign({}, DARK.legend, layout.legend);
+            }
+        }
+
         function attachSessionCostHandlers(el) {
             var sid = el.dataset.sessionId;
             var rawViewMap = el.dataset.viewMap;
@@ -190,9 +629,6 @@
                 viewMap[name].forEach(function (i) { visible[i] = true; });
                 if (markerTrace >= 0 && markerTrace < nTraces) visible[markerTrace] = true;
                 Plotly.restyle(el, {visible: visible});
-                // Flip per-view annotation visibility. annMap is
-                // {viewName: [annotation indices]}; an annotation is
-                // visible iff its index is in the active view's list.
                 var anns = (el.layout && el.layout.annotations) || [];
                 if (annMap && anns.length) {
                     var activeSet = {};
@@ -246,9 +682,6 @@
             }
 
             function bucketCustomdata() {
-                // Pull customdata from any non-marker trace — every line
-                // trace carries the same per-bucket [first_uuid, last_uuid,
-                // count] blob, so the first one we find works.
                 var traces = el.data || [];
                 for (var i = 0; i < traces.length; i++) {
                     if (i === markerTrace) continue;
@@ -263,7 +696,6 @@
                 var p = evt.points[0];
                 if (p.fullData && p.fullData.mode &&
                         p.fullData.mode.indexOf('markers') >= 0) {
-                    // Marker click: customdata = [uuid, kind, inc, cum].
                     var uuid = p.customdata && p.customdata[0];
                     fireRangeFilter(uuid, uuid);
                 }
@@ -274,9 +706,6 @@
                 if (!cd) return;
                 var x0, x1;
                 if (evt.range && evt.range.x && evt.range.x.length === 2) {
-                    // Box-select carries the dragged x-range directly.
-                    // Line-only traces don't always populate evt.points (no
-                    // marker = nothing to "select"), so we read the range.
                     x0 = Math.round(evt.range.x[0]);
                     x1 = Math.round(evt.range.x[1]);
                 } else if (evt.points && evt.points.length) {
@@ -298,22 +727,16 @@
                 fireRangeFilter(first[0], last[1]);
             });
 
-            // Force dragmode to 'select' after the modebar's defaults
-            // settle — some Plotly versions reset it to 'zoom' once the
-            // modebar is wired up.
             Plotly.relayout(el, {dragmode: 'select'});
         }
 
         function initCostChart(el) {
-            // Skip charts that are already initialised — Plotly attaches
-            // ``_fullLayout`` once newPlot has run.
             if (el._fullLayout) return;
             var dataEl = document.getElementById(el.dataset.figureId);
             if (!dataEl) return;
             var fig = JSON.parse(dataEl.textContent);
             fig.layout = fig.layout || {};
-            // Pin width to the current container so layout is computed
-            // once at the correct size; height comes from the data attr.
+            applyDarkTheme(fig.layout);
             fig.layout.width = el.clientWidth;
             fig.layout.height = parseInt(el.dataset.height || '360', 10);
             var modebarVisible = el.dataset.modebar === 'hover';
@@ -328,8 +751,6 @@
                     el.on('plotly_click', function (evt) {
                         if (!evt || !evt.points || !evt.points.length) return;
                         var rawX = evt.points[0].x;
-                        // Plotly may emit a Date or "YYYY-MM-DD HH:MM:SS";
-                        // slice to YYYY-MM-DD for the server's date regex.
                         var day = (rawX instanceof Date)
                             ? rawX.toISOString().slice(0, 10)
                             : String(rawX).slice(0, 10);
@@ -347,7 +768,6 @@
                     var day = el.dataset.day || '';
                     el.on('plotly_click', function (evt) {
                         if (!evt || !evt.points || !evt.points.length) return;
-                        // Hourly bucket arrives as the strftime "HH:00" string.
                         var hour = String(evt.points[0].x).slice(0, 2);
                         htmx.ajax('GET',
                             '/cost-overview/portfolio?day=' + encodeURIComponent(day)
@@ -364,9 +784,6 @@
             (root || document).querySelectorAll('.cost-chart').forEach(initCostChart);
         }
         document.addEventListener('DOMContentLoaded', function () { initAll(); });
-        // ``htmx:afterSettle`` fires after HTMX has finished swapping AND
-        // the browser has reconciled layout, so dimensions are stable
-        // when we measure the container.
         document.body && document.body.addEventListener('htmx:afterSettle', function (evt) {
             initAll(evt.target || document);
         });

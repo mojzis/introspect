@@ -1,10 +1,9 @@
 {% extends parent %}
 {% block title %}Stats - Introspect{% endblock %}
 {% block content %}
-<h1>Stats &amp; Insights</h1>
 
 {% if earliest_session %}
-<p style="color: var(--text-muted, #888); margin-bottom: 1rem;">Data since {{ (earliest_session|string)[:10] }}</p>
+<p style="color:var(--dim2);font-size:11px;margin-bottom:10px;">Data since {{ (earliest_session|string)[:10] }}</p>
 {% endif %}
 
 <div class="stat-grid">
@@ -25,7 +24,7 @@
         <div class="label">Total Tool Calls</div>
     </div>
     <div class="stat-card">
-        <div class="value">{{ total_failed }}</div>
+        <div class="value" style="{% if total_failed > 0 %}color:var(--red);{% endif %}">{{ total_failed }}</div>
         <div class="label">Failed Tool Calls</div>
     </div>
     <div class="stat-card">
@@ -69,24 +68,24 @@
 </div>
 
 {% if model_breakdown %}
-<h2>Per-Model Breakdown</h2>
-<div class="card">
+<div class="panel">
+    <div class="ph">Per-Model Breakdown</div>
     <table>
         <thead>
             <tr>
                 <th>Model</th>
-                <th>Sessions</th>
-                <th>Avg Duration</th>
-                <th>Avg Tool Calls</th>
+                <th style="text-align:right;">Sessions</th>
+                <th style="text-align:right;">Avg Duration</th>
+                <th style="text-align:right;">Avg Tool Calls</th>
             </tr>
         </thead>
         <tbody>
             {% for m in model_breakdown %}
             <tr>
-                <td>{{ m[0] }}</td>
-                <td>{{ m[1] }}</td>
-                <td>{{ '%d:%02d'|format((m[2] or 0) // 60, (m[2] or 0) % 60) }}</td>
-                <td>{{ '%.1f'|format(m[3] or 0) }}</td>
+                <td style="color:var(--cyan);">{{ m[0] }}</td>
+                <td style="text-align:right;color:var(--dim2);">{{ m[1] }}</td>
+                <td style="text-align:right;color:var(--dim2);">{{ '%d:%02d'|format((m[2] or 0) // 60, (m[2] or 0) % 60) }}</td>
+                <td style="text-align:right;color:var(--dim2);">{{ '%.1f'|format(m[3] or 0) }}</td>
             </tr>
             {% endfor %}
         </tbody>
@@ -94,68 +93,74 @@
 </div>
 {% endif %}
 
-<h2>Session Duration Distribution</h2>
-<div class="card">
+<div class="split split-2" style="gap:10px;">
+
+<div class="panel">
+    <div class="ph">Session Duration Distribution</div>
     <table>
         <thead>
             <tr>
-                <th style="width:120px;">Duration Bucket</th>
-                <th style="width:60px;">Count</th>
+                <th style="width:120px;">Bucket</th>
+                <th style="width:50px;text-align:right;">Count</th>
                 <th></th>
             </tr>
         </thead>
         <tbody>
             {% for bucket in duration_buckets %}
             <tr>
-                <td>{{ bucket[0] }}</td>
-                <td>{{ bucket[1] }}</td>
-                <td><div style="background:#3b5bdb;height:1.2rem;border-radius:3px;width:{{ (bucket[1] / max_duration_count * 100)|round }}%;min-width:2px;"></div></td>
+                <td style="color:var(--dim2);">{{ bucket[0] }}</td>
+                <td style="text-align:right;color:var(--dim2);">{{ bucket[1] }}</td>
+                <td><div style="background:#3b5bdb;height:10px;border-radius:2px;width:{{ (bucket[1] / max_duration_count * 100)|round }}%;min-width:2px;opacity:0.8;"></div></td>
             </tr>
             {% endfor %}
         </tbody>
     </table>
 </div>
 
-<h2>Turns Per Session Distribution</h2>
-<div class="card">
+<div class="panel">
+    <div class="ph">Turns Per Session Distribution</div>
     <table>
         <thead>
             <tr>
-                <th style="width:120px;">Turns Bucket</th>
-                <th style="width:60px;">Count</th>
+                <th style="width:120px;">Bucket</th>
+                <th style="width:50px;text-align:right;">Count</th>
                 <th></th>
             </tr>
         </thead>
         <tbody>
             {% for bucket in turns_buckets %}
             <tr>
-                <td>{{ bucket[0] }}</td>
-                <td>{{ bucket[1] }}</td>
-                <td><div style="background:#3b5bdb;height:1.2rem;border-radius:3px;width:{{ (bucket[1] / max_turns_count * 100)|round }}%;min-width:2px;"></div></td>
+                <td style="color:var(--dim2);">{{ bucket[0] }}</td>
+                <td style="text-align:right;color:var(--dim2);">{{ bucket[1] }}</td>
+                <td><div style="background:#3b5bdb;height:10px;border-radius:2px;width:{{ (bucket[1] / max_turns_count * 100)|round }}%;min-width:2px;opacity:0.8;"></div></td>
             </tr>
             {% endfor %}
         </tbody>
     </table>
 </div>
 
-<h2>Tool Usage Breakdown</h2>
-<div class="card">
+</div>
+
+<div class="split split-2" style="gap:10px;">
+
+<div class="panel">
+    <div class="ph">Tool Usage Breakdown</div>
     <table>
         <thead>
             <tr>
                 <th>Tool Name</th>
-                <th>Count</th>
-                <th>% of Total</th>
-                <th>Success Rate</th>
+                <th style="text-align:right;">Count</th>
+                <th style="text-align:right;">% Total</th>
+                <th style="text-align:right;">Success</th>
             </tr>
         </thead>
         <tbody>
             {% for tool in tool_breakdown %}
             <tr>
-                <td>{{ tool[0] }}</td>
-                <td>{{ tool[1] }}</td>
-                <td>{{ "%.1f"|format(tool[3]) }}%</td>
-                <td>{{ "%.1f"|format(tool[2]) }}%</td>
+                <td style="color:var(--cyan);">{{ tool[0] }}</td>
+                <td style="text-align:right;color:var(--dim2);">{{ tool[1] }}</td>
+                <td style="text-align:right;color:var(--dim2);">{{ "%.1f"|format(tool[3]) }}%</td>
+                <td style="text-align:right;color:{% if tool[2] >= 90 %}var(--green){% elif tool[2] >= 70 %}var(--amber){% else %}var(--red){% endif %};">{{ "%.1f"|format(tool[2]) }}%</td>
             </tr>
             {% endfor %}
         </tbody>
@@ -163,46 +168,50 @@
 </div>
 
 {% if mcp_servers %}
-<h2>MCP Servers</h2>
-<div class="card">
+<div class="panel">
+    <div class="ph">MCP Servers</div>
     <table>
         <thead>
             <tr>
                 <th>Server</th>
-                <th>Total Calls</th>
-                <th>Commands Used</th>
+                <th style="text-align:right;">Calls</th>
+                <th style="text-align:right;">Commands</th>
             </tr>
         </thead>
         <tbody>
             {% for s in mcp_servers %}
             <tr>
-                <td>{{ s[0] }}</td>
-                <td>{{ s[1] }}</td>
-                <td>{{ s[2] }}</td>
+                <td style="color:var(--violet);">{{ s[0] }}</td>
+                <td style="text-align:right;color:var(--dim2);">{{ s[1] }}</td>
+                <td style="text-align:right;color:var(--dim2);">{{ s[2] }}</td>
             </tr>
             {% endfor %}
         </tbody>
     </table>
 </div>
+{% endif %}
 
-<h2>MCP Command Breakdown</h2>
-<div class="card">
+</div>
+
+{% if mcp_breakdown %}
+<div class="panel">
+    <div class="ph">MCP Command Breakdown</div>
     <table>
         <thead>
             <tr>
                 <th>Command</th>
-                <th>Count</th>
-                <th>% of Total</th>
-                <th>Success Rate</th>
+                <th style="text-align:right;">Count</th>
+                <th style="text-align:right;">% Total</th>
+                <th style="text-align:right;">Success</th>
             </tr>
         </thead>
         <tbody>
             {% for tool in mcp_breakdown %}
             <tr>
-                <td>{{ tool[0] }}</td>
-                <td>{{ tool[1] }}</td>
-                <td>{{ "%.1f"|format(tool[3]) }}%</td>
-                <td>{{ "%.1f"|format(tool[2]) }}%</td>
+                <td style="color:var(--cyan);">{{ tool[0] }}</td>
+                <td style="text-align:right;color:var(--dim2);">{{ tool[1] }}</td>
+                <td style="text-align:right;color:var(--dim2);">{{ "%.1f"|format(tool[3]) }}%</td>
+                <td style="text-align:right;color:{% if tool[2] >= 90 %}var(--green){% elif tool[2] >= 70 %}var(--amber){% else %}var(--red){% endif %};">{{ "%.1f"|format(tool[2]) }}%</td>
             </tr>
             {% endfor %}
         </tbody>
@@ -211,47 +220,41 @@
 {% endif %}
 
 {% if bash_breakdown %}
-<h2>Bash Commands — By First Word</h2>
-<div class="card">
+<div class="split split-2" style="gap:10px;">
+<div class="panel">
+    <div class="ph">Bash Commands — By First Word</div>
     {% if bash_chained %}
-    <p style="margin: 0.5rem 1rem; color: var(--text-muted, #888);">
-        {{ bash_chained[0] }} of {{ bash_chained[1] }} bash calls ({{ "%.1f"|format(100.0 * bash_chained[0] / bash_chained[1]) if bash_chained[1] else 0 }}%) contain <code>&amp;&amp;</code> chaining
-    </p>
+    <div style="padding:6px 12px;font-size:11px;color:var(--dim2);border-bottom:1px solid var(--border);">
+        {{ bash_chained[0] }} of {{ bash_chained[1] }} bash calls ({{ "%.1f"|format(100.0 * bash_chained[0] / bash_chained[1]) if bash_chained[1] else 0 }}%) contain <code style="color:var(--amber);">&amp;&amp;</code> chaining
+    </div>
     {% endif %}
     <table>
         <thead>
-            <tr>
-                <th>Command</th>
-                <th>Count</th>
-            </tr>
+            <tr><th>Command</th><th style="text-align:right;">Count</th></tr>
         </thead>
         <tbody>
             {% for cmd in bash_breakdown %}
             <tr>
-                <td><code>{{ cmd[0] }}</code></td>
-                <td>{{ cmd[1] }}</td>
+                <td><code style="color:var(--cyan);">{{ cmd[0] }}</code></td>
+                <td style="text-align:right;color:var(--dim2);">{{ cmd[1] }}</td>
             </tr>
             {% endfor %}
         </tbody>
     </table>
 </div>
-{% endif %}
 
 {% if bash_two_words %}
-<h2>Bash Commands — By First Two Words</h2>
-<div class="card">
+<div class="panel">
+    <div class="ph">Bash Commands — By First Two Words</div>
     <table>
         <thead>
-            <tr>
-                <th>Command</th>
-                <th>Count</th>
-            </tr>
+            <tr><th>Command</th><th style="text-align:right;">Count</th></tr>
         </thead>
         <tbody>
             {% for cmd in bash_two_words %}
             <tr>
-                <td><code>{{ cmd[0] }}</code></td>
-                <td>{{ cmd[1] }}</td>
+                <td><code style="color:var(--cyan);">{{ cmd[0] }}</code></td>
+                <td style="text-align:right;color:var(--dim2);">{{ cmd[1] }}</td>
             </tr>
             {% endfor %}
         </tbody>
@@ -259,87 +262,90 @@
 </div>
 {% endif %}
 
-<h2>Longest Sessions (Top 15)</h2>
-<div class="card">
+</div>
+{% endif %}
+
+<div class="split split-2" style="gap:10px;">
+
+<div class="panel">
+    <div class="ph">Longest Sessions (Top 15)</div>
     <table>
         <thead>
             <tr>
                 <th>Session ID</th>
-                <th>Started At</th>
+                <th>Started</th>
                 <th>Duration</th>
-                <th>Turns</th>
-                <th>User Msgs</th>
-                <th>Tool Calls</th>
-                <th>Failed</th>
+                <th style="text-align:right;">Turns</th>
+                <th style="text-align:right;">User</th>
+                <th style="text-align:right;">Tools</th>
+                <th style="text-align:right;">Failed</th>
                 <th>Model</th>
             </tr>
         </thead>
         <tbody>
             {% for s in longest_sessions %}
             <tr>
-                <td><a href="/sessions/{{ s[0] }}" hx-get="/sessions/{{ s[0] }}" hx-target="#content" hx-push-url="true"><span class="truncate">{{ (s[0]|string)[:12] }}...</span></a></td>
-                <td>{{ (s[1]|string)[:19] }}</td>
-                <td>{{ s[2] }}</td>
-                <td>{{ s[6] }}</td>
-                <td>{{ s[4] }}</td>
-                <td>{{ s[7] }}</td>
-                <td>{{ s[8] }}</td>
-                <td>{{ s[3] or '' }}</td>
+                <td><a href="/sessions/{{ s[0] }}" hx-get="/sessions/{{ s[0] }}" hx-target="#content" hx-push-url="true"><span class="truncate">{{ (s[0]|string)[:12] }}…</span></a></td>
+                <td style="color:var(--dim2);white-space:nowrap;">{{ (s[1]|string)[:19] }}</td>
+                <td style="color:var(--amber);">{{ s[2] }}</td>
+                <td style="text-align:right;color:var(--dim2);">{{ s[6] }}</td>
+                <td style="text-align:right;color:var(--dim2);">{{ s[4] }}</td>
+                <td style="text-align:right;color:var(--dim2);">{{ s[7] }}</td>
+                <td style="text-align:right;color:{% if s[8] > 0 %}var(--red){% else %}var(--dim2){% endif %};">{{ s[8] }}</td>
+                <td style="color:var(--dim2);font-size:11px;">{{ s[3] or '' }}</td>
             </tr>
             {% endfor %}
         </tbody>
     </table>
 </div>
 
-<h2>Most Tool Calls (Top 15 Sessions)</h2>
-<div class="card">
+<div class="panel">
+    <div class="ph">Most Tool Calls (Top 15)</div>
     <table>
         <thead>
             <tr>
                 <th>Session ID</th>
-                <th>Tool Calls</th>
-                <th>Failed</th>
-                <th>Started At</th>
+                <th style="text-align:right;">Tools</th>
+                <th style="text-align:right;">Failed</th>
+                <th>Started</th>
                 <th>Duration</th>
-                <th>Turns</th>
-                <th>User Msgs</th>
+                <th style="text-align:right;">Turns</th>
                 <th>Model</th>
             </tr>
         </thead>
         <tbody>
             {% for s in most_tools_sessions %}
             <tr>
-                <td><a href="/sessions/{{ s[0] }}" hx-get="/sessions/{{ s[0] }}" hx-target="#content" hx-push-url="true"><span class="truncate">{{ (s[0]|string)[:12] }}...</span></a></td>
-                <td>{{ s[1] }}</td>
-                <td>{{ s[2] }}</td>
-                <td>{{ (s[3]|string)[:19] }}</td>
-                <td>{{ s[4] }}</td>
-                <td>{{ s[8] }}</td>
-                <td>{{ s[6] }}</td>
-                <td>{{ s[5] or '' }}</td>
+                <td><a href="/sessions/{{ s[0] }}" hx-get="/sessions/{{ s[0] }}" hx-target="#content" hx-push-url="true"><span class="truncate">{{ (s[0]|string)[:12] }}…</span></a></td>
+                <td style="text-align:right;color:var(--amber);">{{ s[1] }}</td>
+                <td style="text-align:right;color:{% if s[2] > 0 %}var(--red){% else %}var(--dim2){% endif %};">{{ s[2] }}</td>
+                <td style="color:var(--dim2);white-space:nowrap;">{{ (s[3]|string)[:19] }}</td>
+                <td style="color:var(--dim2);">{{ s[4] }}</td>
+                <td style="text-align:right;color:var(--dim2);">{{ s[8] }}</td>
+                <td style="color:var(--dim2);font-size:11px;">{{ s[5] or '' }}</td>
             </tr>
             {% endfor %}
         </tbody>
     </table>
 </div>
 
-<h2>Sessions Per Day</h2>
-<div class="card">
+</div>
+
+<div class="panel">
+    <div class="ph">Sessions Per Day</div>
     <table>
         <thead>
-            <tr>
-                <th>Date</th>
-                <th>Sessions</th>
-            </tr>
+            <tr><th>Date</th><th style="text-align:right;">Sessions</th></tr>
         </thead>
         <tbody>
             {% for day in sessions_per_day %}
             <tr>
-                <td>{{ day[0] }}</td>
-                <td>{{ day[1] }}</td>
+                <td style="color:var(--dim2);">{{ day[0] }}</td>
+                <td style="text-align:right;color:var(--amber);">{{ day[1] }}</td>
             </tr>
             {% endfor %}
         </tbody>
     </table>
 </div>
+
 {% endblock %}

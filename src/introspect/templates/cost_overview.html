@@ -1,12 +1,13 @@
 {% extends parent %}
 {% block title %}Cost Overview - Introspect{% endblock %}
 {% block content %}
-<h1>Cost Overview</h1>
 
-<h2>Daily breakdown</h2>
-<div class="card">
-    {% include "_daily_cost_panel.html" %}
-    <div id="hourly-cost-panel" style="margin-top:1rem;"></div>
+<div class="panel">
+    <div class="ph">Daily breakdown</div>
+    <div class="pb">
+        {% include "_daily_cost_panel.html" %}
+        <div id="hourly-cost-panel" style="margin-top:10px;"></div>
+    </div>
 </div>
 
 <div id="cost-portfolio-panel">

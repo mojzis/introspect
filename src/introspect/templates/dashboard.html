@@ -1,7 +1,6 @@
 {% extends parent %}
 {% block title %}Dashboard - Introspect{% endblock %}
 {% block content %}
-<h1>Dashboard</h1>
 
 <div class="stat-grid">
     <div class="stat-card">
@@ -44,30 +43,32 @@
     {% endif %}
 </div>
 
-<p style="color:#888;margin:0.5rem 0 1rem;">Today: {{ activity_today }} session{{ 's' if activity_today != 1 else '' }} | This week: {{ activity_week }}</p>
+<p style="color:var(--dim2);font-size:11px;margin:0 0 10px;">Today: {{ activity_today }} session{{ 's' if activity_today != 1 else '' }} &nbsp;·&nbsp; This week: {{ activity_week }}</p>
 
-<div class="card">
-    <h2>Recent Sessions</h2>
+<div class="split split-2" style="gap:10px;">
+
+<div class="panel">
+    <div class="ph">Recent Sessions</div>
     <table>
         <thead>
             <tr>
                 <th>Title</th>
                 <th>Started</th>
                 <th>Duration</th>
-                <th>User Msgs</th>
-                <th>Asst Msgs</th>
+                <th style="text-align:right;">User</th>
+                <th style="text-align:right;">Asst</th>
                 <th>Model</th>
             </tr>
         </thead>
         <tbody>
             {% for s in recent_sessions %}
             <tr>
-                <td><a href="/sessions/{{ s[0] }}" hx-get="/sessions/{{ s[0] }}" hx-target="#content" hx-push-url="true"><span class="truncate" style="max-width:350px;" title="{{ (clean_title(s[7] or '')|e) or s[0] }}">{{ clean_title(s[7] or '')[:80] or (s[0]|string)[:12] + '...' }}</span></a></td>
-                <td>{{ (s[1]|string)[:19] }}</td>
-                <td>{{ s[2] or '' }}</td>
-                <td>{{ s[3] or 0 }}</td>
-                <td>{{ s[4] or 0 }}</td>
-                <td>{{ s[5] or '' }}</td>
+                <td><a href="/sessions/{{ s[0] }}" hx-get="/sessions/{{ s[0] }}" hx-target="#content" hx-push-url="true"><span class="truncate" style="max-width:280px;" title="{{ (clean_title(s[7] or '')|e) or s[0] }}">{{ clean_title(s[7] or '')[:80] or (s[0]|string)[:12] + '…' }}</span></a></td>
+                <td style="color:var(--dim2);white-space:nowrap;">{{ (s[1]|string)[:19] }}</td>
+                <td style="color:var(--dim2);">{{ s[2] or '' }}</td>
+                <td style="text-align:right;color:var(--dim2);">{{ s[3] or 0 }}</td>
+                <td style="text-align:right;color:var(--dim2);">{{ s[4] or 0 }}</td>
+                <td style="color:var(--dim2);white-space:nowrap;font-size:11px;">{{ s[5] or '' }}</td>
             </tr>
             {% endfor %}
         </tbody>
@@ -75,18 +76,24 @@
 </div>
 
 {% if top_tools %}
-<div class="card">
-    <h2>Top Tools</h2>
+<div class="panel">
+    <div class="ph">Top Tools</div>
     <table>
         <thead>
-            <tr><th>Tool</th><th>Count</th></tr>
+            <tr><th>Tool</th><th style="text-align:right;">Count</th></tr>
         </thead>
         <tbody>
             {% for t in top_tools %}
-            <tr><td>{{ t[0] or '?' }}</td><td>{{ t[1] }}</td></tr>
+            <tr>
+                <td style="color:var(--cyan);">{{ t[0] or '?' }}</td>
+                <td style="text-align:right;color:var(--dim2);">{{ t[1] }}</td>
+            </tr>
             {% endfor %}
         </tbody>
     </table>
 </div>
 {% endif %}
+
+</div>
+
 {% endblock %}
