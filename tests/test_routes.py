@@ -2243,6 +2243,405 @@ def test_tokenscape_stripes_and_bill_split():
     assert sum(ctx["bill_split"].values()) == pytest.approx(ctx["total_cost"], rel=1e-6)
 
 
+def _tokenscape_subagent_session_jsonl(
+    tmp_dir: Path, session_id: str, model: str = "claude-sonnet-4-6"
+) -> Path:
+    """Main chain launching one Task, plus the agent's sidechain thread."""
+    lines = [
+        make_user_message(
+            session_id,
+            "u1",
+            None,
+            "2026-04-21T10:00:00.000Z",
+            "first prompt",
+            tool_use_result={"content": "seed"},
+        ),
+        make_assistant_message(
+            session_id,
+            "a1",
+            "u1",
+            "2026-04-21T10:00:01.000Z",
+            [
+                {
+                    "type": "tool_use",
+                    "id": "toolu_task1",
+                    "name": "Task",
+                    "input": {
+                        "description": "scan docs",
+                        "prompt": "analyze the docs",
+                        "subagent_type": "explore",
+                    },
+                }
+            ],
+            model=model,
+            msg_id="msg-sub-1",
+            usage={
+                "input_tokens": 4,
+                "output_tokens": 100,
+                "cache_read_input_tokens": 0,
+                "cache_creation_input_tokens": 10_000,
+            },
+        ),
+        # Sidechain thread: root prompt (Task prompt verbatim), a Read,
+        # its 8k-char result, and a closing assistant turn.
+        make_user_message(
+            session_id,
+            "sc-u1",
+            None,
+            "2026-04-21T10:00:02.000Z",
+            "analyze the docs",
+            is_sidechain=True,
+        ),
+        make_assistant_message(
+            session_id,
+            "sc-a1",
+            "sc-u1",
+            "2026-04-21T10:00:03.000Z",
+            [
+                {
+                    "type": "tool_use",
+                    "id": "toolu_sc_read1",
+                    "name": "Read",
+                    "input": {"file_path": "/tmp/doc.md"},
+                }
+            ],
+            model=model,
+            msg_id="msg-sub-sc1",
+            usage={
+                "input_tokens": 4,
+                "output_tokens": 1_000,
+                "cache_read_input_tokens": 0,
+                "cache_creation_input_tokens": 50_000,
+            },
+            is_sidechain=True,
+        ),
+        make_user_message(
+            session_id,
+            "sc-u2",
+            "sc-a1",
+            "2026-04-21T10:00:04.000Z",
+            [
+                {
+                    "type": "tool_result",
+                    "tool_use_id": "toolu_sc_read1",
+                    "content": "x" * 8_000,
+                }
+            ],
+            is_sidechain=True,
+        ),
+        make_assistant_message(
+            session_id,
+            "sc-a2",
+            "sc-u2",
+            "2026-04-21T10:00:05.000Z",
+            [{"type": "text", "text": "docs analyzed"}],
+            model=model,
+            msg_id="msg-sub-sc2",
+            usage={
+                "input_tokens": 4,
+                "output_tokens": 500,
+                "cache_read_input_tokens": 50_000,
+                "cache_creation_input_tokens": 21_000,
+            },
+            is_sidechain=True,
+        ),
+        make_user_message(
+            session_id,
+            "u2",
+            "a1",
+            "2026-04-21T10:00:06.000Z",
+            [
+                {
+                    "type": "tool_result",
+                    "tool_use_id": "toolu_task1",
+                    "content": "agent finished",
+                }
+            ],
+        ),
+        make_assistant_message(
+            session_id,
+            "a2",
+            "u2",
+            "2026-04-21T10:00:07.000Z",
+            [{"type": "text", "text": "all done"}],
+            model=model,
+            msg_id="msg-sub-2",
+            usage={
+                "input_tokens": 4,
+                "output_tokens": 50,
+                "cache_read_input_tokens": 10_000,
+                "cache_creation_input_tokens": 500,
+            },
+        ),
+    ]
+    return write_jsonl(tmp_dir, session_id, lines)
+
+
+def test_tokenscape_subagent_run_ties_out_to_run_bill():
+    """One Task → one drill-down chart whose stripes sum to the run's bill."""
+    from introspect.api.handlers.tokenscape import (  # noqa: PLC0415
+        build_tokenscape_context,
+    )
+    from introspect.db import get_connection  # noqa: PLC0415
+    from introspect.pricing import compute_cost_usd  # noqa: PLC0415
+
+    sid = "deadbeef-0000-0000-0000-tokenscape07"
+    with tempfile.TemporaryDirectory() as tmp_str:
+        tmp = Path(tmp_str)
+        _tokenscape_subagent_session_jsonl(tmp, sid)
+        db = get_connection(tmp / "t.duckdb", glob_pattern(tmp))
+        ctx = build_tokenscape_context(db, sid)
+
+    runs = ctx["subagent_runs"]
+    assert len(runs) == 1
+    run = runs[0]
+    assert run["label"] == "agent: scan docs"
+    assert run["turn_count"] == 2
+    expected = compute_cost_usd(
+        model="claude-sonnet-4-6",
+        input_tokens=4,
+        output_tokens=1_000,
+        cache_creation_5m=50_000,
+    ) + compute_cost_usd(
+        model="claude-sonnet-4-6",
+        input_tokens=4,
+        output_tokens=500,
+        cache_read_tokens=50_000,
+        cache_creation_5m=21_000,
+    )
+    assert run["cost"] == pytest.approx(expected, rel=1e-6)
+    fig = json.loads(run["figure_json"])
+    stripes_total = sum(sum(t["y"]) for t in fig["data"])
+    assert stripes_total == pytest.approx(run["cost"], abs=0.0051)
+    # The agent's big Read surfaces as its own stripe — the drill-down's
+    # whole point is showing what the agent read.
+    assert any(t["name"] == "Read doc.md" for t in fig["data"])
+    assert ctx["subagent_runs_hidden"] == {"count": 0, "cost": 0.0}
+
+
+def test_tokenscape_parallel_subagents_split_by_parent_chain():
+    """Interleaved sidechain threads split per Task via parent chains —
+    a timestamp sweep would lump them into one run."""
+    from introspect.api.handlers.tokenscape import (  # noqa: PLC0415
+        build_tokenscape_context,
+    )
+    from introspect.db import get_connection  # noqa: PLC0415
+    from introspect.pricing import compute_cost_usd  # noqa: PLC0415
+
+    sid = "deadbeef-0000-0000-0000-tokenscape08"
+    model = "claude-sonnet-4-6"
+
+    def sc_usage(cc: int, out: int) -> dict:
+        return {
+            "input_tokens": 4,
+            "output_tokens": out,
+            "cache_read_input_tokens": 0,
+            "cache_creation_input_tokens": cc,
+        }
+
+    lines = [
+        make_user_message(
+            sid,
+            "u1",
+            None,
+            "2026-04-21T10:00:00.000Z",
+            "scan everything",
+            tool_use_result={"content": "seed"},
+        ),
+        make_assistant_message(
+            sid,
+            "a1",
+            "u1",
+            "2026-04-21T10:00:01.000Z",
+            [
+                {
+                    "type": "tool_use",
+                    "id": "toolu_taskA",
+                    "name": "Task",
+                    "input": {
+                        "description": "scan docs",
+                        "prompt": "analyze the docs",
+                        "subagent_type": "explore",
+                    },
+                },
+                {
+                    "type": "tool_use",
+                    "id": "toolu_taskB",
+                    "name": "Task",
+                    "input": {
+                        "description": "scan code",
+                        "prompt": "analyze the code",
+                        "subagent_type": "explore",
+                    },
+                },
+            ],
+            model=model,
+            msg_id="msg-par-1",
+            usage={
+                "input_tokens": 4,
+                "output_tokens": 100,
+                "cache_read_input_tokens": 0,
+                "cache_creation_input_tokens": 10_000,
+            },
+        ),
+        # Two sidechain threads with interleaved timestamps but disjoint
+        # parent chains and distinct root prompts.
+        make_user_message(
+            sid,
+            "t1-u1",
+            None,
+            "2026-04-21T10:00:02.000Z",
+            "analyze the docs",
+            is_sidechain=True,
+        ),
+        make_user_message(
+            sid,
+            "t2-u1",
+            None,
+            "2026-04-21T10:00:02.500Z",
+            "analyze the code",
+            is_sidechain=True,
+        ),
+        make_assistant_message(
+            sid,
+            "t1-a1",
+            "t1-u1",
+            "2026-04-21T10:00:03.000Z",
+            [{"type": "text", "text": "docs done"}],
+            model=model,
+            msg_id="msg-par-t1",
+            usage=sc_usage(50_000, 1_000),
+            is_sidechain=True,
+        ),
+        make_assistant_message(
+            sid,
+            "t2-a1",
+            "t2-u1",
+            "2026-04-21T10:00:03.500Z",
+            [{"type": "text", "text": "code done"}],
+            model=model,
+            msg_id="msg-par-t2",
+            usage=sc_usage(40_000, 800),
+            is_sidechain=True,
+        ),
+        make_user_message(
+            sid,
+            "u2",
+            "a1",
+            "2026-04-21T10:00:06.000Z",
+            [
+                {
+                    "type": "tool_result",
+                    "tool_use_id": "toolu_taskA",
+                    "content": "docs done",
+                },
+                {
+                    "type": "tool_result",
+                    "tool_use_id": "toolu_taskB",
+                    "content": "code done",
+                },
+            ],
+        ),
+        make_assistant_message(
+            sid,
+            "a2",
+            "u2",
+            "2026-04-21T10:00:07.000Z",
+            [{"type": "text", "text": "all done"}],
+            model=model,
+            msg_id="msg-par-2",
+            usage={
+                "input_tokens": 4,
+                "output_tokens": 50,
+                "cache_read_input_tokens": 10_000,
+                "cache_creation_input_tokens": 500,
+            },
+        ),
+    ]
+    with tempfile.TemporaryDirectory() as tmp_str:
+        tmp = Path(tmp_str)
+        write_jsonl(tmp, sid, lines)
+        db = get_connection(tmp / "t.duckdb", glob_pattern(tmp))
+        ctx = build_tokenscape_context(db, sid)
+
+    runs = ctx["subagent_runs"]
+    assert len(runs) == 2
+    by_label = {r["label"]: r for r in runs}
+    expected_docs = compute_cost_usd(
+        model=model, input_tokens=4, output_tokens=1_000, cache_creation_5m=50_000
+    )
+    expected_code = compute_cost_usd(
+        model=model, input_tokens=4, output_tokens=800, cache_creation_5m=40_000
+    )
+    assert by_label["agent: scan docs"]["cost"] == pytest.approx(
+        expected_docs, rel=1e-6
+    )
+    assert by_label["agent: scan code"]["cost"] == pytest.approx(
+        expected_code, rel=1e-6
+    )
+
+
+def test_tokenscape_subagent_prompt_classified_as_prompt():
+    """A sub-session's root prompt counts as a prompt, not residual."""
+    from introspect.api.handlers.tokenscape import _classify_block  # noqa: PLC0415
+
+    assert _classify_block(
+        "subagent_prompt", None, None, "analyze the docs", set()
+    ) == ("prompt", "prompt")
+
+
+def test_tokenscape_subagent_selection_caps_charts():
+    """At most 8 charts, cost-descending, sub-$0.10 runs folded away."""
+    from introspect.api.handlers.tokenscape import (  # noqa: PLC0415
+        _select_subagent_runs,
+    )
+
+    costs = [5.0, 0.05, 3.0, 0.5, 0.2, 1.0, 0.01, 2.0, 0.8, 0.3, 0.15, 4.0]
+    runs = [{"label": f"agent: r{i}", "cost": c} for i, c in enumerate(costs)]
+    shown, hidden = _select_subagent_runs(runs)
+
+    assert len(shown) == 8
+    shown_costs = [r["cost"] for r in shown]
+    assert shown_costs == sorted(shown_costs, reverse=True)
+    assert shown_costs == [5.0, 4.0, 3.0, 2.0, 1.0, 0.8, 0.5, 0.3]
+    assert hidden["count"] == 4
+    assert hidden["cost"] == pytest.approx(0.2 + 0.15 + 0.05 + 0.01)
+
+
+def test_tokenscape_orphan_sidechain_yields_no_runs():
+    """A lone sidechain prompt with no usage (parent on the main chain)
+    produces no drill-down runs and the tab still renders."""
+    from introspect.api.handlers.tokenscape import (  # noqa: PLC0415
+        build_tokenscape_context,
+    )
+    from introspect.db import get_connection  # noqa: PLC0415
+
+    with tempfile.TemporaryDirectory() as tmp_str:
+        tmp = Path(tmp_str)
+        _write_sample_jsonl(tmp)
+        db = get_connection(tmp / "t.duckdb", glob_pattern(tmp))
+        ctx = build_tokenscape_context(db, SID)
+    assert ctx["subagent_runs"] == []
+    assert ctx["subagent_runs_hidden"] == {"count": 0, "cost": 0.0}
+
+    with tempfile.TemporaryDirectory() as tmp, _patched_client(Path(tmp)) as client:
+        response = client.get(f"/sessions/{SID}?tab=tokenscape")
+        assert response.status_code == 200
+
+
+def test_session_tokenscape_tab_renders_subagent_section():
+    """Tokenscape tab embeds one drill-down chart per shown subagent run."""
+    sub_sid = "deadbeef-0000-0000-0000-tokenscape09"
+    with tempfile.TemporaryDirectory() as tmp_str:
+        tmp = Path(tmp_str)
+        _tokenscape_subagent_session_jsonl(tmp, sub_sid)
+        with _patched_client(tmp) as client:
+            response = client.get(f"/sessions/{sub_sid}?tab=tokenscape")
+            assert response.status_code == 200
+            assert 'id="subagent-tokenscape-1-data"' in response.text
+            assert "agent: scan docs" in response.text
+
+
 def test_tokenscape_unknown_model_bills_zero_without_crashing():
     """Unpriced (unknown-model) sessions produce a $0 bill and a 0% cache-read
     share instead of dividing by a zero total."""

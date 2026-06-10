@@ -49,6 +49,27 @@
     </p>
 </div>
 
+{% if tokenscape_ctx.subagent_runs %}
+<h2>Subagents — what each agent read</h2>
+{% for run in tokenscape_ctx.subagent_runs %}
+<div class="card">
+    <h2>{{ run.label }} · ${{ "%.2f"|format(run.cost) }} · {{ run.turn_count }} turns</h2>
+    <div id="subagent-tokenscape-{{ loop.index }}-chart"
+         class="cost-chart"
+         data-figure-id="subagent-tokenscape-{{ loop.index }}-data"
+         data-modebar="hover"
+         data-height="260"
+         style="width:100%;min-height:260px;"></div>
+    <script type="application/json" id="subagent-tokenscape-{{ loop.index }}-data">{{ run.figure_json|safe }}</script>
+</div>
+{% endfor %}
+{% if tokenscape_ctx.subagent_runs_hidden.count %}
+<p style="color:#888;margin:0.4rem 0 0;font-size:0.85rem;">
+    + {{ tokenscape_ctx.subagent_runs_hidden.count }} smaller runs · ${{ "%.2f"|format(tokenscape_ctx.subagent_runs_hidden.cost) }} combined
+</p>
+{% endif %}
+{% endif %}
+
 <h2>Cost by category</h2>
 <div class="card">
     <table>

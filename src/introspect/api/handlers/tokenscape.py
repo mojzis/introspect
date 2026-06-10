@@ -142,7 +142,7 @@ def _classify_block(  # noqa: PLR0911
     from ``output_tokens`` of the producing turn, not from char counts.
     """
     text = head or ""
-    if kind in ("human_prompt", "slash_command"):
+    if kind in ("human_prompt", "slash_command", "subagent_prompt"):
         if text.startswith(_SKILL_TEXT_PREFIX):
             # First line names the skill dir — label by its basename.
             first_line = text.split("\n", 1)[0]
@@ -262,6 +262,178 @@ def _fetch_rows(db: duckdb.DuckDBPyConnection, session_id: str) -> list[tuple]:
         """,
         [session_id, session_id],
     ).fetchall()
+
+
+def _fetch_sidechain_rows(
+    db: duckdb.DuckDBPyConnection, session_id: str
+) -> list[tuple]:
+    """Sidechain (subagent) content blocks + usage, in order.
+
+    Same 14 columns as ``_fetch_rows`` plus a trailing ``parent_uuid``
+    so rows can be grouped into per-invocation threads.
+    """
+    return db.execute(
+        """
+        WITH result_meta AS (
+            -- tool_result rows don't expose the result payload in the
+            -- enriched view; pull tool_use_id and content size from
+            -- raw_messages in one pass.
+            SELECT
+                rm.uuid AS user_uuid,
+                e.block_idx AS block_idx,
+                json_extract_string(
+                    rm.message, '$.content[' || e.block_idx || '].tool_use_id'
+                ) AS result_tool_use_id,
+                LENGTH(COALESCE(
+                    json_extract_string(
+                        rm.message, '$.content[' || e.block_idx || '].content'
+                    ),
+                    ''
+                )) AS result_char_count
+            FROM session_messages_enriched e
+            JOIN raw_messages rm ON rm.uuid = e.uuid
+            WHERE e.session_id = ? AND e.kind = 'tool_result'
+        )
+        SELECT
+            e.uuid,
+            e.timestamp,
+            e.kind,
+            COALESCE(e.tool_name, tc.tool_name) AS tool_name,
+            COALESCE(e.tool_input, tc.tool_input) AS tool_input,
+            CASE
+                WHEN e.kind = 'tool_result' THEN COALESCE(rmeta.result_char_count, 0)
+                ELSE LENGTH(COALESCE(e.text, ''))
+            END AS char_count,
+            LEFT(COALESCE(e.text, ''), 120) AS head,
+            amc.input_tokens,
+            amc.cache_read_tokens,
+            amc.cache_creation_tokens,
+            amc.cache_creation_5m,
+            amc.cache_creation_1h,
+            amc.output_tokens,
+            amc.model,
+            e.parent_uuid
+        FROM session_messages_enriched e
+        LEFT JOIN result_meta rmeta
+          ON rmeta.user_uuid = e.uuid AND rmeta.block_idx = e.block_idx
+        LEFT JOIN tool_calls tc ON tc.tool_use_id = rmeta.result_tool_use_id
+        LEFT JOIN assistant_message_costs amc ON amc.uuid = e.uuid
+        WHERE e.session_id = ? AND e.is_sidechain
+        ORDER BY e.timestamp ASC, e.block_idx ASC
+        """,
+        [session_id, session_id],
+    ).fetchall()
+
+
+def _fetch_subagent_prompts(
+    db: duckdb.DuckDBPyConnection, session_id: str
+) -> dict[str, str]:
+    """Full prompt text per sidechain root prompt message, keyed by uuid.
+
+    Sidechain roots carry the Task call's ``prompt`` input verbatim —
+    the full text (not the 120-char head) is needed for Task linkage.
+    """
+    rows = db.execute(
+        """
+        SELECT uuid, text
+        FROM session_messages_enriched
+        WHERE session_id = ? AND is_sidechain AND kind = 'subagent_prompt'
+        """,
+        [session_id],
+    ).fetchall()
+    return {r[0]: r[1] for r in rows if r[0] is not None and r[1] is not None}
+
+
+def _group_sidechain_rows(rows: list[tuple]) -> list[list[tuple]]:
+    """Split sidechain rows into per-invocation threads via parent chains.
+
+    A thread roots wherever the parent leaves the sidechain row set
+    (real roots have ``parent_uuid IS NULL``; degenerate data may point
+    at a main-chain uuid). Groups are ordered by first timestamp (rows
+    arrive timestamp-ordered) and preserve row order within each group.
+    """
+    parents: dict[str, str | None] = {}
+    for row in rows:
+        uuid, parent = row[0], row[14]
+        if uuid is not None and uuid not in parents:
+            parents[uuid] = parent
+
+    roots: dict[str, str] = {}
+
+    def root_of(uuid: str) -> str:
+        path: list[str] = []
+        seen: set[str] = set()
+        current = uuid
+        while current not in roots:
+            path.append(current)
+            seen.add(current)
+            parent = parents.get(current)
+            if parent is None or parent not in parents or parent in seen:
+                break
+            current = parent
+        root = roots.get(current, current)
+        for u in path:
+            roots[u] = root
+        return root
+
+    groups: dict[str, list[tuple]] = {}
+    for row in rows:
+        if row[0] is None:
+            continue
+        groups.setdefault(root_of(row[0]), []).append(row)
+    return list(groups.values())
+
+
+def _label_subagent_groups(
+    db: duckdb.DuckDBPyConnection,
+    session_id: str,
+    groups: list[list[tuple]],
+    prompts: dict[str, str],
+) -> list[str]:
+    """One ``agent: <description>`` label per group (session-stripe format).
+
+    Primary linkage: the group's root prompt text equals a Task/Agent
+    call's ``prompt`` input verbatim (each call consumed once). Leftover
+    groups pair with leftover calls in timestamp order; anything still
+    unmatched falls back to ``agent: run``.
+    """
+    calls = db.execute(
+        """
+        SELECT called_at,
+               json_extract_string(tool_input, '$.description'),
+               json_extract_string(tool_input, '$.subagent_type'),
+               json_extract_string(tool_input, '$.prompt')
+        FROM tool_calls
+        WHERE session_id = ? AND tool_name IN ('Task', 'Agent')
+        ORDER BY called_at
+        """,
+        [session_id],
+    ).fetchall()
+
+    def fmt(descr: str | None, stype: str | None) -> str:
+        return f"agent: {(descr or stype or 'run')[:40]}"
+
+    labels: list[str | None] = [None] * len(groups)
+    used = [False] * len(calls)
+    for gi, group in enumerate(groups):
+        root_text = next((prompts[r[0]] for r in group if r[0] in prompts), None)
+        if root_text is None:
+            continue
+        for ci, (_called_at, descr, stype, prompt) in enumerate(calls):
+            if not used[ci] and prompt == root_text:
+                used[ci] = True
+                labels[gi] = fmt(descr, stype)
+                break
+
+    leftover = (c for ci, c in enumerate(calls) if not used[ci])
+    resolved: list[str] = []
+    for label in labels:
+        if label is not None:
+            resolved.append(label)
+            continue
+        call = next(leftover, None)
+        resolved.append(fmt(call[1], call[2]) if call is not None else "agent: run")
+    return resolved
 
 
 def _fetch_edited_files(db: duckdb.DuckDBPyConnection, session_id: str) -> set[str]:
@@ -770,6 +942,29 @@ def _render_figure(  # noqa: PLR0912, PLR0915
 # bill get their own stripe; the rest folds into "everything else".
 _STRIPE_MIN_SHARE = 1 / 20
 
+# Per-subagent drill-down: at most this many charts, and only for runs
+# that cost at least this much — the rest folds into a one-line note.
+_SUBAGENT_CHARTS_MAX = 8
+_SUBAGENT_CHART_MIN_COST = 0.10
+
+
+def _select_subagent_runs(run_ctxs: list[dict]) -> tuple[list[dict], dict]:
+    """Top runs worth a chart (≤ 8, ≥ $0.10), rest folded into a note."""
+    ordered = sorted(run_ctxs, key=lambda r: r["cost"], reverse=True)
+    shown: list[dict] = []
+    hidden_count = 0
+    hidden_cost = 0.0
+    for run in ordered:
+        if (
+            len(shown) < _SUBAGENT_CHARTS_MAX
+            and run["cost"] >= _SUBAGENT_CHART_MIN_COST
+        ):
+            shown.append(run)
+        else:
+            hidden_count += 1
+            hidden_cost += run["cost"]
+    return shown, {"count": hidden_count, "cost": hidden_cost}
+
 
 def _bill_split(
     turns: list[_Turn], generation_costs: list[float], agent_costs: list[float]
@@ -1039,16 +1234,71 @@ def _render_stripes_figure(stripes: list[dict], turns: list[_Turn]) -> str:
     return fig.to_json()
 
 
+def _build_subagent_run_context(
+    group_rows: list[tuple], label: str, edited_files: set[str]
+) -> dict | None:
+    """Stripes-chart context for one subagent invocation.
+
+    Returns ``None`` when the thread has no priced assistant turns
+    (orphan/degenerate sidechains — e.g. a lone prompt with no usage).
+    """
+    bands, turns = _walk_rows([r[:14] for r in group_rows], edited_files)
+    if not turns:
+        return None
+    generation_costs = _allocate_costs(bands, turns)
+    cost = sum(b.cost for b in bands) + sum(generation_costs)
+    # The 1/20 stripe threshold zooms to this run's own total.
+    stripes = _build_stripes(bands, turns, generation_costs, [0.0] * len(turns), [])
+    return {
+        "label": label,
+        "cost": cost,
+        "turn_count": len(turns),
+        "figure_json": _render_stripes_figure(stripes, turns),
+    }
+
+
+def _build_subagent_runs(
+    db: duckdb.DuckDBPyConnection, session_id: str, edited_files: set[str]
+) -> tuple[list[dict], dict]:
+    """Per-invocation drill-down charts: fetch → group → label → build → select.
+
+    Degrades to an empty section on any failure — the route-level
+    except would otherwise blank the whole tab.
+    """
+    empty: tuple[list[dict], dict] = [], {"count": 0, "cost": 0.0}
+    try:
+        sidechain_rows = _fetch_sidechain_rows(db, session_id)
+        if not sidechain_rows:
+            return empty
+        groups = _group_sidechain_rows(sidechain_rows)
+        prompts = _fetch_subagent_prompts(db, session_id)
+        labels = _label_subagent_groups(db, session_id, groups, prompts)
+        run_ctxs = []
+        for group, label in zip(groups, labels, strict=True):
+            run_ctx = _build_subagent_run_context(group, label, edited_files)
+            if run_ctx is not None:
+                run_ctxs.append(run_ctx)
+        return _select_subagent_runs(run_ctxs)
+    except Exception:
+        logger.exception("Failed to build subagent drill-down for %s", session_id)
+        return empty
+
+
 def build_tokenscape_context(db: duckdb.DuckDBPyConnection, session_id: str) -> dict:
     """Everything the Tokenscape tab needs: figure + the tables under it."""
+    no_data = {
+        "has_data": False,
+        "subagent_runs": [],
+        "subagent_runs_hidden": {"count": 0, "cost": 0.0},
+    }
     edited_files = _fetch_edited_files(db, session_id)
     rows = _fetch_rows(db, session_id)
     if not rows:
-        return {"has_data": False}
+        return no_data
 
     bands, turns = _walk_rows(rows, edited_files)
     if not turns:
-        return {"has_data": False}
+        return no_data
 
     generation_costs = _allocate_costs(bands, turns)
     agent_costs, agent_runs = _sidechain_costs_per_turn(db, session_id, turns)
@@ -1058,6 +1308,9 @@ def build_tokenscape_context(db: duckdb.DuckDBPyConnection, session_id: str) -> 
     stripes = _build_stripes(bands, turns, generation_costs, agent_costs, agent_runs)
     figure_json_stripes = _render_stripes_figure(stripes, turns)
     bill_split = _bill_split(turns, generation_costs, agent_costs)
+    subagent_runs, subagent_runs_hidden = _build_subagent_runs(
+        db, session_id, edited_files
+    )
 
     category_cost: dict[str, float] = dict.fromkeys(_CATEGORY_ORDER, 0.0)
     for band in bands:
@@ -1109,4 +1362,6 @@ def build_tokenscape_context(db: duckdb.DuckDBPyConnection, session_id: str) -> 
         "category_totals": category_totals,
         "top_bands": top_bands,
         "swatches": swatches,
+        "subagent_runs": subagent_runs,
+        "subagent_runs_hidden": subagent_runs_hidden,
     }
