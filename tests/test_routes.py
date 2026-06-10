@@ -2070,8 +2070,8 @@ def test_tokenscape_cost_ties_out_to_bill():
 def test_tokenscape_walk_attributes_context_deltas():
     """Assistant share = prev output_tokens; remainder goes to user blocks."""
     from introspect.api.handlers.tokenscape import (  # noqa: PLC0415
+        _fetch_chain_rows,
         _fetch_edited_files,
-        _fetch_rows,
         _walk_rows,
     )
     from introspect.db import get_connection  # noqa: PLC0415
@@ -2081,7 +2081,9 @@ def test_tokenscape_walk_attributes_context_deltas():
         tmp = Path(tmp_str)
         _tokenscape_session_jsonl(tmp, sid)
         db = get_connection(tmp / "t.duckdb", glob_pattern(tmp))
-        bands, turns = _walk_rows(_fetch_rows(db, sid), _fetch_edited_files(db, sid))
+        bands, turns = _walk_rows(
+            _fetch_chain_rows(db, sid, sidechain=False), _fetch_edited_files(db, sid)
+        )
 
     assert len(turns) == 3
     # Turn 2 delta = (4 + 10000 + 2100) - (4 + 0 + 10000) = 2100 tokens:
@@ -2100,8 +2102,8 @@ def test_tokenscape_walk_attributes_context_deltas():
 def test_tokenscape_compact_closes_bands():
     """A huge context drop closes all bands and opens a summary baseline."""
     from introspect.api.handlers.tokenscape import (  # noqa: PLC0415
+        _fetch_chain_rows,
         _fetch_edited_files,
-        _fetch_rows,
         _walk_rows,
     )
     from introspect.db import get_connection  # noqa: PLC0415
@@ -2162,7 +2164,9 @@ def test_tokenscape_compact_closes_bands():
         tmp = Path(tmp_str)
         write_jsonl(tmp, sid, lines)
         db = get_connection(tmp / "t.duckdb", glob_pattern(tmp))
-        bands, turns = _walk_rows(_fetch_rows(db, sid), _fetch_edited_files(db, sid))
+        bands, turns = _walk_rows(
+            _fetch_chain_rows(db, sid, sidechain=False), _fetch_edited_files(db, sid)
+        )
 
     assert [t.event for t in turns] == [None, None, "compact"]
     pre_compact = [b for b in bands if b.arrival < 2]

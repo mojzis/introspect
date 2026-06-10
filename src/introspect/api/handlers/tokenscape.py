@@ -210,70 +210,19 @@ class _Turn:
     event: str | None  # "compact" | "ttl_break" | None
 
 
-def _fetch_rows(db: duckdb.DuckDBPyConnection, session_id: str) -> list[tuple]:
-    """Main-chain content blocks + per-assistant-message usage, in order."""
-    return db.execute(
-        """
-        WITH result_meta AS (
-            -- tool_result rows don't expose the result payload in the
-            -- enriched view; pull tool_use_id and content size from
-            -- raw_messages in one pass.
-            SELECT
-                rm.uuid AS user_uuid,
-                e.block_idx AS block_idx,
-                json_extract_string(
-                    rm.message, '$.content[' || e.block_idx || '].tool_use_id'
-                ) AS result_tool_use_id,
-                LENGTH(COALESCE(
-                    json_extract_string(
-                        rm.message, '$.content[' || e.block_idx || '].content'
-                    ),
-                    ''
-                )) AS result_char_count
-            FROM session_messages_enriched e
-            JOIN raw_messages rm ON rm.uuid = e.uuid
-            WHERE e.session_id = ? AND e.kind = 'tool_result'
-        )
-        SELECT
-            e.uuid,
-            e.timestamp,
-            e.kind,
-            COALESCE(e.tool_name, tc.tool_name) AS tool_name,
-            COALESCE(e.tool_input, tc.tool_input) AS tool_input,
-            CASE
-                WHEN e.kind = 'tool_result' THEN COALESCE(rmeta.result_char_count, 0)
-                ELSE LENGTH(COALESCE(e.text, ''))
-            END AS char_count,
-            LEFT(COALESCE(e.text, ''), 120) AS head,
-            amc.input_tokens,
-            amc.cache_read_tokens,
-            amc.cache_creation_tokens,
-            amc.cache_creation_5m,
-            amc.cache_creation_1h,
-            amc.output_tokens,
-            amc.model
-        FROM session_messages_enriched e
-        LEFT JOIN result_meta rmeta
-          ON rmeta.user_uuid = e.uuid AND rmeta.block_idx = e.block_idx
-        LEFT JOIN tool_calls tc ON tc.tool_use_id = rmeta.result_tool_use_id
-        LEFT JOIN assistant_message_costs amc ON amc.uuid = e.uuid
-        WHERE e.session_id = ? AND NOT e.is_sidechain
-        ORDER BY e.timestamp ASC, e.block_idx ASC
-        """,
-        [session_id, session_id],
-    ).fetchall()
-
-
-def _fetch_sidechain_rows(
-    db: duckdb.DuckDBPyConnection, session_id: str
+def _fetch_chain_rows(
+    db: duckdb.DuckDBPyConnection, session_id: str, *, sidechain: bool
 ) -> list[tuple]:
-    """Sidechain (subagent) content blocks + usage, in order.
+    """Content blocks + per-assistant-message usage for one chain, in order.
 
-    Same 14 columns as ``_fetch_rows`` plus a trailing ``parent_uuid``
-    so rows can be grouped into per-invocation threads.
+    ``sidechain=False`` selects the main chain, ``True`` the subagent
+    threads. 15 columns: the 14 usage fields ``_walk_rows`` consumes
+    plus a trailing ``parent_uuid`` (used to group sidechain rows into
+    per-invocation threads; the main-chain path ignores it).
     """
+    chain_predicate = "e.is_sidechain" if sidechain else "NOT e.is_sidechain"
     return db.execute(
-        """
+        f"""
         WITH result_meta AS (
             -- tool_result rows don't expose the result payload in the
             -- enriched view; pull tool_use_id and content size from
@@ -318,9 +267,9 @@ def _fetch_sidechain_rows(
           ON rmeta.user_uuid = e.uuid AND rmeta.block_idx = e.block_idx
         LEFT JOIN tool_calls tc ON tc.tool_use_id = rmeta.result_tool_use_id
         LEFT JOIN assistant_message_costs amc ON amc.uuid = e.uuid
-        WHERE e.session_id = ? AND e.is_sidechain
+        WHERE e.session_id = ? AND {chain_predicate}
         ORDER BY e.timestamp ASC, e.block_idx ASC
-        """,
+        """,  # noqa: S608 — chain_predicate is a literal, not user input
         [session_id, session_id],
     ).fetchall()
 
@@ -384,6 +333,29 @@ def _group_sidechain_rows(rows: list[tuple]) -> list[list[tuple]]:
     return list(groups.values())
 
 
+def _agent_label(descr: str | None, stype: str | None) -> str:
+    """Label for one Task/Agent invocation — shared by the session
+    stripes and the per-run drill-down so the two never desync."""
+    return f"agent: {(descr or stype or 'run')[:40]}"
+
+
+def _fetch_agent_calls(db: duckdb.DuckDBPyConnection, session_id: str) -> list[tuple]:
+    """Task/Agent invocations in call order:
+    ``(called_at, description, subagent_type, prompt)``."""
+    return db.execute(
+        """
+        SELECT called_at,
+               json_extract_string(tool_input, '$.description'),
+               json_extract_string(tool_input, '$.subagent_type'),
+               json_extract_string(tool_input, '$.prompt')
+        FROM tool_calls
+        WHERE session_id = ? AND tool_name IN ('Task', 'Agent')
+        ORDER BY called_at
+        """,
+        [session_id],
+    ).fetchall()
+
+
 def _label_subagent_groups(
     db: duckdb.DuckDBPyConnection,
     session_id: str,
@@ -397,21 +369,7 @@ def _label_subagent_groups(
     groups pair with leftover calls in timestamp order; anything still
     unmatched falls back to ``agent: run``.
     """
-    calls = db.execute(
-        """
-        SELECT called_at,
-               json_extract_string(tool_input, '$.description'),
-               json_extract_string(tool_input, '$.subagent_type'),
-               json_extract_string(tool_input, '$.prompt')
-        FROM tool_calls
-        WHERE session_id = ? AND tool_name IN ('Task', 'Agent')
-        ORDER BY called_at
-        """,
-        [session_id],
-    ).fetchall()
-
-    def fmt(descr: str | None, stype: str | None) -> str:
-        return f"agent: {(descr or stype or 'run')[:40]}"
+    calls = _fetch_agent_calls(db, session_id)
 
     labels: list[str | None] = [None] * len(groups)
     used = [False] * len(calls)
@@ -422,7 +380,7 @@ def _label_subagent_groups(
         for ci, (_called_at, descr, stype, prompt) in enumerate(calls):
             if not used[ci] and prompt == root_text:
                 used[ci] = True
-                labels[gi] = fmt(descr, stype)
+                labels[gi] = _agent_label(descr, stype)
                 break
 
     leftover = (c for ci, c in enumerate(calls) if not used[ci])
@@ -432,7 +390,11 @@ def _label_subagent_groups(
             resolved.append(label)
             continue
         call = next(leftover, None)
-        resolved.append(fmt(call[1], call[2]) if call is not None else "agent: run")
+        if call is None:
+            resolved.append("agent: run")
+        else:
+            _called_at, descr, stype, _prompt = call
+            resolved.append(_agent_label(descr, stype))
     return resolved
 
 
@@ -481,20 +443,10 @@ def _sidechain_costs_per_turn(
     if not rows or not turns:
         return per_turn, []
 
-    timeline = db.execute(
-        """
-        SELECT called_at,
-               json_extract_string(tool_input, '$.description'),
-               json_extract_string(tool_input, '$.subagent_type')
-        FROM tool_calls
-        WHERE session_id = ? AND tool_name IN ('Task', 'Agent')
-        ORDER BY called_at
-        """,
-        [session_id],
-    ).fetchall()
+    timeline = _fetch_agent_calls(db, session_id)
     runs = [
-        _AgentRun(label=f"agent: {(descr or stype or 'run')[:40]}")
-        for _called_at, descr, stype in timeline
+        _AgentRun(label=_agent_label(descr, stype))
+        for _called_at, descr, stype, _prompt in timeline
     ]
     fallback_run = _AgentRun(label="agent: run")
 
@@ -586,6 +538,7 @@ def _walk_rows(  # noqa: PLR0912
         cc_1h,
         out,
         model,
+        *_,  # parent_uuid (grouping only) and any future trailing columns
     ) in rows:
         classified = _classify_block(kind, tool_name, tool_input, head, edited_files)
         if classified is not None and (char_count or 0) > 0:
@@ -1237,12 +1190,15 @@ def _render_stripes_figure(stripes: list[dict], turns: list[_Turn]) -> str:
 def _build_subagent_run_context(
     group_rows: list[tuple], label: str, edited_files: set[str]
 ) -> dict | None:
-    """Stripes-chart context for one subagent invocation.
+    """Stripes data for one subagent invocation (figure rendered later).
 
-    Returns ``None`` when the thread has no priced assistant turns
-    (orphan/degenerate sidechains — e.g. a lone prompt with no usage).
+    The Plotly figure is deliberately not built here: runs folded into
+    the hidden note never need one, so rendering waits until after
+    ``_select_subagent_runs``. Returns ``None`` when the thread has no
+    priced assistant turns (orphan/degenerate sidechains — e.g. a lone
+    prompt with no usage).
     """
-    bands, turns = _walk_rows([r[:14] for r in group_rows], edited_files)
+    bands, turns = _walk_rows(group_rows, edited_files)
     if not turns:
         return None
     generation_costs = _allocate_costs(bands, turns)
@@ -1253,7 +1209,8 @@ def _build_subagent_run_context(
         "label": label,
         "cost": cost,
         "turn_count": len(turns),
-        "figure_json": _render_stripes_figure(stripes, turns),
+        "stripes": stripes,
+        "turns": turns,
     }
 
 
@@ -1267,7 +1224,7 @@ def _build_subagent_runs(
     """
     empty: tuple[list[dict], dict] = [], {"count": 0, "cost": 0.0}
     try:
-        sidechain_rows = _fetch_sidechain_rows(db, session_id)
+        sidechain_rows = _fetch_chain_rows(db, session_id, sidechain=True)
         if not sidechain_rows:
             return empty
         groups = _group_sidechain_rows(sidechain_rows)
@@ -1278,10 +1235,15 @@ def _build_subagent_runs(
             run_ctx = _build_subagent_run_context(group, label, edited_files)
             if run_ctx is not None:
                 run_ctxs.append(run_ctx)
-        return _select_subagent_runs(run_ctxs)
+        shown, hidden = _select_subagent_runs(run_ctxs)
+        for run in shown:
+            run["figure_json"] = _render_stripes_figure(
+                run.pop("stripes"), run.pop("turns")
+            )
     except Exception:
         logger.exception("Failed to build subagent drill-down for %s", session_id)
         return empty
+    return shown, hidden
 
 
 def build_tokenscape_context(db: duckdb.DuckDBPyConnection, session_id: str) -> dict:
@@ -1292,7 +1254,7 @@ def build_tokenscape_context(db: duckdb.DuckDBPyConnection, session_id: str) -> 
         "subagent_runs_hidden": {"count": 0, "cost": 0.0},
     }
     edited_files = _fetch_edited_files(db, session_id)
-    rows = _fetch_rows(db, session_id)
+    rows = _fetch_chain_rows(db, session_id, sidechain=False)
     if not rows:
         return no_data
 
