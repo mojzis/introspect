@@ -25,6 +25,7 @@ Explore Claude Code conversation logs via CLI, web UI, MCP server.
 
 ## Commands
 
+- `uv run introspect query "SELECT ..."` — ad-hoc SQL against the views (use this to study real data; `introspect views` lists them)
 - `uv run poe check` — run lint, typecheck, vulns, then tests
 - `uv run poe fix` — auto-format and fix lint issues
 - `uv run poe test` — run tests only
