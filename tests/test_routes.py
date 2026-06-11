@@ -4653,6 +4653,7 @@ def _session_with_cache(
     session_id: str,
     *,
     input_tokens: int = 0,
+    output_tokens: int = 0,
     cache_read_tokens: int = 0,
     cache_creation_5m: int = 0,
     cache_creation_1h: int = 0,
@@ -4663,6 +4664,7 @@ def _session_with_cache(
     """Build a minimal two-message JSONL with explicit cache token counts.
 
     Usage keys follow the assistant message schema:
+    - ``output_tokens`` -> ``output_tokens`` in the view
     - ``cache_read_input_tokens`` -> ``cache_read_tokens`` in the view
     - ``cache_creation.ephemeral_5m_input_tokens`` -> ``cache_creation_5m``
     - ``cache_creation.ephemeral_1h_input_tokens`` -> ``cache_creation_1h``
@@ -4670,7 +4672,7 @@ def _session_with_cache(
     ts = f"{timestamp_day}T{timestamp_hour}:{timestamp_minute}:01.000Z"
     usage: dict = {
         "input_tokens": input_tokens,
-        "output_tokens": 0,
+        "output_tokens": output_tokens,
         "cache_read_input_tokens": cache_read_tokens,
         "cache_creation_input_tokens": cache_creation_5m + cache_creation_1h,
         "cache_creation": {
@@ -4701,11 +4703,11 @@ def _session_with_cache(
 
 
 def test_spend_shape_rw_bar_read_write_dollars():
-    """Direct helper test: known cache R/W tokens yield correct R/W dollars.
+    """Direct helper test: known cache R/W + output tokens yield correct split dollars.
 
-    claude-opus-4-7 cache read = $0.50/M, cache write 5m = $6.25/M.
-    2M read tokens => $1.00 read; 1M 5m-write tokens => $6.25 write.
-    write_frac = 6.25 / 7.25 ≈ 0.862.
+    claude-opus-4-7: cache read=$0.50/M, cache write 5m=$6.25/M, output=$25/M.
+    2M read => $1.00; 1M 5m-write => $6.25; 200k output => $5.00.
+    Total = $12.25; px segments must sum to 64.
     """
     from introspect.api.handlers.cost_overview import (  # noqa: PLC0415
         _attach_spend_shapes,
@@ -4720,6 +4722,7 @@ def test_spend_shape_rw_bar_read_write_dollars():
                 sid,
                 cache_read_tokens=2_000_000,
                 cache_creation_5m=1_000_000,
+                output_tokens=200_000,
             ),
         )
     ]
@@ -4735,11 +4738,12 @@ def test_spend_shape_rw_bar_read_write_dollars():
         rows = _materialize_and_run(tmp, _run)
 
     assert len(rows) == 1
-    rw = rows[0]["rw"]
-    assert rw is not None, "Expected R/W shape for cache session"
-    assert rw["read_usd"] == pytest.approx(1.00, rel=1e-3)
-    assert rw["write_usd"] == pytest.approx(6.25, rel=1e-3)
-    assert rw["write_frac"] == pytest.approx(6.25 / 7.25, rel=1e-3)
+    split = rows[0]["split"]
+    assert split is not None, "Expected cost-split shape for session with cache+output"
+    assert split["read_usd"] == pytest.approx(1.00, rel=1e-3)
+    assert split["write_usd"] == pytest.approx(6.25, rel=1e-3)
+    assert split["output_usd"] == pytest.approx(5.00, rel=1e-3)
+    assert split["read_px"] + split["write_px"] + split["output_px"] == 64
 
 
 def test_spend_shape_sparkline_geometry():
@@ -4874,7 +4878,11 @@ def test_spend_shape_sparkline_geometry():
 
 
 def test_spend_shape_degenerate_cases():
-    """Degenerate: single-message session => spark dot; zero-cache => rw is None."""
+    """Degenerate: single-message session => spark dot; zero-cache => split is None.
+
+    Also verifies that an output-only session (no cache) renders a full-width
+    output segment (output_px == 64).
+    """
     from introspect.api.handlers.cost_overview import (  # noqa: PLC0415
         _attach_spend_shapes,
         _build_pareto,
@@ -4882,6 +4890,7 @@ def test_spend_shape_degenerate_cases():
 
     sid_single = "sess-shape-degen-single-aaaa-aaaaaaaaaa"
     sid_nocache = "sess-shape-degen-nocach-aaaa-aaaaaaaaaa"
+    sid_output_only = "sess-shape-degen-outonly-aaa-aaaaaaaaaa"
 
     specs = [
         (sid_single, _session_at_cost(sid_single, 100_000)),
@@ -4890,6 +4899,13 @@ def test_spend_shape_degenerate_cases():
             _session_with_cache(
                 sid_nocache,
                 input_tokens=200_000,
+            ),
+        ),
+        (
+            sid_output_only,
+            _session_with_cache(
+                sid_output_only,
+                output_tokens=200_000,
             ),
         ),
     ]
@@ -4911,9 +4927,16 @@ def test_spend_shape_degenerate_cases():
     spark_single = by_sid[sid_single]["spark"]
     assert spark_single is not None  # degrades to dot, not None
 
-    # Zero-cache session: rw must be None (em-dash in template).
-    rw_nocache = by_sid[sid_nocache]["rw"]
-    assert rw_nocache is None
+    # Input-only session: no cache, no output => split must be None (em-dash).
+    split_nocache = by_sid[sid_nocache]["split"]
+    assert split_nocache is None
+
+    # Output-only session: no cache but output tokens => full-width output bar.
+    split_output = by_sid[sid_output_only]["split"]
+    assert split_output is not None, "Expected bar for output-only session"
+    assert split_output["output_px"] == 64
+    assert split_output["read_px"] == 0
+    assert split_output["write_px"] == 0
 
 
 def test_cost_overview_page_has_spend_shape_columns():
@@ -4938,7 +4961,7 @@ def test_cost_overview_page_has_spend_shape_columns():
             assert response.status_code == 200
             text = response.text
             # New column headers
-            assert "Cache R/W" in text
+            assert "Cost split" in text
             assert "Spend shape" in text
             # SVG polyline or circle markup for the sparkline
             assert "<polyline" in text or "<circle" in text
@@ -5023,9 +5046,10 @@ def test_cost_overview_portfolio_window_scopes_shapes():
         rows = _materialize_and_run(tmp, _run)
 
     # The day-A window captures 2M cache-read tokens (~$1.00) so the session
-    # must appear.  Its rw bar must be present (cache activity exists) and
-    # write_usd must be zero because the cache-write message is on day B.
+    # must appear.  Its split bar must be present (cache activity exists) and
+    # write_usd and output_usd must be zero because only the read message is on day A.
     assert len(rows) == 1
-    rw = rows[0]["rw"]
-    assert rw is not None
-    assert rw["write_usd"] == pytest.approx(0.0, abs=1e-6)
+    split = rows[0]["split"]
+    assert split is not None
+    assert split["write_usd"] == pytest.approx(0.0, abs=1e-6)
+    assert split["output_usd"] == pytest.approx(0.0, abs=1e-6)

@@ -56,7 +56,7 @@
                 <th>Project</th>
                 <th>Title</th>
                 <th style="text-align:right;">Cost</th>
-                <th>Cache R/W</th>
+                <th>Cost split</th>
                 <th>Spend shape</th>
                 <th style="text-align:right;">Cumulative</th>
                 <th style="text-align:right;">% of total</th>
@@ -73,11 +73,12 @@
                 <td style="text-align:right;">
                     <a href="/sessions/{{ row.session_id }}?tab=cost" hx-get="/sessions/{{ row.session_id }}?tab=cost" hx-target="#content" hx-push-url="true">{{ row.cost }}</a>
                 </td>
-                <td title="{{ row.rw.tooltip if row.rw else '' }}">
-                    {% if row.rw %}
+                <td title="{{ row.split.tooltip if row.split else '' }}">
+                    {% if row.split %}
                     <div style="display:inline-flex;width:64px;height:8px;overflow:hidden;border-radius:1px;">
-                        <div style="width:{{ row.rw.read_px }}px;height:8px;background:#c9c9c9;"></div>
-                        <div style="width:{{ row.rw.write_px }}px;height:8px;background:#3b5bdb;"></div>
+                        <div style="width:{{ row.split.read_px }}px;height:8px;background:#c9c9c9;"></div>
+                        <div style="width:{{ row.split.write_px }}px;height:8px;background:#3b5bdb;"></div>
+                        <div style="width:{{ row.split.output_px }}px;height:8px;background:#e8590c;"></div>
                     </div>
                     {% else %}
                     &mdash;

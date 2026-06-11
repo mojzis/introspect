@@ -113,10 +113,13 @@ CACHE_WRITE_COST_SQL: str = (
     f" + {CACHE_WRITE_FALLBACK_SQL} * ({PRICING_CACHE_WRITE_5M_RATE_SQL})"
 )
 
+# Output-token dollar cost for one assistant message row (pre /1e6 division).
+OUTPUT_COST_SQL: str = f"output_tokens * ({PRICING_OUTPUT_RATE_SQL})"
+
 # Total per-row dollar cost (pre /1e6 division).
 COST_EXPR_SQL: str = (
     f"input_tokens * ({PRICING_INPUT_RATE_SQL})"
-    f" + output_tokens * ({PRICING_OUTPUT_RATE_SQL})"
+    f" + {OUTPUT_COST_SQL}"
     f" + {CACHE_READ_COST_SQL}"
     f" + {CACHE_WRITE_COST_SQL}"
 )

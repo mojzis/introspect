@@ -29,7 +29,7 @@ portfolio panel reruns under a timestamp window. The semantic is:
 * **Huge-reads stays per-session** (its read-cost-ratio is intrinsic);
   only the cost denominator narrows with the window, so the threshold
   test runs against the same $ values shown in the chart.
-* **Spend-shape columns** (R/W bar + sparkline) follow the Cost column's
+* **Spend-shape columns** (cost-split bar + sparkline) follow the Cost column's
   window: the graphics describe exactly the same dollars shown in Cost.
 """
 
@@ -48,6 +48,7 @@ from introspect.sql_fragments import (
     CACHE_READ_COST_SQL,
     CACHE_WRITE_COST_SQL,
     COST_EXPR_SQL,
+    OUTPUT_COST_SQL,
     session_cost_subquery_filtered,
 )
 
@@ -122,14 +123,15 @@ def _cost_subquery(window: TimeWindow | None) -> str:
     )
 
 
-_BAR_WIDTH = 64  # fixed px width for the R/W ratio bar (matches template width:64px)
+_BAR_WIDTH = 64  # fixed px width for the cost-split bar (matches template width:64px)
 _SPARK_HEIGHT = 16  # px height for spend sparkline
 _SPARK_PAD = 2  # px padding top/bottom/left/right inside SVG
 _SPARK_MIN_WIDTH = 16  # px minimum sparkline width
 _SPARK_MAX_WIDTH = 90  # px maximum sparkline width
 _SPARK_MAX_POINTS = 60  # downsample to this many time slices
-# Colours for the R/W bar and sparkline are intentionally hardcoded as literals
-# in _cost_portfolio_panel.html (height:8px, #c9c9c9, #3b5bdb, #999) — edit there.
+# Colours for the cost-split bar and sparkline are intentionally hardcoded as
+# literals in _cost_portfolio_panel.html:
+#   cache read #c9c9c9 · cache write #3b5bdb · output #e8590c · sparkline #999
 
 
 def _parse_timestamp(ts: str) -> float:
@@ -153,27 +155,39 @@ def _parse_timestamp(ts: str) -> float:
     return dt.replace(tzinfo=UTC).timestamp()
 
 
-def _build_rw_shape(read_usd: float, write_usd: float) -> dict[str, Any] | None:
-    """Build the R/W ratio bar descriptor for a session row.
+def _build_cost_split_shape(
+    read_usd: float,
+    write_usd: float,
+    output_usd: float,
+) -> dict[str, Any] | None:
+    """Build the cost-split bar descriptor for a session row.
 
-    Returns ``None`` when there is no cache activity (template shows em-dash).
+    Segments: cache read (grey #c9c9c9), cache write (blue #3b5bdb),
+    output (orange #e8590c).  Returns ``None`` when the three-way total
+    is zero or negative (template shows em-dash).
+
+    Pixel widths are computed via cumulative rounding so they sum to
+    exactly ``_BAR_WIDTH`` with no negative segments.
     """
-    total = read_usd + write_usd
+    total = read_usd + write_usd + output_usd
     if total <= 0:
         return None
-    write_frac = write_usd / total
-    read_px = round(_BAR_WIDTH * (1 - write_frac))
-    write_px = _BAR_WIDTH - read_px
+    read_frac = read_usd / total
+    read_px = round(_BAR_WIDTH * read_frac)
+    write_px = round(_BAR_WIDTH * (read_frac + write_usd / total)) - read_px
+    output_px = _BAR_WIDTH - read_px - write_px
     tooltip = (
-        f"cache read ${read_usd:.2f} · cache write ${write_usd:.2f}"
-        f" ({write_frac:.0%} write)"
+        f"cache read ${read_usd:.2f}"
+        f" · cache write ${write_usd:.2f}"
+        f" · output ${output_usd:.2f}"
     )
     return {
         "read_usd": read_usd,
         "write_usd": write_usd,
-        "write_frac": write_frac,
+        "output_usd": output_usd,
         "read_px": read_px,
         "write_px": write_px,
+        "output_px": output_px,
         "tooltip": tooltip,
     }
 
@@ -280,12 +294,13 @@ def _attach_spend_shapes(
     rows: list[dict[str, Any]],
     window: TimeWindow | None,
 ) -> None:
-    """Decorate Pareto rows in-place with ``rw`` and ``spark`` shape dicts.
+    """Decorate Pareto rows in-place with ``split`` and ``spark`` shape dicts.
 
     Runs ONE per-message query over ``assistant_message_costs``, windowed
     like ``_build_huge_reads_split``. Mutates each row dict adding:
 
-    - ``rw``: R/W ratio bar descriptor, or ``None`` for no cache activity.
+    - ``split``: cost-split bar descriptor (cache read / write / output),
+      or ``None`` when all three are zero.
     - ``spark``: sparkline descriptor, or ``None`` for no usable timestamps.
     """
     if not rows:
@@ -305,7 +320,8 @@ def _attach_spend_shapes(
             timestamp,
             ({COST_EXPR_SQL}) / 1e6 AS cost_usd,
             ({CACHE_READ_COST_SQL}) / 1e6 AS read_usd,
-            ({CACHE_WRITE_COST_SQL}) / 1e6 AS write_usd
+            ({CACHE_WRITE_COST_SQL}) / 1e6 AS write_usd,
+            ({OUTPUT_COST_SQL}) / 1e6 AS output_usd
         FROM assistant_message_costs
         {amc_filter}
         ORDER BY session_id, timestamp
@@ -317,6 +333,7 @@ def _attach_spend_shapes(
     session_ids = {r["session_id"] for r in rows}
     per_session_read: dict[str, float] = defaultdict(float)
     per_session_write: dict[str, float] = defaultdict(float)
+    per_session_output: dict[str, float] = defaultdict(float)
     # messages: session_id -> list of (epoch_secs, cost_usd)
     per_session_msgs: dict[str, list[tuple[float, float]]] = defaultdict(list)
 
@@ -328,8 +345,10 @@ def _attach_spend_shapes(
         cost = float(sr[2] or 0.0)
         read = float(sr[3] or 0.0)
         write = float(sr[4] or 0.0)
+        output = float(sr[5] or 0.0)
         per_session_read[sid] += read
         per_session_write[sid] += write
+        per_session_output[sid] += output
         if ts_str:
             try:
                 epoch = _parse_timestamp(str(ts_str))
@@ -350,8 +369,9 @@ def _attach_spend_shapes(
         sid = row["session_id"]
         read_usd = per_session_read.get(sid, 0.0)
         write_usd = per_session_write.get(sid, 0.0)
+        output_usd = per_session_output.get(sid, 0.0)
         msgs = per_session_msgs.get(sid, [])
-        row["rw"] = _build_rw_shape(read_usd, write_usd)
+        row["split"] = _build_cost_split_shape(read_usd, write_usd, output_usd)
         row["spark"] = _build_spark_shape(msgs, max_dur_secs)
 
 
