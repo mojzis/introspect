@@ -81,6 +81,10 @@ introspy claude
 The MCP config is passed inline to `claude`, so the server is only registered
 for that session — no changes to your global Claude Code config.
 
+Once connected, try asking Claude:
+
+> what are the most expensive sessions
+
 ## Development
 
 ```bash
