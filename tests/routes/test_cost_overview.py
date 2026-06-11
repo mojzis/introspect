@@ -262,6 +262,13 @@ def test_cost_overview_page_renders():
             assert "Cost Overview" in text
             # Hero total: $35.00 (4M+2M+1M) * $5/M.
             assert "$35.00" in text
+            # Cost-split legend under "Sessions ranked by cost". Anchor on
+            # "Cost split:" (with colon) — unique to the legend, unlike
+            # "cache read"/"cache write" which also occur in row tooltips.
+            assert "Cost split:" in text
+            assert "cache read" in text
+            assert "cache write" in text
+            assert text.index("Sessions ranked by cost") < text.index("Cost split:")
 
         _run_with_client(tmp, _check)
 
