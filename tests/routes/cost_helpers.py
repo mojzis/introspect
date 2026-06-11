@@ -1,8 +1,70 @@
 """Shared cost-test helpers used by more than one test module."""
 
+from datetime import datetime, timedelta
 from pathlib import Path
 
 from ..conftest import make_assistant_message, make_user_message, write_jsonl
+
+
+def _cache_loss_session_lines(
+    session_id: str,
+    *,
+    gap_minutes: int,
+    timestamp_day: str = "2026-04-21",
+) -> list[dict]:
+    """Build a 4-message JSONL with a single cache-loss event.
+
+    First turn warms the cache (``cache_creation_input_tokens=8000``). The
+    second user prompt arrives ``gap_minutes`` after the first assistant
+    reply; the second assistant reply rebuilds the cache (cache_creation
+    8500 > cache_read 500).
+    """
+    t0 = datetime.fromisoformat(f"{timestamp_day}T09:30:00+00:00")
+    t1 = t0 + timedelta(seconds=2)
+    t2 = t1 + timedelta(minutes=gap_minutes)
+    t3 = t2 + timedelta(seconds=2)
+
+    def _ts(d: datetime) -> str:
+        return d.strftime("%Y-%m-%dT%H:%M:%S.000Z")
+
+    return [
+        make_user_message(
+            session_id,
+            "u1",
+            None,
+            _ts(t0),
+            "first prompt",
+            tool_use_result={"content": "seed"},
+        ),
+        make_assistant_message(
+            session_id,
+            "a1",
+            "u1",
+            _ts(t1),
+            [{"type": "text", "text": "first reply"}],
+            usage={
+                "input_tokens": 100,
+                "output_tokens": 50,
+                "cache_read_input_tokens": 0,
+                "cache_creation_input_tokens": 8000,
+            },
+        ),
+        make_user_message(session_id, "u2", "a1", _ts(t2), "second prompt"),
+        make_assistant_message(
+            session_id,
+            "a2",
+            "u2",
+            _ts(t3),
+            [{"type": "text", "text": "second reply"}],
+            msg_id="msg2",
+            usage={
+                "input_tokens": 120,
+                "output_tokens": 40,
+                "cache_read_input_tokens": 500,
+                "cache_creation_input_tokens": 8500,
+            },
+        ),
+    ]
 
 
 def _dup_jsonl(tmp_dir: Path, session_id: str) -> Path:

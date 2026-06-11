@@ -17,8 +17,69 @@ from ..conftest import (
     write_jsonl,
 )
 from .conftest import SID, _patched_client
+from .cost_helpers import _cache_loss_session_lines
 
 _TWEAK_SID = "01234567-abcd-abcd-abcd-fedcba987654"
+
+_CACHE_LOSS_SID = "deadbeef-aaaa-bbbb-cccc-fedcba987654"
+
+
+def _cache_loss_session_jsonl(tmp_dir: Path, *, gap_minutes: int = 6) -> Path:
+    """Write a single-session cache-loss fixture to ``tmp_dir``."""
+    lines = _cache_loss_session_lines(
+        _CACHE_LOSS_SID, gap_minutes=gap_minutes, timestamp_day="2026-04-15"
+    )
+    return write_jsonl(tmp_dir, _CACHE_LOSS_SID, lines)
+
+
+@contextmanager
+def _cache_loss_client(tmp_path: Path, *, gap_minutes: int = 6):
+    _cache_loss_session_jsonl(tmp_path, gap_minutes=gap_minutes)
+    db_path = tmp_path / "test.duckdb"
+    with (
+        patch.dict(
+            os.environ,
+            {
+                "INTROSPECT_DB_PATH": str(db_path),
+                "INTROSPECT_JSONL_GLOB": glob_pattern(tmp_path),
+                "INTROSPECT_DAYS": "0",
+            },
+        ),
+        TestClient(app) as client,
+    ):
+        yield client
+
+
+def test_session_detail_marks_cache_loss_event():
+    """A >5min gap with cache rebuild surfaces a divider + header chip."""
+    with tempfile.TemporaryDirectory() as tmp_str:
+        tmp = Path(tmp_str)
+        with _cache_loss_client(tmp, gap_minutes=6) as client:
+            response = client.get(f"/sessions/{_CACHE_LOSS_SID}?tab=messages")
+            assert response.status_code == 200
+            text = response.text
+            assert 'class="cache-loss-divider"' in text
+            assert "6 min gap" in text
+            assert "cache lost" in text
+            # Header chip on session_detail.html.
+            assert "Cache losses" in text
+            assert "1 ·" in text
+            # opus-4-6 5m write premium is (6.25 - 0.50)/1M per token,
+            # * 8500 ≈ $0.04887 → format_cost rounds to "$0.05".
+            assert "~$0.05 wasted" in text
+
+
+def test_session_detail_no_cache_loss_under_threshold():
+    """Gap under 5 min should not produce a divider or header chip."""
+    with tempfile.TemporaryDirectory() as tmp_str:
+        tmp = Path(tmp_str)
+        with _cache_loss_client(tmp, gap_minutes=4) as client:
+            response = client.get(f"/sessions/{_CACHE_LOSS_SID}?tab=messages")
+            assert response.status_code == 200
+            text = response.text
+            # The CSS class is defined in <style>; check the rendered element.
+            assert 'class="cache-loss-divider"' not in text
+            assert "Cache losses" not in text
 
 
 def _tweak_session_jsonl(tmp_dir: Path) -> Path:
