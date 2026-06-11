@@ -430,6 +430,45 @@ def test_cost_overview_skill_split():
         assert split["without"]["sessions"] == 2
 
 
+def test_cost_overview_splits_with_uuid_typed_session_ids():
+    """Splits classify correctly when DuckDB types session_id as UUID.
+
+    With real logs every session id is UUID-shaped, so the column comes
+    back as uuid.UUID objects — while the production cost_rows (derived
+    from Pareto rows) are str-coerced. Regression: the flag queries must
+    cast to VARCHAR or every session silently lands in "without".
+    """
+    from introspect.api.handlers.cost_overview import (  # noqa: PLC0415
+        _build_panel_context,
+    )
+
+    sid_sub = "b5ad9712-3b75-4a3e-9a6f-aaaaaaaaaaa1"
+    sid_skill = "b5ad9712-3b75-4a3e-9a6f-aaaaaaaaaaa2"
+    sid_plain = "b5ad9712-3b75-4a3e-9a6f-aaaaaaaaaaa3"
+    specs = [
+        (sid_sub, _subagent_overview_session(sid_sub, 2_000_000)),
+        (sid_skill, _skill_session_command_tag(sid_skill)),
+        (sid_plain, _session_at_cost(sid_plain, 1_000_000)),
+    ]
+    with tempfile.TemporaryDirectory() as tmp_str:
+        tmp = Path(tmp_str)
+        _cost_overview_setup(tmp, specs)
+
+        def _run(conn):
+            assert (
+                conn.execute(
+                    "SELECT typeof(session_id) FROM assistant_message_costs LIMIT 1"
+                ).fetchone()[0]
+                == "UUID"
+            ), "fixture must reproduce the UUID-typed column real data produces"
+            return _build_panel_context(conn, None)
+
+        panel = _materialize_and_run(tmp, _run)
+
+    assert panel["subagent_split"]["with"]["sessions"] == 1
+    assert panel["skill_split"]["with"]["sessions"] == 1
+
+
 # --- Portfolio panel time-window filter tests ---
 
 

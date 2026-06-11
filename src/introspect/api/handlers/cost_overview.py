@@ -319,10 +319,12 @@ def _attach_spend_shapes(
         amc_filter = "WHERE timestamp >= ? AND timestamp < ?"
         params = window
 
+    # ::VARCHAR — with real data DuckDB types session_id as UUID and would
+    # return uuid.UUID objects that never match the str-coerced Pareto rows.
     shape_rows = db.execute(
         f"""
         SELECT
-            session_id,
+            session_id::VARCHAR AS session_id,
             timestamp,
             ({COST_EXPR_SQL}) / 1e6 AS cost_usd,
             ({CACHE_READ_COST_SQL}) / 1e6 AS read_usd,
@@ -508,7 +510,7 @@ def _fetch_cost_rows(
     """
     subquery = _cost_subquery(window)
     return db.execute(
-        f"SELECT session_id, cost_usd FROM {subquery} "  # noqa: S608
+        f"SELECT session_id::VARCHAR AS session_id, cost_usd FROM {subquery} "  # noqa: S608
         "WHERE cost_usd IS NOT NULL AND cost_usd > 0"
     ).fetchall()
 
@@ -696,7 +698,7 @@ def _build_subagent_split(
     """Subagent-presence split: sidechain messages OR Task/Agent tool calls."""
     flag_rows = db.execute(
         """
-        SELECT DISTINCT session_id, TRUE AS has_subagent
+        SELECT DISTINCT session_id::VARCHAR AS session_id, TRUE AS has_subagent
         FROM (
             SELECT session_id FROM assistant_message_costs
             WHERE is_sidechain = TRUE
@@ -831,7 +833,7 @@ def _build_skill_split(
     """
     flag_rows = db.execute(
         f"""
-        SELECT DISTINCT session_id, TRUE AS has_skill
+        SELECT DISTINCT session_id::VARCHAR AS session_id, TRUE AS has_skill
         FROM message_commands
         WHERE command NOT IN {OBVIOUS_COMMANDS_SQL}
         """  # noqa: S608
