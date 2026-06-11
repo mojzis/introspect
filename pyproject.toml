@@ -166,10 +166,6 @@ help = "Run E2E tests"
 cmd = "bash scripts/install-hooks.sh"
 help = "Install git hooks"
 
-[tool.poe.tasks.claude]
-cmd = "claude --mcp-config .claude/mcp.json"
-help = "Start Claude connected to the introspect MCP server (requires `introspect serve` running)"
-
 [tool.poe.tasks.worktree]
 cmd = "bash scripts/worktree.sh"
 help = "Create a worktree under ~/worktrees from a fresh origin/main. Usage: poe worktree <branch> [base-ref]"
