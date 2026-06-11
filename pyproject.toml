@@ -32,7 +32,7 @@ dev = [
     "ty",
     "pytest",
     "pytest-cov",
-    "httpx",
+    "httpx2",
     "vulture",
     "deptry",
     "poethepoet",
@@ -96,12 +96,12 @@ help = "Run type checker"
 cmd = "pytest -q --tb=short -n auto"
 help = "Run tests (parallel)"
 
-[tool.poe.tasks._test-quiet]
-cmd = "pytest -o addopts= -qq --tb=line --no-header -n auto"
-help = "Run tests with minimal output, no coverage, parallel (used by `check`)"
+[tool.poe.tasks.test-quick]
+cmd = "pytest -o addopts= -x -qq --tb=line --no-header -n auto"
+help = "Fail-fast tests: no coverage, minimal output, parallel (used by `check`)"
 
 [tool.poe.tasks.vulns]
-shell = "uvx pysentry-rs . || true"
+shell = "uvx pysentry-rs --compact . || true"
 interpreter = "bash"
 help = "Dependency vulnerability scan"
 
@@ -124,7 +124,7 @@ shell = """
   vulture src &
   deptry . &
   biston scan . &
-  (uvx pysentry-rs . || true) &
+  (uvx pysentry-rs --compact . || true) &
   wait
 """
 interpreter = "bash"
@@ -141,7 +141,7 @@ help = "Lint + typecheck only — sub-second feedback loop"
 [tool.poe.tasks.check]
 sequence = [
     { ref = "_check-parallel" },
-    { ref = "_test-quiet" },
+    { ref = "test-quick" },
 ]
 help = "Run all checks (parallel where possible)"
 

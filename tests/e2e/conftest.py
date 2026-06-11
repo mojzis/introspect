@@ -12,7 +12,7 @@ from urllib.parse import urljoin, urlparse
 import pytest
 from bs4 import BeautifulSoup, Tag
 from fastapi.testclient import TestClient
-from httpx import Response
+from httpx2 import Response
 
 
 @dataclass
