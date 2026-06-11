@@ -2,22 +2,27 @@
 
 Explore and search your Claude Code conversation logs using SQL, full-text search, a web UI, or an MCP server.
 
-## Prerequisites
-
-- Python 3.11+
-- [uv](https://docs.astral.sh/uv/)
+Published on PyPI as [`introspy`](https://pypi.org/project/introspy/).
 
 ## Installation
 
+You need [uv](https://docs.astral.sh/uv/). If you don't have it (it also takes care of Python for you):
+
 ```bash
-uv sync
+curl -LsSf https://astral.sh/uv/install.sh | sh
 ```
 
-Activate the project's virtual environment before running the `introspect`
-commands below (or prefix each one with `uv run`):
+**Just trying it out?** Run it directly, nothing to install:
 
 ```bash
-source .venv/bin/activate
+uvx introspy serve
+```
+
+**Using it regularly?** Install it as a tool, then call it by name:
+
+```bash
+uv tool install introspy
+introspy serve
 ```
 
 ## Usage
@@ -25,39 +30,39 @@ source .venv/bin/activate
 ### Web UI
 
 ```bash
-introspect serve
+introspy serve
 # Runs on http://127.0.0.1:8000 by default
-introspect serve --port 3000 --host 0.0.0.0
+introspy serve --port 3000 --host 0.0.0.0
 ```
 
 ### CLI
 
 ```bash
 # List recent sessions
-introspect sessions
+introspy sessions
 
 # Show summary statistics
-introspect stats
+introspy stats
 
 # Search conversation logs
-introspect search "some query"
+introspy search "some query"
 
 # Show tool call history
-introspect tools
-introspect tools --failed
-introspect tools --name Bash
+introspy tools
+introspy tools --failed
+introspy tools --name Bash
 
 # Run an ad-hoc SQL query
-introspect query "SELECT * FROM logical_sessions LIMIT 5"
+introspy query "SELECT * FROM logical_sessions LIMIT 5"
 
 # Rebuild the search index
-introspect refresh
+introspy refresh
 ```
 
 ### MCP Server
 
 ```bash
-introspect mcp
+introspy mcp
 ```
 
 This starts an MCP server over stdio for integration with Claude Code.
@@ -67,15 +72,14 @@ Alternatively, the web server exposes the same MCP tools over HTTP at
 
 ```bash
 # In one terminal
-introspect serve
+introspy serve
 
 # In another
-uv run poe claude
+introspy claude
 ```
 
-The `claude` poe task runs `claude --mcp-config .claude/mcp.json`, so the MCP
-server is only registered for that session — no changes to your global Claude
-Code config.
+The MCP config is passed inline to `claude`, so the server is only registered
+for that session — no changes to your global Claude Code config.
 
 ## Development
 

@@ -1,6 +1,9 @@
 """Tests for CLI helpers."""
 
+import contextlib
+import json
 import socket
+import subprocess
 import tempfile
 from pathlib import Path
 
@@ -204,3 +207,63 @@ def test_find_available_port_returns_start_port_when_free():
     probe.close()
 
     assert _find_available_port(host, free_port, attempts=1) == free_port
+
+
+def test_claude_errors_when_cli_not_installed(monkeypatch):
+    """`claude` exits with a helpful error when the claude binary is missing."""
+    monkeypatch.setattr("shutil.which", lambda _: None)
+
+    result = runner.invoke(app, ["claude"])
+
+    assert result.exit_code == 1
+    assert "not found" in result.output
+
+
+def test_claude_passes_inline_mcp_config(monkeypatch):
+    """`claude` launches the binary with an inline --mcp-config pointing at /mcp."""
+    calls = []
+    monkeypatch.setattr("shutil.which", lambda _: "/usr/bin/claude")
+    monkeypatch.setattr(
+        socket, "create_connection", lambda *a, **k: contextlib.nullcontext()
+    )
+    monkeypatch.setattr(subprocess, "call", lambda argv: calls.append(argv) or 0)
+
+    result = runner.invoke(app, ["claude", "--port", "3000"])
+
+    assert result.exit_code == 0, result.output
+    assert len(calls) == 1
+    argv = calls[0]
+    assert argv[0] == "/usr/bin/claude"
+    assert argv[1] == "--mcp-config"
+    config = json.loads(argv[2])
+    server = config["mcpServers"]["introspect"]
+    assert server == {"type": "http", "url": "http://127.0.0.1:3000/mcp"}
+
+
+def test_claude_propagates_claude_exit_code(monkeypatch):
+    """The claude binary's exit code becomes the command's exit code."""
+    monkeypatch.setattr("shutil.which", lambda _: "/usr/bin/claude")
+    monkeypatch.setattr(
+        socket, "create_connection", lambda *a, **k: contextlib.nullcontext()
+    )
+    monkeypatch.setattr(subprocess, "call", lambda argv: 3)
+
+    result = runner.invoke(app, ["claude"])
+
+    assert result.exit_code == 3
+
+
+def test_claude_warns_when_server_not_running(monkeypatch):
+    """A warning is printed when nothing is listening on the target port."""
+
+    def refuse(*args, **kwargs):
+        raise ConnectionRefusedError
+
+    monkeypatch.setattr("shutil.which", lambda _: "/usr/bin/claude")
+    monkeypatch.setattr(socket, "create_connection", refuse)
+    monkeypatch.setattr(subprocess, "call", lambda argv: 0)
+
+    result = runner.invoke(app, ["claude"])
+
+    assert result.exit_code == 0, result.output
+    assert "introspy serve" in result.output

@@ -563,6 +563,54 @@ def mcp():
 
 
 @app.command()
+def claude(
+    port: int = typer.Option(8000, help="Port the introspect server is listening on"),
+    host: str = typer.Option(
+        "127.0.0.1", help="Host the introspect server is bound to"
+    ),
+):
+    """Launch Claude Code connected to the introspect MCP server.
+
+    Requires a running `introspy serve` (the MCP tools are exposed over HTTP
+    at /mcp). The MCP config is passed inline, so nothing is written to your
+    Claude Code settings — the server is only registered for this session.
+    """
+    import json  # noqa: PLC0415
+    import shutil  # noqa: PLC0415
+    import socket  # noqa: PLC0415
+    import subprocess  # noqa: PLC0415
+
+    claude_bin = shutil.which("claude")
+    if claude_bin is None:
+        console.print(
+            "[red]Error:[/red] `claude` CLI not found on PATH. "
+            "Install Claude Code first: https://claude.com/claude-code"
+        )
+        raise typer.Exit(code=1)
+
+    try:
+        with socket.create_connection((host, port), timeout=1):
+            pass
+    except OSError:
+        console.print(
+            f"[yellow]Warning:[/yellow] nothing is listening on "
+            f"[cyan]{host}:{port}[/cyan] — start [cyan]introspy serve[/cyan] "
+            "in another terminal, or the MCP tools won't connect."
+        )
+
+    config = json.dumps(
+        {
+            "mcpServers": {
+                "introspect": {"type": "http", "url": f"http://{host}:{port}/mcp"}
+            }
+        }
+    )
+    raise typer.Exit(
+        code=subprocess.call([claude_bin, "--mcp-config", config])  # noqa: S603
+    )
+
+
+@app.command()
 def refresh():
     """Rebuild the search corpus table and FTS index."""
     db_path = DEFAULT_DB_PATH
