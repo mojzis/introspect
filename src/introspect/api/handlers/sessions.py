@@ -4,10 +4,8 @@ import json
 import logging
 import math
 import re
-from pathlib import PurePosixPath
 from typing import Any
 
-import nolegend
 import plotly.graph_objects as go
 from fastapi import HTTPException, Request
 from fastapi.responses import HTMLResponse
@@ -28,12 +26,17 @@ from ._helpers import (
     SESSIONS_SORT_DEFAULT,
     build_cost_attribution_sql,
     conn,
+    ensure_chart_template,
     fetch_token_usage,
     format_cost,
     parent,
+    path_basename,
+    safe_json,
     session_row_to_dict,
     templates,
 )
+from .subagents import build_subagent_breakdown_context
+from .tokenscape import build_tokenscape_context
 
 logger = logging.getLogger(__name__)
 
@@ -673,24 +676,6 @@ _INVOCATION_OTHER_COLOR = "#888888"
 _INVOCATION_TOP_N = len(_INVOCATION_COLOR_PALETTE)
 
 
-def _basename(path: str | None) -> str:
-    """Best-effort POSIX basename of an arbitrary path string."""
-    if not path:
-        return "(unknown)"
-    return PurePosixPath(path).name or path
-
-
-def _safe_json(raw: str | None) -> dict:
-    """Parse JSON, returning an empty dict on failure."""
-    if not raw:
-        return {}
-    try:
-        parsed = json.loads(raw)
-    except (TypeError, ValueError):
-        return {}
-    return parsed if isinstance(parsed, dict) else {}
-
-
 _BLOAT_READ_TOOLS = {"Grep": "grep", "Glob": "glob"}
 _BLOAT_WRITE_TOOLS = {"Edit", "Write", "MultiEdit", "NotebookEdit"}
 # Bash dispatchers whose first word is uninteresting on its own; show two words
@@ -713,14 +698,14 @@ def _classify_bucket(  # noqa: PLR0911
     """
     if tool_name:
         if tool_name == "Read":
-            d = _safe_json(tool_input_raw)
-            return (f"file read: {_basename(d.get('file_path'))}", "Read")
+            d = safe_json(tool_input_raw)
+            return (f"file read: {path_basename(d.get('file_path'))}", "Read")
         if tool_name in _BLOAT_READ_TOOLS:
             return (_BLOAT_READ_TOOLS[tool_name], "Read")
         if tool_name in ("WebFetch", "WebSearch"):
             return (tool_name, "Read")
         if tool_name == "Bash":
-            d = _safe_json(tool_input_raw)
+            d = safe_json(tool_input_raw)
             cmd_str = (d.get("command") or "").strip()
             words = cmd_str.split()
             if not words:
@@ -731,9 +716,9 @@ def _classify_bucket(  # noqa: PLR0911
             head = head[:_BLOAT_BASH_FIRST_WORD_MAX]
             return (f"bash: {head}", "Read")
         if tool_name in _BLOAT_WRITE_TOOLS:
-            d = _safe_json(tool_input_raw)
+            d = safe_json(tool_input_raw)
             fname = d.get("file_path") or d.get("notebook_path")
-            return (f"file write: {_basename(fname)}", "Created")
+            return (f"file write: {path_basename(fname)}", "Created")
         if tool_name.startswith("mcp__"):
             return (f"mcp: {tool_name[len('mcp__') :]}", "Read")
         return (f"tool: {tool_name}", "Read")
@@ -887,18 +872,38 @@ def _resolve_uuid_range(
     return lo, hi
 
 
+def _empty_chart_context() -> dict:
+    """Chart context with no traces — the zero-message case, the chart
+    failure fallback, and chart-less partials all share this shape."""
+    empty_view_map = {"total": [], "agent": [], "category": [], "invocations": []}
+    return {
+        "messages": 0,
+        "points": 0,
+        "bucket_size": 1,
+        "figure_json": "",
+        "view_map": empty_view_map,
+        "annotation_view_map": dict(empty_view_map),
+        "marker_trace": -1,
+        "invocation_series": [],
+        "invocation_summary": [],
+        "has_subagents": False,
+    }
+
+
 def _build_cost_context(
     db,
     session_id: str,
     *,
     range_filter: tuple[str, str] | None = None,
+    include_chart: bool = True,
 ) -> dict:
     """Build the data structures the Cost tab template needs.
 
     When ``range_filter`` is set, the bloat tables (rollup + top
     contributors) are scoped to that uuid range. The chart context still
     covers the whole session — the chart is the user's navigation surface,
-    not a filtered view.
+    not a filtered view. ``include_chart=False`` skips Plotly figure
+    construction entirely — for partials that only render the tables.
     """
     # Single query drives three consumers: per-model rollup, bloat
     # aggregator, *and* the per-message cost chart.  The parent-user-message
@@ -967,29 +972,14 @@ def _build_cost_context(
     # failures so the rest of the cost tab (per-model rollup, bloat
     # tables) still renders for the user. The template handles the
     # ``chart_error`` key by replacing the plot with an inline notice.
-    try:
-        chart = _build_chart_from_attrib(attrib_rows, subagent_type_timeline)
-        chart_error: str | None = None
-    except Exception as exc:
-        logger.exception("Failed to build session cost chart for %s", session_id)
-        chart = {
-            "messages": 0,
-            "points": 0,
-            "bucket_size": 1,
-            "figure_json": "",
-            "view_map": {"total": [], "agent": [], "category": [], "invocations": []},
-            "annotation_view_map": {
-                "total": [],
-                "agent": [],
-                "category": [],
-                "invocations": [],
-            },
-            "marker_trace": -1,
-            "invocation_series": [],
-            "invocation_summary": [],
-            "has_subagents": False,
-        }
-        chart_error = f"{type(exc).__name__}: {exc}"
+    chart = _empty_chart_context()
+    chart_error: str | None = None
+    if include_chart:
+        try:
+            chart = _build_chart_from_attrib(attrib_rows, subagent_type_timeline)
+        except Exception as exc:
+            logger.exception("Failed to build session cost chart for %s", session_id)
+            chart_error = f"{type(exc).__name__}: {exc}"
     raw_tokens = sum(c["tokens"] for c in category_totals.values())
     total_bloat_tokens = raw_tokens or 1
     total_bloat_cost = sum(c["cost_usd"] for c in category_totals.values())
@@ -1224,21 +1214,6 @@ def _bucket_series(
             cum.append(running)
         result[name] = cum
     return result, bucket_size
-
-
-_template_activated: list[bool] = [False]
-
-
-def _ensure_template() -> None:
-    """Register nolegend's "tufte" template the first time a chart is built.
-
-    Mirrors the cost-overview lazy activator so importing the handler from
-    a CLI / test that doesn't render a chart leaves Plotly's default
-    template alone.
-    """
-    if not _template_activated[0]:
-        nolegend.activate()
-        _template_activated[0] = True
 
 
 _SPIKE_MARKER_COLOR = "#c62828"
@@ -1491,20 +1466,8 @@ def _render_multi_chart(  # noqa: PLR0913, PLR0915
     top-N get distinct palette colours, the rest fold into "Other".
     """
     n_messages = len(uuids)
-    empty_view_map = {"total": [], "agent": [], "category": [], "invocations": []}
     if n_messages == 0:
-        return {
-            "messages": 0,
-            "points": 0,
-            "bucket_size": 1,
-            "figure_json": "",
-            "view_map": empty_view_map,
-            "annotation_view_map": dict(empty_view_map),
-            "marker_trace": -1,
-            "invocation_series": [],
-            "invocation_summary": [],
-            "has_subagents": False,
-        }
+        return _empty_chart_context()
 
     main_inc = [0.0 if is_sidechain_list[i] else inc_usd[i] for i in range(n_messages)]
     sub_inc = [inc_usd[i] if is_sidechain_list[i] else 0.0 for i in range(n_messages)]
@@ -1563,7 +1526,7 @@ def _render_multi_chart(  # noqa: PLR0913, PLR0915
             [uuids[raw_first], uuids[raw_last], raw_last - raw_first + 1]
         )
 
-    _ensure_template()
+    ensure_chart_template()
     fig = go.Figure()
     view_map: dict[str, list[int]] = {
         "total": [],
@@ -1810,7 +1773,7 @@ def _build_chart_from_attrib(
     )
 
 
-_VALID_TABS = {"messages", "cost"}
+_VALID_TABS = {"messages", "cost", "tokenscape", "subagents"}
 
 
 async def session_detail(
@@ -1874,12 +1837,50 @@ async def session_detail(
         "cost": format_cost(sum(e["lost_cost_usd"] for e in cache_loss_events)),
     }
 
+    # Compute has_subagents on every render (tab strip needs it regardless of
+    # active tab).  Cheap query: EXISTS short-circuits on first matching row.
+    has_subagents_row = db.execute(
+        """
+        SELECT (
+            EXISTS (SELECT 1 FROM assistant_message_costs
+                    WHERE session_id = ? AND is_sidechain)
+            OR
+            EXISTS (SELECT 1 FROM tool_calls
+                    WHERE session_id = ? AND tool_name IN ('Task', 'Agent'))
+        )
+        """,
+        [session_id, session_id],
+    ).fetchone()
+    has_subagents: bool = bool(has_subagents_row and has_subagents_row[0])
+
     parsed_messages: list[dict] = []
     cost_ctx: dict = {}
+    tokenscape_ctx: dict = {}
+    subagents_ctx: dict = {}
     if active_tab == "messages":
         parsed_messages = _build_messages_context(
             db, session_id, cache_loss_events=cache_loss_events
         )
+    elif active_tab == "tokenscape":
+        try:
+            tokenscape_ctx = build_tokenscape_context(db, session_id)
+        except Exception as exc:
+            logger.exception("Failed to build tokenscape for %s", session_id)
+            tokenscape_ctx = {
+                "has_data": False,
+                "error": f"{type(exc).__name__}: {exc}",
+            }
+    elif active_tab == "subagents":
+        try:
+            subagents_ctx = build_subagent_breakdown_context(
+                db, session_id, session_cwd
+            )
+        except Exception as exc:
+            logger.exception("Failed to build subagents for %s", session_id)
+            subagents_ctx = {
+                "has_data": False,
+                "error": f"{type(exc).__name__}: {exc}",
+            }
     else:  # "cost"
         cost_ctx = _build_cost_context(db, session_id)
 
@@ -1896,6 +1897,9 @@ async def session_detail(
             "active_tab": active_tab,
             "cost_ctx": cost_ctx,
             "cache_loss_summary": cache_loss_summary,
+            "tokenscape_ctx": tokenscape_ctx,
+            "subagents_ctx": subagents_ctx,
+            "has_subagents": has_subagents,
             "file_metrics": {
                 "files_read": file_metrics[0] or 0,
                 "files_edited": file_metrics[1] or 0,
@@ -1924,7 +1928,9 @@ async def cost_bloat_panel(
     range_filter: tuple[str, str] | None = None
     if from_uuid and to_uuid:
         range_filter = (from_uuid, to_uuid)
-    cost_ctx = _build_cost_context(db, session_id, range_filter=range_filter)
+    cost_ctx = _build_cost_context(
+        db, session_id, range_filter=range_filter, include_chart=False
+    )
     return templates.TemplateResponse(
         request,
         "_session_cost_bloat.html",

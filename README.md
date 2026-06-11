@@ -22,6 +22,14 @@ source .venv/bin/activate
 
 ## Usage
 
+### Web UI
+
+```bash
+introspect serve
+# Runs on http://127.0.0.1:8000 by default
+introspect serve --port 3000 --host 0.0.0.0
+```
+
 ### CLI
 
 ```bash
@@ -44,14 +52,6 @@ introspect query "SELECT * FROM logical_sessions LIMIT 5"
 
 # Rebuild the search index
 introspect refresh
-```
-
-### Web UI
-
-```bash
-introspect serve
-# Runs on http://127.0.0.1:8000 by default
-introspect serve --port 3000 --host 0.0.0.0
 ```
 
 ### MCP Server
@@ -94,4 +94,27 @@ uv run poe test
 
 # Run all checks including dead-code and unused-deps
 uv run poe check-all
+```
+
+Tests run in parallel via `pytest-xdist`.
+
+### Code exploration tools
+
+```bash
+# Type-aware code search (LSP-quality, by symbol name)
+uv run tyf show <name>      # definition + signature + usages
+uv run tyf refs <name>      # find all usages
+uv run tyf members <Class>  # view class API
+
+# Structural clone detection — spot extraction opportunities
+uv run biston scan --suggest .
+uv run biston overview .
+```
+
+### Worktrees
+
+```bash
+# Create ~/worktrees/introspect-<branch> from a fresh origin/main
+# (fetches, branches, copies settings, runs uv sync)
+uv run poe worktree <branch>
 ```

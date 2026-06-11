@@ -2,6 +2,7 @@
    re-fetched as an HTMX fragment when the user clicks a daily/hourly bar
    on the cost chart. The container ``#cost-portfolio-panel`` is owned by
    ``cost_overview.html``; this partial is what gets swapped. #}
+{% from "_spend_shapes.html" import split_cell, spark_cell %}
 {% if is_filtered %}
 <div class="filter-chip"
      style="display:inline-flex;align-items:center;gap:0.5rem;
@@ -55,6 +56,12 @@
 <div class="card">
     {% if pareto.rows %}
     <p style="color:#888;margin:0 0 0.6rem;">Sessions ranked by cost. The highlighted row is where cumulative spend crosses 80% — everything above it is the "vital few".</p>
+    <p style="color:#888;margin:0 0 0.6rem;font-size:0.82rem;display:flex;gap:1rem;align-items:center;flex-wrap:wrap;">
+        <span style="font-weight:600;">Cost split:</span>
+        <span style="display:inline-flex;align-items:center;gap:0.35rem;"><span style="width:12px;height:8px;background:#c9c9c9;display:inline-block;border-radius:1px;"></span>cache read</span>
+        <span style="display:inline-flex;align-items:center;gap:0.35rem;"><span style="width:12px;height:8px;background:#3b5bdb;display:inline-block;border-radius:1px;"></span>cache write</span>
+        <span style="display:inline-flex;align-items:center;gap:0.35rem;"><span style="width:12px;height:8px;background:#e8590c;display:inline-block;border-radius:1px;"></span>output</span>
+    </p>
     <table>
         <thead>
             <tr>
@@ -62,6 +69,8 @@
                 <th>Project</th>
                 <th>Title</th>
                 <th style="text-align:right;">Cost</th>
+                <th>Cost split</th>
+                <th>Spend shape</th>
                 <th style="text-align:right;">Cumulative</th>
                 <th style="text-align:right;">% of total</th>
             </tr>
@@ -77,6 +86,8 @@
                 <td style="text-align:right;">
                     <a href="/sessions/{{ row.session_id }}?tab=cost" hx-get="/sessions/{{ row.session_id }}?tab=cost" hx-target="#content" hx-push-url="true">{{ row.cost }}</a>
                 </td>
+                {{ split_cell(row.split) }}
+                {{ spark_cell(row.spark) }}
                 <td style="text-align:right;">{{ row.cumulative }}</td>
                 <td style="text-align:right;">{{ "%.1f"|format(row.cum_pct) }}%</td>
             </tr>
