@@ -7,6 +7,7 @@ the most expensive agent is at the top.
 
 from __future__ import annotations
 
+import contextlib
 import logging
 from datetime import UTC, datetime
 from typing import TYPE_CHECKING
@@ -14,7 +15,7 @@ from typing import TYPE_CHECKING
 from introspect.pricing import rates_for
 
 from ._helpers import format_cost, format_duration, safe_json
-from .cost_overview import _build_cost_split_shape
+from .cost_overview import _build_cost_split_shape, _build_spark_shape
 from .tokenscape import (
     _fetch_chain_rows,
     _fetch_subagent_prompts,
@@ -72,18 +73,13 @@ def _compute_duration(timestamps: list[object]) -> str:
         return "—"
 
 
-def _accumulate_cost(  # noqa: PLR0913
+def _row_cost_components(
     row: tuple,
-    total_cost_usd: float,
-    total_read_usd: float,
-    total_write_usd: float,
-    total_output_usd: float,
     asst_uuids: set[str],
 ) -> tuple[float, float, float, float]:
-    """Accumulate cost components for one (deduped) assistant message row.
+    """Compute cost components for one (deduped) assistant message row.
 
-    Returns ``(total_cost_usd, total_read_usd, total_write_usd, total_output_usd)``
-    with the row's contribution added.
+    Returns ``(row_cost_usd, read_usd, write_usd, output_usd)``.
     """
     uuid = row[0]
     model = row[13]
@@ -112,12 +108,7 @@ def _accumulate_cost(  # noqa: PLR0913
     output_usd = output_tokens * r.output / 1_000_000
     row_cost_usd = input_usd + read_usd + write_usd + output_usd
 
-    return (
-        total_cost_usd + row_cost_usd,
-        total_read_usd + read_usd,
-        total_write_usd + write_usd,
-        total_output_usd + output_usd,
-    )
+    return (row_cost_usd, read_usd, write_usd, output_usd)
 
 
 def _process_tool_call(
@@ -170,6 +161,8 @@ def _aggregate_rows(rows: list[tuple], session_cwd: str) -> dict:
     edited_paths: set[str] = set()
     skills: set[str] = set()
     timestamps: list[object] = []
+    # (epoch_secs, cost_usd) per deduped assistant message, for the sparkline
+    spend_msgs: list[tuple[float, float]] = []
 
     for row in rows:
         uuid = row[0]
@@ -188,16 +181,18 @@ def _aggregate_rows(rows: list[tuple], session_cwd: str) -> dict:
             seen_uuids.add(uuid)
             if row[13]:
                 models.add(row[13])
-            total_cost_usd, total_read_usd, total_write_usd, total_output_usd = (
-                _accumulate_cost(
-                    row,
-                    total_cost_usd,
-                    total_read_usd,
-                    total_write_usd,
-                    total_output_usd,
-                    asst_uuids,
-                )
+            row_cost_usd, read_usd, write_usd, output_usd = _row_cost_components(
+                row, asst_uuids
             )
+            total_cost_usd += row_cost_usd
+            total_read_usd += read_usd
+            total_write_usd += write_usd
+            total_output_usd += output_usd
+            # row[7] is None for non-assistant rows (e.g. tool_result) that
+            # reach this branch — they carry no usage, keep them off the spark.
+            if row[1] is not None and row[7] is not None:
+                with contextlib.suppress(ValueError, OSError, TypeError):
+                    spend_msgs.append((_to_posix_timestamp(row[1]), row_cost_usd))
 
         if kind == "agent_tool_call" and row[3]:
             tool_count += 1
@@ -228,6 +223,7 @@ def _aggregate_rows(rows: list[tuple], session_cwd: str) -> dict:
         "split": _build_cost_split_shape(
             total_read_usd, total_write_usd, total_output_usd
         ),
+        "spend_msgs": sorted(spend_msgs),
     }
 
 
@@ -281,6 +277,15 @@ def build_subagent_breakdown_context(
 
     result_rows.sort(key=lambda r: r["cost_usd"], reverse=True)
     total_cost_usd = sum(r["cost_usd"] for r in result_rows)
+
+    # Sparkline width scales with sqrt(duration / max duration) across rows.
+    max_dur_secs = 0.0
+    for row in result_rows:
+        msgs = row["spend_msgs"]
+        if len(msgs) >= _MIN_TIMESTAMPS_FOR_DURATION:
+            max_dur_secs = max(max_dur_secs, msgs[-1][0] - msgs[0][0])
+    for row in result_rows:
+        row["spark"] = _build_spark_shape(row.pop("spend_msgs"), max_dur_secs)
 
     cum = 0.0
     for i, row in enumerate(result_rows):

@@ -1,3 +1,4 @@
+{% from "_spend_shapes.html" import split_cell, spark_cell %}
 {% if not has_subagents %}
 <div class="card">
     <p>No subagents in this session.</p>
@@ -39,6 +40,7 @@
                 <th>Skills</th>
                 <th style="text-align:right;">Cost</th>
                 <th>Cost split</th>
+                <th>Spend shape</th>
                 <th style="text-align:right;">% of session</th>
                 <th style="text-align:right;">Cumulative %</th>
             </tr>
@@ -71,17 +73,8 @@
                     {% endif %}
                 </td>
                 <td style="text-align:right;">{{ row.cost }}</td>
-                <td title="{{ row.split.tooltip if row.split else '' }}">
-                    {% if row.split %}
-                    <div style="display:inline-flex;width:64px;height:8px;overflow:hidden;border-radius:1px;">
-                        <div style="width:{{ row.split.read_px }}px;height:8px;background:#c9c9c9;"></div>
-                        <div style="width:{{ row.split.write_px }}px;height:8px;background:#3b5bdb;"></div>
-                        <div style="width:{{ row.split.output_px }}px;height:8px;background:#e8590c;"></div>
-                    </div>
-                    {% else %}
-                    &mdash;
-                    {% endif %}
-                </td>
+                {{ split_cell(row.split) }}
+                {{ spark_cell(row.spark) }}
                 <td style="text-align:right;">{{ "%.1f"|format(row.pct) }}%</td>
                 <td style="text-align:right;">{{ "%.1f"|format(row.cum_pct) }}%</td>
             </tr>

@@ -2,6 +2,7 @@
    re-fetched as an HTMX fragment when the user clicks a daily/hourly bar
    on the cost chart. The container ``#cost-portfolio-panel`` is owned by
    ``cost_overview.html``; this partial is what gets swapped. #}
+{% from "_spend_shapes.html" import split_cell, spark_cell %}
 {% if is_filtered %}
 <div class="filter-chip"
      style="display:inline-flex;align-items:center;gap:0.5rem;
@@ -79,30 +80,8 @@
                 <td style="text-align:right;">
                     <a href="/sessions/{{ row.session_id }}?tab=cost" hx-get="/sessions/{{ row.session_id }}?tab=cost" hx-target="#content" hx-push-url="true">{{ row.cost }}</a>
                 </td>
-                <td title="{{ row.split.tooltip if row.split else '' }}">
-                    {% if row.split %}
-                    <div style="display:inline-flex;width:64px;height:8px;overflow:hidden;border-radius:1px;">
-                        <div style="width:{{ row.split.read_px }}px;height:8px;background:#c9c9c9;"></div>
-                        <div style="width:{{ row.split.write_px }}px;height:8px;background:#3b5bdb;"></div>
-                        <div style="width:{{ row.split.output_px }}px;height:8px;background:#e8590c;"></div>
-                    </div>
-                    {% else %}
-                    &mdash;
-                    {% endif %}
-                </td>
-                <td title="{{ row.spark.tooltip if row.spark else '' }}">
-                    {% if row.spark %}
-                    <svg width="{{ row.spark.width }}" height="{{ row.spark.height }}" style="display:block;">
-                        {% if row.spark.points %}
-                        <polyline points="{{ row.spark.points }}"
-                                  fill="none" stroke="#999" stroke-width="1"/>
-                        {% endif %}
-                        <circle cx="{{ row.spark.end_x }}" cy="{{ row.spark.end_y }}" r="1.5" fill="#3b5bdb"/>
-                    </svg>
-                    {% else %}
-                    &mdash;
-                    {% endif %}
-                </td>
+                {{ split_cell(row.split) }}
+                {{ spark_cell(row.spark) }}
                 <td style="text-align:right;">{{ row.cumulative }}</td>
                 <td style="text-align:right;">{{ "%.1f"|format(row.cum_pct) }}%</td>
             </tr>

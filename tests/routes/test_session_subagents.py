@@ -382,6 +382,10 @@ def test_subagents_table_renders_for_one_task_session(tmp_path):
         # Page has some dollar sign
         assert "$" in html
 
+        # Spend-shape sparkline column renders
+        assert "Spend shape" in html
+        assert "<svg" in html
+
 
 # ---------------------------------------------------------------------------
 # Two-invocation session: cost-desc ranking
@@ -484,6 +488,16 @@ def test_context_builder_per_run_metrics(tmp_path):
     # cum_pct of last row == 100
     last_row = max(rows, key=lambda r: r["rank"])
     assert last_row["cum_pct"] == pytest.approx(100.0, abs=0.01)
+
+    # Spend-shape sparkline: subagent has 2 timestamped assistant messages,
+    # so it gets a real polyline (not the single-message dot fallback)
+    spark = subagent_row["spark"]
+    assert spark is not None
+    # Exactly 2 polyline points: one per assistant message — the tool_result
+    # row between them carries no usage and must stay off the sparkline.
+    assert len(spark["points"].split()) == 2
+    # spend_msgs is internal — popped before rows reach the template
+    assert "spend_msgs" not in subagent_row
 
 
 def test_context_builder_amc_dedup_multi_block(tmp_path):
