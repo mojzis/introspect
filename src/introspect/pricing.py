@@ -39,7 +39,10 @@ class Rates(NamedTuple):
 # Each entry maps a model-name *prefix* to its rate table.  Prefix matching
 # (not equality) lets us cover dated suffixes like "claude-haiku-4-5-20251001".
 _PRICING: dict[str, Rates] = {
+    # Fable (current top tier)
+    "claude-fable-5": Rates(10, 12.50, 20, 1.00, 50),
     # Opus current generation
+    "claude-opus-4-8": Rates(5, 6.25, 10, 0.50, 25),
     "claude-opus-4-7": Rates(5, 6.25, 10, 0.50, 25),
     "claude-opus-4-6": Rates(5, 6.25, 10, 0.50, 25),
     "claude-opus-4-5": Rates(5, 6.25, 10, 0.50, 25),

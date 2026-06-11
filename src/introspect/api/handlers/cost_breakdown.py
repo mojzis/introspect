@@ -28,7 +28,14 @@ from introspect.pricing import (
     PRICING_OUTPUT_RATE_SQL,
 )
 
-from ._helpers import conn, format_cost, parent, parse_day, templates
+from ._helpers import (
+    conn,
+    ensure_chart_template,
+    format_cost,
+    parent,
+    parse_day,
+    templates,
+)
 
 ALLOWED_BREAKDOWNS: tuple[str, ...] = ("total", "model", "project")
 DEFAULT_BREAKDOWN = "total"
@@ -50,22 +57,6 @@ LABEL_TOP_N = 4
 # grand total. Tiny labels with arrows sticking into bigger neighbours
 # look noisy and don't help identification.
 LABEL_MIN_SHARE = 0.04
-
-# Single-element list lets us flip the flag without a ``global`` statement
-# (and without exposing a settable module attribute).
-_template_activated: list[bool] = [False]
-
-
-def _ensure_template() -> None:
-    """Register nolegend's "tufte" template the first time a chart is built.
-
-    Doing it here rather than at import keeps module import side-effect-free
-    so importing the handler from a CLI or test that doesn't render charts
-    doesn't mutate Plotly's default-template state.
-    """
-    if not _template_activated[0]:
-        nolegend.activate()
-        _template_activated[0] = True
 
 
 def _normalise_breakdown(value: str) -> str:
@@ -239,7 +230,7 @@ def _build_figure(
     project (or model) renders identically across panels that have
     different stacking orders or group subsets.
     """
-    _ensure_template()
+    ensure_chart_template()
     buckets = sorted(bucketed.keys())
     # Order groups by total descending so the largest sits at the bottom of
     # the stack, mirroring the conventional Pareto reading order.

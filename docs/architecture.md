@@ -171,7 +171,7 @@ Tests live in `tests/` and use pytest:
 | `test_db.py` | Database views, materialization, indexes |
 | `test_search.py` | FTS availability, corpus building, BM25 & ILIKE search |
 | `test_mcp_tools.py` | MCP tool implementations |
-| `test_routes.py` | All web handlers (filters, pagination, sorting, HTMX) |
+| `routes/` | All web handlers (filters, pagination, sorting, HTMX) |
 | `test_cli.py` | Typer commands and banners |
 | `test_pricing.py` | Python ↔ SQL pricing parity |
 | `test_projects.py` | Git worktree → canonical project resolution |
@@ -183,7 +183,7 @@ Tests live in `tests/` and use pytest:
 - `make_user_message()` / `make_assistant_message()` — build realistic JSONL records
 - `write_jsonl()` — write test data to temp files
 - `glob_pattern()` — return glob for temp directory
-- `_patched_client()` — context manager providing a test client with patched DB
+- `_patched_client()` — context manager providing a test client with patched DB (also in `tests/routes/conftest.py`)
 
 ## Dev Tooling
 

@@ -1,0 +1,37 @@
+{# Shared table-cell macros for per-row cost shapes.
+
+   split_cell(split) — three-segment cost-split bar (cache read / cache write /
+   output), built by _build_cost_split_shape().
+   spark_cell(spark) — cumulative-spend sparkline, built by _build_spark_shape().
+
+   Both render an em-dash when the descriptor is None.
+#}
+{% macro split_cell(split) -%}
+<td title="{{ split.tooltip if split else '' }}">
+    {% if split %}
+    <div style="display:inline-flex;width:64px;height:8px;overflow:hidden;border-radius:1px;">
+        <div style="width:{{ split.read_px }}px;height:8px;background:#c9c9c9;"></div>
+        <div style="width:{{ split.write_px }}px;height:8px;background:#3b5bdb;"></div>
+        <div style="width:{{ split.output_px }}px;height:8px;background:#e8590c;"></div>
+    </div>
+    {% else %}
+    &mdash;
+    {% endif %}
+</td>
+{%- endmacro %}
+
+{% macro spark_cell(spark) -%}
+<td title="{{ spark.tooltip if spark else '' }}">
+    {% if spark %}
+    <svg width="{{ spark.width }}" height="{{ spark.height }}" style="display:block;">
+        {% if spark.points %}
+        <polyline points="{{ spark.points }}"
+                  fill="none" stroke="#999" stroke-width="1"/>
+        {% endif %}
+        <circle cx="{{ spark.end_x }}" cy="{{ spark.end_y }}" r="1.5" fill="#3b5bdb"/>
+    </svg>
+    {% else %}
+    &mdash;
+    {% endif %}
+</td>
+{%- endmacro %}
