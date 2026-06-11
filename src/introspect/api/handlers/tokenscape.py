@@ -1264,9 +1264,27 @@ def _build_subagent_run_context(
         "label": label,
         "cost": cost,
         "turn_count": len(turns),
+        "models": sorted({t.model for t in turns if t.model}),
         "stripes": stripes,
         "turns": turns,
     }
+
+
+def _assign_subagent_run_colors(shown: list[dict], agent_runs: list[_AgentRun]) -> None:
+    """Give each drill-down chart the same (fill, border) its run got in
+    the session charts — matched by label, each session run consumed
+    once so repeated descriptions stay distinct. Unmatched drill-downs
+    take the washed-out "other subagents" colour, mirroring the fold.
+    """
+    consumed = [False] * len(agent_runs)
+    for run in shown:
+        fill, border = _OTHER_AGENTS_COLOR
+        for idx, agent_run in enumerate(agent_runs):
+            if not consumed[idx] and agent_run.label == run["label"]:
+                consumed[idx] = True
+                fill, border = _agent_run_color(idx)
+                break
+        run["fill"], run["border"] = fill, border
 
 
 def _build_subagent_runs(
@@ -1330,6 +1348,7 @@ def build_tokenscape_context(db: duckdb.DuckDBPyConnection, session_id: str) -> 
     subagent_runs, subagent_runs_hidden = _build_subagent_runs(
         db, session_id, edited_files
     )
+    _assign_subagent_run_colors(subagent_runs, agent_runs)
 
     category_cost: dict[str, float] = dict.fromkeys(_CATEGORY_ORDER, 0.0)
     for band in bands:

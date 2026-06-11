@@ -2421,6 +2421,16 @@ def test_tokenscape_subagent_run_ties_out_to_run_bill():
     # whole point is showing what the agent read.
     assert any(t["name"] == "Read doc.md" for t in fig["data"])
     assert ctx["subagent_runs_hidden"] == {"count": 0, "cost": 0.0}
+    # The drill-down carries the run's models and the same colour its
+    # stripe got in the session-level stripes chart.
+    assert run["models"] == ["claude-sonnet-4-6"]
+    stripes_fig = json.loads(ctx["figure_json_stripes"])
+    (stripe_color,) = [
+        t["marker"]["color"]
+        for t in stripes_fig["data"]
+        if t["name"] == "agent: scan docs"
+    ]
+    assert run["fill"] == stripe_color
 
 
 def test_tokenscape_parallel_subagents_split_by_parent_chain():
@@ -2600,6 +2610,19 @@ def test_tokenscape_parallel_subagents_split_by_parent_chain():
     }
     assert stripe_colors
     assert bar_colors == stripe_colors
+    # The drill-down that owns the session stripe inherits its fill; the
+    # one whose cost was lumped away falls back to the fold colour.
+    # (Which of the two labels owns the stripe depends on the tie order
+    # of the simultaneous Task calls, so match by label dynamically.)
+    from introspect.api.handlers.tokenscape import (  # noqa: PLC0415
+        _OTHER_AGENTS_COLOR,
+    )
+
+    (stripe_label,) = stripe_colors
+    (other_label,) = set(by_label) - {stripe_label}
+    assert by_label[stripe_label]["fill"] == stripe_colors[stripe_label]
+    assert by_label[other_label]["fill"] == _OTHER_AGENTS_COLOR[0]
+    assert by_label[stripe_label]["models"] == [model]
 
 
 def test_tokenscape_stripe_colors_distinguish_runs_and_rest():
@@ -2713,6 +2736,15 @@ def test_session_tokenscape_tab_renders_subagent_section():
             assert response.status_code == 200
             assert 'id="subagent-tokenscape-1-data"' in response.text
             assert "agent: scan docs" in response.text
+            # Heading carries the run's stripe-matching colour swatch
+            # and the model that ran the agent.
+            from introspect.api.handlers.tokenscape import (  # noqa: PLC0415
+                _agent_run_color,
+            )
+
+            fill, border = _agent_run_color(0)
+            assert f"background:{fill};border:1px solid {border}" in response.text
+            assert "claude-sonnet-4-6" in response.text
 
 
 def test_tokenscape_unknown_model_bills_zero_without_crashing():
@@ -2743,6 +2775,43 @@ def test_session_tokenscape_tab_embeds_stripes_chart():
         assert response.status_code == 200
         assert 'id="session-tokenscape-stripes-data"' in response.text
         assert "Bill by token type" in response.text
+
+
+def test_session_tokenscape_tab_shows_error_notice_on_failure():
+    """If tokenscape building blows up, the tab degrades to an inline notice
+    (with the exception text) instead of a 500."""
+    with (
+        tempfile.TemporaryDirectory() as tmp,
+        _patched_client(Path(tmp)) as client,
+        patch(
+            "introspect.api.handlers.sessions.build_tokenscape_context",
+            side_effect=RuntimeError("boom"),
+        ),
+    ):
+        response = client.get(f"/sessions/{SID}?tab=tokenscape")
+        assert response.status_code == 200
+        assert "Tokenscape unavailable." in response.text
+        assert "RuntimeError: boom" in response.text
+
+
+def test_session_cost_tab_shows_chart_error_notice_on_failure():
+    """If chart construction blows up, the cost tab still renders the
+    per-model rollup and bloat tables with an inline chart-error notice."""
+    with (
+        tempfile.TemporaryDirectory() as tmp,
+        _patched_client(Path(tmp)) as client,
+        patch(
+            "introspect.api.handlers.sessions._build_chart_from_attrib",
+            side_effect=ValueError("bad figure"),
+        ),
+    ):
+        response = client.get(f"/sessions/{SID}?tab=cost")
+        assert response.status_code == 200
+        assert "Chart unavailable." in response.text
+        assert "ValueError: bad figure" in response.text
+        # The rest of the cost tab still renders.
+        assert "Bloat attribution" in response.text
+        assert "Top contributors" in response.text
 
 
 def _short_session_jsonl(tmp_dir: Path, session_id: str) -> Path:
