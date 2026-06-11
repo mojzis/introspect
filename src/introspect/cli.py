@@ -2,6 +2,10 @@
 
 from datetime import UTC, datetime
 from pathlib import Path
+from typing import TYPE_CHECKING
+
+if TYPE_CHECKING:
+    import subprocess
 
 import typer
 from rich.console import Console
@@ -571,6 +575,9 @@ def mcp():
 # large history — be generous.
 SERVER_START_TIMEOUT_SECONDS = 120.0
 SERVER_POLL_INTERVAL_SECONDS = 0.5
+# Grace period for a spawned server to shut down after SIGTERM before we
+# escalate to SIGKILL.
+SERVER_STOP_TIMEOUT_SECONDS = 10.0
 
 
 def _serve_log_path() -> Path:
@@ -582,13 +589,14 @@ def _serve_log_path() -> Path:
     return DEFAULT_DB_PATH.parent / "serve.log"
 
 
-def _ensure_server_running(host: str, port: int) -> None:
+def _ensure_server_running(host: str, port: int) -> "subprocess.Popen[bytes] | None":
     """Ensure an introspect server is listening on *host*:*port*.
 
-    If the port is already connectable, return immediately.  Otherwise spawn
-    ``python -m introspect.cli serve`` as a detached background process,
-    stream its output to ``_serve_log_path()``, and poll until the port
-    becomes connectable or the child exits prematurely.
+    If the port is already connectable, return ``None`` immediately.
+    Otherwise spawn ``python -m introspect.cli serve`` as a detached
+    background process, stream its output to ``_serve_log_path()``, poll
+    until the port becomes connectable, and return the child process so the
+    caller can stop it when the session ends.
 
     Raises ``typer.Exit(code=1)`` on child death or timeout without touching
     the child process (it may still be materialising the DB).
@@ -605,7 +613,7 @@ def _ensure_server_running(host: str, port: int) -> None:
     except OSError:
         pass
     else:
-        return
+        return None
 
     log_path = _serve_log_path()
     log_path.parent.mkdir(parents=True, exist_ok=True)
@@ -658,17 +666,32 @@ def _ensure_server_running(host: str, port: int) -> None:
             pass
         else:
             console.print(f"[green]Server ready on http://{host}:{port}[/green]")
-            return
+            return proc
 
     console.print(
         f"[red]Error:[/red] Server did not become ready within "
         f"{SERVER_START_TIMEOUT_SECONDS:.0f} s.\n"
-        "It was left running — check the log for the actual bound port and any "
-        "startup errors (a port-shift or slow DB materialisation can both cause "
-        "this).\n"
+        f"It was left running (pid {proc.pid}) — check the log for the actual "
+        "bound port and any startup errors (a port-shift or slow DB "
+        "materialisation can both cause this).\n"
         f"Log: [cyan]{log_path}[/cyan]"
     )
     raise typer.Exit(code=1)
+
+
+def _stop_server(proc: "subprocess.Popen[bytes]") -> None:
+    """Terminate the server we spawned, escalating to kill if it hangs."""
+    import subprocess  # noqa: PLC0415
+
+    if proc.poll() is not None:
+        return  # already gone
+    console.print("[dim]Stopping introspect server...[/dim]")
+    proc.terminate()
+    try:
+        proc.wait(timeout=SERVER_STOP_TIMEOUT_SECONDS)
+    except subprocess.TimeoutExpired:
+        proc.kill()
+        proc.wait()
 
 
 # Appended to Claude Code's system prompt by `introspy claude`. The session
@@ -698,13 +721,20 @@ def claude(
     host: str = typer.Option(
         "127.0.0.1", help="Host the introspect server is bound to"
     ),
+    keep_server: bool = typer.Option(
+        False,
+        "--keep-server",
+        help="Leave the auto-started server running after Claude Code exits",
+    ),
 ):
     """Launch Claude Code connected to the introspect MCP server.
 
     Starts ``introspy serve`` automatically in the background when nothing is
-    listening on the target port (log at ``~/.introspect/serve.log``).  The MCP
-    config is passed inline, so nothing is written to your Claude Code settings
-    — the server is only registered for this session.
+    listening on the target port (log at ``~/.introspect/serve.log``) and stops
+    it again when Claude Code exits (pass ``--keep-server`` to leave it up).
+    A server that was already running is never touched.  The MCP config is
+    passed inline, so nothing is written to your Claude Code settings — the
+    server is only registered for this session.
     """
     import json  # noqa: PLC0415
     import shutil  # noqa: PLC0415
@@ -718,7 +748,7 @@ def claude(
         )
         raise typer.Exit(code=1)
 
-    _ensure_server_running(host, port)
+    server_proc = _ensure_server_running(host, port)
 
     config = json.dumps(
         {
@@ -727,8 +757,8 @@ def claude(
             }
         }
     )
-    raise typer.Exit(
-        code=subprocess.call(  # noqa: S603
+    try:
+        exit_code = subprocess.call(  # noqa: S603
             [
                 claude_bin,
                 "--mcp-config",
@@ -739,7 +769,16 @@ def claude(
                 INTROSPECT_MCP_PERMISSION,
             ]
         )
-    )
+    finally:
+        if server_proc is not None:
+            if keep_server:
+                console.print(
+                    f"[dim]Server left running on http://{host}:{port} "
+                    f"(pid {server_proc.pid})[/dim]"
+                )
+            else:
+                _stop_server(server_proc)
+    raise typer.Exit(code=exit_code)
 
 
 @app.command()
