@@ -32,11 +32,15 @@ dev = [
     "ty",
     "pytest",
     "pytest-cov",
-    "httpx",
+    "httpx2",
     "vulture",
     "deptry",
     "poethepoet",
     "beautifulsoup4",
+    "ty-find>=0.4.0",
+    "biston>=0.5.0",
+    "pytest-xdist>=3.8.0",
+    "pytest-randomly>=4.1.0",
 ]
 
 [tool.ruff]
@@ -89,11 +93,15 @@ cmd = "ty check"
 help = "Run type checker"
 
 [tool.poe.tasks.test]
-cmd = "pytest -q --tb=short"
-help = "Run tests"
+cmd = "pytest -q --tb=short -n auto"
+help = "Run tests (parallel)"
+
+[tool.poe.tasks.test-quick]
+cmd = "pytest -o addopts= -x -qq --tb=line --no-header -n auto"
+help = "Fail-fast tests: no coverage, minimal output, parallel (used by `check`)"
 
 [tool.poe.tasks.vulns]
-shell = "uvx pysentry-rs . || true"
+shell = "uvx pysentry-rs --compact . || true"
 interpreter = "bash"
 help = "Dependency vulnerability scan"
 
@@ -105,21 +113,35 @@ help = "Dead code detection"
 cmd = "deptry ."
 help = "Unused dependency check"
 
+[tool.poe.tasks.clones]
+cmd = "biston scan ."
+help = "Structural clone detection (advisory)"
+
 [tool.poe.tasks._check-parallel]
 shell = """
   ruff check . &
   ty check &
   vulture src &
   deptry . &
-  (uvx pysentry-rs . || true) &
+  biston scan . &
+  (uvx pysentry-rs --compact . || true) &
   wait
 """
 interpreter = "bash"
 
+[tool.poe.tasks.check-fast]
+shell = """
+  ruff check . &
+  ty check &
+  wait
+"""
+interpreter = "bash"
+help = "Lint + typecheck only — sub-second feedback loop"
+
 [tool.poe.tasks.check]
 sequence = [
     { ref = "_check-parallel" },
-    { ref = "test" },
+    { ref = "test-quick" },
 ]
 help = "Run all checks (parallel where possible)"
 
@@ -130,6 +152,7 @@ sequence = [
     { ref = "vulns" },
     { ref = "dead-code" },
     { ref = "unused-deps" },
+    { ref = "clones" },
     { ref = "test" },
 ]
 ignore_fail = true
@@ -142,6 +165,14 @@ help = "Run E2E tests"
 [tool.poe.tasks.setup]
 cmd = "bash scripts/install-hooks.sh"
 help = "Install git hooks"
+
+[tool.poe.tasks.claude]
+cmd = "claude --mcp-config .claude/mcp.json"
+help = "Start Claude connected to the introspect MCP server (requires `introspect serve` running)"
+
+[tool.poe.tasks.worktree]
+cmd = "bash scripts/worktree.sh"
+help = "Create a worktree under ~/worktrees from a fresh origin/main. Usage: poe worktree <branch> [base-ref]"
 
 [tool.poe.tasks.release]
 shell = """

@@ -21,6 +21,9 @@
         {% if token_usage.cache_read %}<div><span class="meta-label">Cache Read</span> {{ "{:,}".format(token_usage.cache_read) }}</div>{% endif %}
         <div><span class="meta-label">Est. Cost</span> {{ token_usage.cost or '—' }}</div>
         {% endif %}
+        {% if cache_loss_summary and cache_loss_summary.count %}
+        <div><span class="meta-label">Cache losses</span> {{ cache_loss_summary.count }} · ~{{ cache_loss_summary.cost }} wasted</div>
+        {% endif %}
         {% if tool_summary and tool_summary[0] > 0 %}
         <div><span class="meta-label">Tools</span> {{ tool_summary[0] }} tool call{{ 's' if tool_summary[0] != 1 else '' }}{% if tool_summary[1] > 0 %} ({{ tool_summary[1] }} failed){% endif %}{% if tool_summary[2] %} — {{ tool_summary[2] }}{% endif %}</div>
         {% endif %}

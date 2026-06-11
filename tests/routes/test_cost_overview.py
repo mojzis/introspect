@@ -5,8 +5,9 @@ from pathlib import Path
 
 import pytest
 
-from ..conftest import make_assistant_message, make_user_message
+from ..conftest import make_assistant_message, make_user_message, write_jsonl
 from .cost_helpers import (
+    _cache_loss_session_lines,
     _cost_overview_setup,
     _materialize_and_run,
     _multi_day_specs,
@@ -601,3 +602,122 @@ def test_cost_overview_portfolio_subagent_classifier_stays_alltime():
         assert subagent["with"]["sessions"] == 1
         assert subagent["without"]["sessions"] == 0
         assert subagent["with"]["cost_usd"] == pytest.approx(5.0)
+
+
+def test_cost_overview_renders_with_titleless_session():
+    """Sessions filtered out of ``session_titles`` must not crash the panel.
+
+    Regression: the Pareto template slices ``session_id[:8]`` when ``title``
+    is empty. DuckDB sometimes returns ``session_id`` as ``uuid.UUID`` (not
+    subscriptable), so the dict builder must coerce to ``str``.
+    """
+    # UUID-shaped id so DuckDB infers the column as UUID (the production
+    # type that breaks ``session_id[:8]`` slicing); a non-UUID-shaped id
+    # would silently fall back to VARCHAR and not reproduce the bug.
+    sid = "deadbeef-1234-5678-9abc-def012345678"
+    # First user message is ``/clear`` — session_titles filters it out, so
+    # the LEFT JOIN yields NULL/'' for first_prompt and the template falls
+    # through to the session_id slice.
+    lines = [
+        make_user_message(
+            sid,
+            "u1",
+            None,
+            "2026-04-21T10:00:00.000Z",
+            "/clear",
+            tool_use_result={"content": "seed"},
+        ),
+        make_assistant_message(
+            sid,
+            "a1",
+            "u1",
+            "2026-04-21T10:00:01.000Z",
+            [{"type": "text", "text": "ok"}],
+            model="claude-opus-4-7",
+            usage={"input_tokens": 1_000_000, "output_tokens": 0},
+        ),
+    ]
+    with tempfile.TemporaryDirectory() as tmp_str:
+        tmp = Path(tmp_str)
+        write_jsonl(tmp, sid, lines)
+
+        def _check(client):
+            response = client.get("/cost-overview")
+            assert response.status_code == 200
+            # Title fallback rendered the first 8 chars of the session_id.
+            assert sid[:8] in response.text
+
+        _run_with_client(tmp, _check)
+
+
+def test_cost_overview_cache_loss_stat_card():
+    """Cost overview surfaces the cache-loss premium when events exist."""
+    sid = "sess-loss-01-aaaa-aaaa-aaaaaaaaaaaa"
+    specs = [(sid, _cache_loss_session_lines(sid, gap_minutes=6))]
+    with tempfile.TemporaryDirectory() as tmp_str:
+        tmp = Path(tmp_str)
+        _cost_overview_setup(tmp, specs)
+
+        def _check(client):
+            response = client.get("/cost-overview")
+            assert response.status_code == 200
+            text = response.text
+            assert "Wasted on cache misses" in text
+            # opus-4-6 5m write premium = (6.25 - 0.50)/1M * 8500 ≈ $0.0489.
+            # format_cost rounds to "$0.05".
+            assert "$0.05" in text
+            assert "1 event" in text
+
+        _run_with_client(tmp, _check)
+
+
+def test_cost_overview_cache_loss_card_hidden_without_events():
+    """No cache-loss events → no stat card, no 'Wasted' label."""
+    sid = "sess-loss-02-aaaa-aaaa-aaaaaaaaaaaa"
+    # Same shape, but 4-min gap: under threshold.
+    specs = [(sid, _cache_loss_session_lines(sid, gap_minutes=4))]
+    with tempfile.TemporaryDirectory() as tmp_str:
+        tmp = Path(tmp_str)
+        _cost_overview_setup(tmp, specs)
+
+        def _check(client):
+            response = client.get("/cost-overview")
+            assert response.status_code == 200
+            assert "Wasted on cache misses" not in response.text
+
+        _run_with_client(tmp, _check)
+
+
+def test_cost_overview_cache_loss_respects_window():
+    """Windowed portfolio query only counts events whose rebuild lands inside."""
+    sid_in = "sess-loss-in-aaaa-aaaa-aaaaaaaaaaaa"
+    sid_out = "sess-loss-out-aaaa-aaaa-aaaaaaaaaaa"
+    specs = [
+        (
+            sid_in,
+            _cache_loss_session_lines(
+                sid_in, gap_minutes=6, timestamp_day="2026-04-21"
+            ),
+        ),
+        (
+            sid_out,
+            _cache_loss_session_lines(
+                sid_out, gap_minutes=6, timestamp_day="2026-04-22"
+            ),
+        ),
+    ]
+    with tempfile.TemporaryDirectory() as tmp_str:
+        tmp = Path(tmp_str)
+        _cost_overview_setup(tmp, specs)
+
+        def _check(client):
+            response = client.get("/cost-overview/portfolio?day=2026-04-21")
+            assert response.status_code == 200
+            text = response.text
+            # In-window event surfaces.
+            assert "Wasted on cache misses" in text
+            assert "1 event" in text
+            # Out-of-window event does not — count would say "2 event" if it did.
+            assert "2 event" not in text
+
+        _run_with_client(tmp, _check)
