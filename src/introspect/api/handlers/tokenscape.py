@@ -1271,10 +1271,20 @@ def _build_subagent_run_context(
 
 
 def _assign_subagent_run_colors(shown: list[dict], agent_runs: list[_AgentRun]) -> None:
-    """Give each drill-down chart the same (fill, border) its run got in
-    the session charts — matched by label, each session run consumed
-    once so repeated descriptions stay distinct. Unmatched drill-downs
-    take the washed-out "other subagents" colour, mirroring the fold.
+    """Assign (fill, border) colours to each drill-down chart entry.
+
+    Matches each shown run to the first unconsumed agent_run with the same
+    label, assigning it ``_agent_run_color(idx)`` where ``idx`` is the
+    position in ``agent_runs``.  Unmatched entries fall back to
+    ``_OTHER_AGENTS_COLOR``.
+
+    Note: this assigns colours by label-match order, not by the stripe
+    fold threshold used in ``_build_stripes``.  A run folded into 'other
+    subagents' in the main chart (below ``_STRIPE_MIN_SHARE``) may still
+    receive a distinct colour here if its label appears in ``agent_runs``.
+    The drill-down shown/hidden cut-off (``_select_subagent_runs``:
+    ≤ 8 runs, ≥ $0.10) differs from the stripe threshold, so the two sets
+    can diverge.
     """
     consumed = [False] * len(agent_runs)
     for run in shown:

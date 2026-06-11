@@ -5022,10 +5022,10 @@ def test_cost_overview_portfolio_window_scopes_shapes():
 
         rows = _materialize_and_run(tmp, _run)
 
-    # When filtered to day A, the session may not appear at all (no cost on day A
-    # from input/output tokens alone); but if it does, its rw.write_usd must be 0.
-    if rows:
-        rw = rows[0]["rw"]
-        # Only cache reads from day A are in scope; writes from day B are excluded.
-        if rw is not None:
-            assert rw["write_usd"] == pytest.approx(0.0, abs=1e-6)
+    # The day-A window captures 2M cache-read tokens (~$1.00) so the session
+    # must appear.  Its rw bar must be present (cache activity exists) and
+    # write_usd must be zero because the cache-write message is on day B.
+    assert len(rows) == 1
+    rw = rows[0]["rw"]
+    assert rw is not None
+    assert rw["write_usd"] == pytest.approx(0.0, abs=1e-6)

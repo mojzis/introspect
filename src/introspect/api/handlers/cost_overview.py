@@ -122,21 +122,27 @@ def _cost_subquery(window: TimeWindow | None) -> str:
     )
 
 
-_BAR_WIDTH = 64  # fixed px width for the R/W ratio bar
-_BAR_HEIGHT = 8  # fixed px height for the R/W ratio bar
-_RW_READ_COLOR = "#c9c9c9"
-_RW_WRITE_COLOR = "#3b5bdb"
+_BAR_WIDTH = 64  # fixed px width for the R/W ratio bar (matches template width:64px)
 _SPARK_HEIGHT = 16  # px height for spend sparkline
 _SPARK_PAD = 2  # px padding top/bottom/left/right inside SVG
 _SPARK_MIN_WIDTH = 16  # px minimum sparkline width
 _SPARK_MAX_WIDTH = 90  # px maximum sparkline width
 _SPARK_MAX_POINTS = 60  # downsample to this many time slices
-_SPARK_LINE_COLOR = "#999"
-_SPARK_DOT_COLOR = "#3b5bdb"
+# Colours for the R/W bar and sparkline are intentionally hardcoded as literals
+# in _cost_portfolio_panel.html (height:8px, #c9c9c9, #3b5bdb, #999) — edit there.
 
 
 def _parse_timestamp(ts: str) -> float:
-    """Return epoch seconds from an ISO timestamp string (handles trailing Z)."""
+    """Return epoch seconds from an ISO timestamp string (handles trailing Z).
+
+    Assumption: all timestamps from the DB are naive UTC (``...Z`` suffix or
+    no offset).  The trailing ``Z`` is stripped before parsing so
+    ``fromisoformat`` always returns a naive ``datetime``; ``.replace(tzinfo=UTC)``
+    then labels it as UTC without shifting the instant.  If the DB ever emits
+    an explicit offset (e.g. ``+05:30``), ``fromisoformat`` would return an
+    aware datetime and ``.replace`` would silently relabel it instead of
+    converting — use ``.astimezone(UTC)`` in that case.
+    """
     ts = ts.rstrip("Z").replace("T", " ")
     # DuckDB may return with or without fractional seconds
     try:
