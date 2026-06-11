@@ -56,6 +56,8 @@
                 <th>Project</th>
                 <th>Title</th>
                 <th style="text-align:right;">Cost</th>
+                <th>Cache R/W</th>
+                <th>Spend shape</th>
                 <th style="text-align:right;">Cumulative</th>
                 <th style="text-align:right;">% of total</th>
             </tr>
@@ -70,6 +72,29 @@
                 </td>
                 <td style="text-align:right;">
                     <a href="/sessions/{{ row.session_id }}?tab=cost" hx-get="/sessions/{{ row.session_id }}?tab=cost" hx-target="#content" hx-push-url="true">{{ row.cost }}</a>
+                </td>
+                <td title="{{ row.rw.tooltip if row.rw else '' }}">
+                    {% if row.rw %}
+                    <div style="display:inline-flex;width:64px;height:8px;overflow:hidden;border-radius:1px;">
+                        <div style="width:{{ row.rw.read_px }}px;height:8px;background:#c9c9c9;"></div>
+                        <div style="width:{{ row.rw.write_px }}px;height:8px;background:#3b5bdb;"></div>
+                    </div>
+                    {% else %}
+                    &mdash;
+                    {% endif %}
+                </td>
+                <td title="{{ row.spark.tooltip if row.spark else '' }}">
+                    {% if row.spark %}
+                    <svg width="{{ row.spark.width }}" height="{{ row.spark.height }}" style="display:block;">
+                        {% if row.spark.points %}
+                        <polyline points="{{ row.spark.points }}"
+                                  fill="none" stroke="#999" stroke-width="1"/>
+                        {% endif %}
+                        <circle cx="{{ row.spark.end_x }}" cy="{{ row.spark.end_y }}" r="1.5" fill="#3b5bdb"/>
+                    </svg>
+                    {% else %}
+                    &mdash;
+                    {% endif %}
                 </td>
                 <td style="text-align:right;">{{ row.cumulative }}</td>
                 <td style="text-align:right;">{{ "%.1f"|format(row.cum_pct) }}%</td>

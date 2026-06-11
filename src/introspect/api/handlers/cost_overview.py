@@ -29,18 +29,27 @@ portfolio panel reruns under a timestamp window. The semantic is:
 * **Huge-reads stays per-session** (its read-cost-ratio is intrinsic);
   only the cost denominator narrows with the window, so the threshold
   test runs against the same $ values shown in the chart.
+* **Spend-shape columns** (R/W bar + sparkline) follow the Cost column's
+  window: the graphics describe exactly the same dollars shown in Cost.
 """
 
 from __future__ import annotations
 
-from datetime import datetime, timedelta
+import math
+from collections import defaultdict
+from datetime import UTC, datetime, timedelta
 from typing import Any
 
 import duckdb
 from fastapi import HTTPException, Request
 from fastapi.responses import HTMLResponse
 
-from introspect.sql_fragments import session_cost_subquery_filtered
+from introspect.sql_fragments import (
+    CACHE_READ_COST_SQL,
+    CACHE_WRITE_COST_SQL,
+    COST_EXPR_SQL,
+    session_cost_subquery_filtered,
+)
 
 from ._helpers import (
     OBVIOUS_COMMANDS_SQL,
@@ -113,6 +122,233 @@ def _cost_subquery(window: TimeWindow | None) -> str:
     )
 
 
+_BAR_WIDTH = 64  # fixed px width for the R/W ratio bar
+_BAR_HEIGHT = 8  # fixed px height for the R/W ratio bar
+_RW_READ_COLOR = "#c9c9c9"
+_RW_WRITE_COLOR = "#3b5bdb"
+_SPARK_HEIGHT = 16  # px height for spend sparkline
+_SPARK_PAD = 2  # px padding top/bottom/left/right inside SVG
+_SPARK_MIN_WIDTH = 16  # px minimum sparkline width
+_SPARK_MAX_WIDTH = 90  # px maximum sparkline width
+_SPARK_MAX_POINTS = 60  # downsample to this many time slices
+_SPARK_LINE_COLOR = "#999"
+_SPARK_DOT_COLOR = "#3b5bdb"
+
+
+def _parse_timestamp(ts: str) -> float:
+    """Return epoch seconds from an ISO timestamp string (handles trailing Z)."""
+    ts = ts.rstrip("Z").replace("T", " ")
+    # DuckDB may return with or without fractional seconds
+    try:
+        dt = datetime.fromisoformat(ts)
+    except ValueError:
+        # Strip sub-seconds if present and try again
+        dt = datetime.fromisoformat(ts.split(".")[0])
+    return dt.replace(tzinfo=UTC).timestamp()
+
+
+def _build_rw_shape(read_usd: float, write_usd: float) -> dict[str, Any] | None:
+    """Build the R/W ratio bar descriptor for a session row.
+
+    Returns ``None`` when there is no cache activity (template shows em-dash).
+    """
+    total = read_usd + write_usd
+    if total <= 0:
+        return None
+    write_frac = write_usd / total
+    read_px = round(_BAR_WIDTH * (1 - write_frac))
+    write_px = _BAR_WIDTH - read_px
+    tooltip = (
+        f"cache read ${read_usd:.2f} · cache write ${write_usd:.2f}"
+        f" ({write_frac:.0%} write)"
+    )
+    return {
+        "read_usd": read_usd,
+        "write_usd": write_usd,
+        "write_frac": write_frac,
+        "read_px": read_px,
+        "write_px": write_px,
+        "tooltip": tooltip,
+    }
+
+
+def _build_spark_shape(
+    messages: list[tuple[float, float]],
+    max_dur_secs: float,
+) -> dict[str, Any] | None:
+    """Build the sparkline descriptor for a session row.
+
+    Args:
+        messages: list of ``(epoch_secs, cost_usd)`` sorted by time.
+        max_dur_secs: the longest session duration in the table (for width scaling).
+
+    Returns ``None`` when there are no usable timestamp pairs.
+    """
+    if not messages:
+        return None
+
+    t0 = messages[0][0]
+    t1 = messages[-1][0]
+    dur = t1 - t0
+    total_cost = sum(c for _, c in messages)
+
+    # Width proportional to sqrt(dur / max_dur)
+    if max_dur_secs > 0 and dur > 0:
+        width = _SPARK_MIN_WIDTH + (_SPARK_MAX_WIDTH - _SPARK_MIN_WIDTH) * math.sqrt(
+            dur / max_dur_secs
+        )
+        width = max(_SPARK_MIN_WIDTH, min(_SPARK_MAX_WIDTH, round(width)))
+    else:
+        width = _SPARK_MIN_WIDTH
+
+    h = _SPARK_HEIGHT
+    pad = _SPARK_PAD
+    inner_w = width - 2 * pad
+    inner_h = h - 2 * pad
+
+    if dur == 0 or len(messages) <= 1:
+        # Single message / zero-duration: just dot at center-right
+        end_x = pad + inner_w
+        end_y = pad + inner_h // 2
+        tooltip = "single message"
+        return {
+            "points": "",
+            "width": width,
+            "height": h,
+            "end_x": end_x,
+            "end_y": end_y,
+            "tooltip": tooltip,
+        }
+
+    # Downsample: bucket into up to _SPARK_MAX_POINTS equal time slices.
+    n_buckets = min(_SPARK_MAX_POINTS, len(messages))
+    bucket_dur = dur / n_buckets
+    buckets: dict[int, float] = {}
+    for ts, cost in messages:
+        b = min(int((ts - t0) / bucket_dur), n_buckets - 1)
+        buckets[b] = buckets.get(b, 0.0) + cost
+
+    # Always include the last point.
+    if (n_buckets - 1) not in buckets:
+        buckets[n_buckets - 1] = 0.0
+
+    # Build cumulative series from filled buckets.
+    cum = 0.0
+    points_list: list[str] = []
+    last_x = pad
+    last_y = pad + inner_h  # y grows downward; 0 cost = bottom
+    for b in sorted(buckets):
+        cum += buckets[b]
+        x = pad + inner_w * (b / (n_buckets - 1)) if n_buckets > 1 else pad + inner_w
+        y = (
+            (pad + inner_h) - inner_h * (cum / total_cost)
+            if total_cost > 0
+            else pad + inner_h
+        )
+        points_list.append(f"{x:.1f},{y:.1f}")
+        last_x = x
+        last_y = y
+
+    points = " ".join(points_list)
+
+    # Front-load share: fraction of cost in first half of time.
+    mid = t0 + dur / 2
+    first_half = sum(c for ts, c in messages if ts <= mid)
+    front_load_pct = round(100 * first_half / total_cost) if total_cost > 0 else 0
+
+    dur_min = round(dur / 60)
+    tooltip = f"{dur_min} min · {front_load_pct}% of spend in first half"
+
+    return {
+        "points": points,
+        "width": width,
+        "height": h,
+        "end_x": round(last_x, 1),
+        "end_y": round(last_y, 1),
+        "tooltip": tooltip,
+    }
+
+
+def _attach_spend_shapes(
+    db: duckdb.DuckDBPyConnection,
+    rows: list[dict[str, Any]],
+    window: TimeWindow | None,
+) -> None:
+    """Decorate Pareto rows in-place with ``rw`` and ``spark`` shape dicts.
+
+    Runs ONE per-message query over ``assistant_message_costs``, windowed
+    like ``_build_huge_reads_split``. Mutates each row dict adding:
+
+    - ``rw``: R/W ratio bar descriptor, or ``None`` for no cache activity.
+    - ``spark``: sparkline descriptor, or ``None`` for no usable timestamps.
+    """
+    if not rows:
+        return
+
+    if window is None:
+        amc_filter = ""
+        params: tuple[Any, ...] = ()
+    else:
+        amc_filter = "WHERE timestamp >= ? AND timestamp < ?"
+        params = window
+
+    shape_rows = db.execute(
+        f"""
+        SELECT
+            session_id,
+            timestamp,
+            ({COST_EXPR_SQL}) / 1e6 AS cost_usd,
+            ({CACHE_READ_COST_SQL}) / 1e6 AS read_usd,
+            ({CACHE_WRITE_COST_SQL}) / 1e6 AS write_usd
+        FROM assistant_message_costs
+        {amc_filter}
+        ORDER BY session_id, timestamp
+        """,  # noqa: S608
+        params,
+    ).fetchall()
+
+    # Group by session_id
+    session_ids = {r["session_id"] for r in rows}
+    per_session_read: dict[str, float] = defaultdict(float)
+    per_session_write: dict[str, float] = defaultdict(float)
+    # messages: session_id -> list of (epoch_secs, cost_usd)
+    per_session_msgs: dict[str, list[tuple[float, float]]] = defaultdict(list)
+
+    for sr in shape_rows:
+        sid = sr[0]
+        if sid not in session_ids:
+            continue
+        ts_str = sr[1]
+        cost = float(sr[2] or 0.0)
+        read = float(sr[3] or 0.0)
+        write = float(sr[4] or 0.0)
+        per_session_read[sid] += read
+        per_session_write[sid] += write
+        if ts_str:
+            try:
+                epoch = _parse_timestamp(str(ts_str))
+                per_session_msgs[sid].append((epoch, cost))
+            except (ValueError, OSError):
+                pass
+
+    # Compute max_dur across all rows for sparkline width scaling.
+    _MIN_MSGS_FOR_DURATION = 2
+    max_dur_secs = 0.0
+    for sid in session_ids:
+        msgs = per_session_msgs.get(sid, [])
+        if len(msgs) >= _MIN_MSGS_FOR_DURATION:
+            dur = msgs[-1][0] - msgs[0][0]
+            max_dur_secs = max(max_dur_secs, dur)
+
+    for row in rows:
+        sid = row["session_id"]
+        read_usd = per_session_read.get(sid, 0.0)
+        write_usd = per_session_write.get(sid, 0.0)
+        msgs = per_session_msgs.get(sid, [])
+        row["rw"] = _build_rw_shape(read_usd, write_usd)
+        row["spark"] = _build_spark_shape(msgs, max_dur_secs)
+
+
 def _build_panel_context(
     db: duckdb.DuckDBPyConnection,
     window: TimeWindow | None,
@@ -125,6 +361,7 @@ def _build_panel_context(
     per request, not twice.
     """
     pareto = _build_pareto(db, window)
+    _attach_spend_shapes(db, pareto["rows"], window)
     cost_rows = [(r["session_id"], r["cost_usd"]) for r in pareto["rows"]]
     return {
         "pareto": pareto,
