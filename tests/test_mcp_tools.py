@@ -18,6 +18,7 @@ from introspect.mcp.tools import (
     _SQL_CELL_MAX,
     _SQL_ROW_CAP,
     describe_schema,
+    expensive_sessions,
     get_session,
     recent_sessions,
     refresh_data,
@@ -517,3 +518,331 @@ def test_server_instructions_mention_key_views():
     assert instructions is not None
     assert "session_stats" in instructions
     assert "describe_schema" in instructions
+
+
+# ---------------------------------------------------------------------------
+# expensive_sessions tests
+# ---------------------------------------------------------------------------
+
+# Session IDs for expensive_sessions tests — distinct per test to avoid
+# accidental state sharing.
+_SID_CHEAP = "sess-expensive-cheap-aaa-aaaaaaaaa"
+_SID_MID = "sess-expensive-mid---aaa-aaaaaaaaa"
+_SID_PRICEY = "sess-expensive-pricey-aa-aaaaaaaaa"
+
+
+def _make_cost_session(
+    tmp_dir: Path,
+    session_id: str,
+    input_tokens: int,
+    timestamp_day: str = "2026-05-01",
+    timestamp_hour: str = "10",
+    *,
+    msg_id_suffix: str = "",
+    is_sidechain: bool = False,
+    cache_creation_tokens: int = 0,
+    output_tokens: int = 0,
+) -> None:
+    """Write a JSONL for a session with known cost at claude-opus-4-7 pricing.
+
+    claude-opus-4-7 input rate is $5/M, so ``input_tokens=1_000_000`` → $5.
+    Each session uses a unique msg_id via ``msg_id_suffix`` to avoid dedup.
+    The user message carries ``tool_use_result`` so union_by_name picks up
+    the column (mirrors cost_helpers._session_at_cost pattern).
+    """
+    sid_short = session_id[:8]
+    usage: dict = {
+        "input_tokens": input_tokens,
+        "output_tokens": output_tokens,
+        "cache_read_input_tokens": 0,
+        "cache_creation_input_tokens": cache_creation_tokens,
+        "cache_creation": {
+            "ephemeral_5m_input_tokens": cache_creation_tokens,
+            "ephemeral_1h_input_tokens": 0,
+        },
+    }
+    lines = [
+        make_user_message(
+            session_id,
+            "u1",
+            None,
+            f"{timestamp_day}T{timestamp_hour}:00:00.000Z",
+            "go",
+            tool_use_result={"content": "seed"},
+        ),
+        make_assistant_message(
+            session_id,
+            "a1",
+            "u1",
+            f"{timestamp_day}T{timestamp_hour}:00:01.000Z",
+            [{"type": "text", "text": "ok"}],
+            model="claude-opus-4-7",
+            msg_id=f"msg-{sid_short}{msg_id_suffix}-a1",
+            usage=usage,
+            is_sidechain=is_sidechain,
+        ),
+        # Second message for shape tests (distinct msg_id)
+        make_assistant_message(
+            session_id,
+            "a2",
+            "a1",
+            f"{timestamp_day}T{timestamp_hour}:30:00.000Z",
+            [{"type": "text", "text": "done"}],
+            model="claude-opus-4-7",
+            msg_id=f"msg-{sid_short}{msg_id_suffix}-a2",
+            usage={"input_tokens": 0, "output_tokens": output_tokens},
+        ),
+    ]
+    write_jsonl(tmp_dir, session_id, lines)
+
+
+def _materialize_expensive_db(tmp_path: Path) -> Path:
+    """Write three sessions with known costs and return the DB path.
+
+    Session costs at $5/M claude-opus-4-7 input:
+      _SID_PRICEY → 4M tokens → $20.00
+      _SID_MID    → 2M tokens → $10.00
+      _SID_CHEAP  →  1M tokens → $5.00
+    Total = $35.00.  Pareto 80% = $28.00; both _SID_PRICEY and _SID_MID
+    are needed (20+10=30 → first two cover 85.7%).
+    """
+    _make_cost_session(tmp_path, _SID_PRICEY, 4_000_000, msg_id_suffix="-p")
+    _make_cost_session(tmp_path, _SID_MID, 2_000_000, msg_id_suffix="-m")
+    _make_cost_session(tmp_path, _SID_CHEAP, 1_000_000, msg_id_suffix="-c")
+    db_path = tmp_path / "test.duckdb"
+    conn = duckdb.connect(str(db_path))
+    materialize_views(conn, glob_pattern(tmp_path))
+    conn.close()
+    return db_path
+
+
+def test_expensive_sessions_cost_ordering_and_pareto():
+    """Sessions are ordered by cost desc; cumulative % and [pareto] marker correct."""
+    with tempfile.TemporaryDirectory() as tmp:
+        tmp_path = Path(tmp)
+        db_path = _materialize_expensive_db(tmp_path)
+
+        with patch("introspect.mcp.tools.get_read_connection") as mock_conn:
+            mock_conn.return_value = duckdb.connect(str(db_path), read_only=True)
+            result = expensive_sessions(limit=15)
+
+    # Pricey session should come first ($20), mid second ($10), cheap third ($5)
+    # Use full session IDs to avoid prefix collisions
+    pricey_pos = result.index(_SID_PRICEY)
+    mid_pos = result.index(_SID_MID)
+    cheap_pos = result.index(_SID_CHEAP)
+    assert pricey_pos < mid_pos < cheap_pos
+
+    # Total should be $35
+    assert "$35.00" in result
+
+    # Both pricey and mid should be in pareto (20+10=$30 > 80% of $35=$28)
+    # Cheap is below the cutoff
+    # The second session (mid) should cross 80% (cumulative 30/35 = 85.7%)
+    assert "[pareto]" in result or "[pareto, crosses 80%]" in result
+
+    # Cumulative % for pricey session: 20/35 ≈ 57%
+    # Check that cum 57% appears near the pricey session
+    assert "cum 57%" in result
+
+    # The mid session tips over 80%: cumulative 30/35 ≈ 85%
+    assert "[pareto, crosses 80%]" in result
+
+
+def test_expensive_sessions_since_filters():
+    """since= excludes older sessions and changes totals."""
+    with tempfile.TemporaryDirectory() as tmp:
+        tmp_path = Path(tmp)
+        # Pricey on 2026-05-01, mid on 2026-04-01
+        _make_cost_session(
+            tmp_path,
+            _SID_PRICEY,
+            4_000_000,
+            timestamp_day="2026-05-01",
+            msg_id_suffix="-p",
+        )
+        _make_cost_session(
+            tmp_path,
+            _SID_MID,
+            2_000_000,
+            timestamp_day="2026-04-01",
+            msg_id_suffix="-m",
+        )
+        db_path = tmp_path / "test.duckdb"
+        conn = duckdb.connect(str(db_path))
+        materialize_views(conn, glob_pattern(tmp_path))
+        conn.close()
+
+        with patch("introspect.mcp.tools.get_read_connection") as mock_conn:
+            mock_conn.return_value = duckdb.connect(str(db_path), read_only=True)
+            result_all = expensive_sessions(limit=15)
+
+        with patch("introspect.mcp.tools.get_read_connection") as mock_conn:
+            mock_conn.return_value = duckdb.connect(str(db_path), read_only=True)
+            result_since = expensive_sessions(limit=15, since="2026-05-01")
+
+    # All: both sessions visible, total $30
+    assert "$30.00" in result_all
+
+    # Since May 1: only pricey ($20)
+    assert "$20.00" in result_since
+    assert _SID_MID not in result_since
+    assert "(since 2026-05-01)" in result_since
+
+
+def test_expensive_sessions_limit_clamps_display_not_totals():
+    """limit= truncates display rows but header totals reflect all sessions."""
+    with tempfile.TemporaryDirectory() as tmp:
+        tmp_path = Path(tmp)
+        db_path = _materialize_expensive_db(tmp_path)
+
+        with patch("introspect.mcp.tools.get_read_connection") as mock_conn:
+            mock_conn.return_value = duckdb.connect(str(db_path), read_only=True)
+            result = expensive_sessions(limit=1)
+
+    # Only first session displayed
+    assert _SID_PRICEY in result
+    assert _SID_MID not in result
+    assert _SID_CHEAP not in result
+
+    # But header total covers all 3 sessions and $35
+    assert "$35.00" in result
+    assert "3 sessions" in result
+
+
+def test_expensive_sessions_invalid_since():
+    """Invalid since returns Error: string."""
+    result = expensive_sessions(since="last week")
+    assert result.startswith("Error:")
+    assert "since" in result
+
+
+def test_expensive_sessions_no_cost_data():
+    """When no sessions have cost, returns friendly message."""
+    with tempfile.TemporaryDirectory() as tmp:
+        tmp_path = Path(tmp)
+        # Write a session with no usage (no cost)
+        lines = [
+            make_user_message(
+                "sess-no-cost-aaaa",
+                "u1",
+                None,
+                "2026-05-01T10:00:00.000Z",
+                "hello",
+                tool_use_result={"content": "seed"},
+            ),
+            make_assistant_message(
+                "sess-no-cost-aaaa",
+                "a1",
+                "u1",
+                "2026-05-01T10:00:01.000Z",
+                [{"type": "text", "text": "hi"}],
+                msg_id="msg-nocost-a1",
+            ),
+        ]
+        write_jsonl(tmp_path, "sess-no-cost-aaaa", lines)
+        db_path = tmp_path / "test.duckdb"
+        conn = duckdb.connect(str(db_path))
+        materialize_views(conn, glob_pattern(tmp_path))
+        conn.close()
+
+        with patch("introspect.mcp.tools.get_read_connection") as mock_conn:
+            mock_conn.return_value = duckdb.connect(str(db_path), read_only=True)
+            result = expensive_sessions()
+
+    assert "No sessions with cost found" in result
+
+
+def test_expensive_sessions_split_and_shape_lines():
+    """Split and shape lines appear when cache/output tokens exist."""
+    sid = "sess-split-shape-aaaa-aaaaaaaaaaa"
+    with tempfile.TemporaryDirectory() as tmp:
+        tmp_path = Path(tmp)
+        # Session with cache_creation tokens so split is non-zero
+        _make_cost_session(
+            tmp_path,
+            sid,
+            1_000_000,
+            msg_id_suffix="-s",
+            cache_creation_tokens=500_000,
+            output_tokens=200_000,
+        )
+        db_path = tmp_path / "test.duckdb"
+        conn = duckdb.connect(str(db_path))
+        materialize_views(conn, glob_pattern(tmp_path))
+        conn.close()
+
+        with patch("introspect.mcp.tools.get_read_connection") as mock_conn:
+            mock_conn.return_value = duckdb.connect(str(db_path), read_only=True)
+            result = expensive_sessions(limit=5)
+
+    # Split line should appear with cache write and output segments
+    assert "split: cache read" in result
+    assert "cache write" in result
+    assert "output" in result
+
+    # Shape line: two messages 30 min apart → not "single message"
+    assert "shape:" in result
+    assert "single message" not in result
+    assert "min" in result
+
+
+def test_expensive_sessions_subagent_flag():
+    """Subagent flag appears for sessions with a sidechain message."""
+    sid_sub = "sess-subagent-aaaaa-aaaa-aaaaaaaaaa"
+    sid_normal = "sess-normal-aaaaa-aaaa-aaaaaaaaaa"
+    with tempfile.TemporaryDirectory() as tmp:
+        tmp_path = Path(tmp)
+        # Session with a sidechain assistant message
+        lines_sub = [
+            make_user_message(
+                sid_sub,
+                "u1",
+                None,
+                "2026-05-01T10:00:00.000Z",
+                "go",
+                tool_use_result={"content": "seed"},
+            ),
+            make_assistant_message(
+                sid_sub,
+                "a1",
+                "u1",
+                "2026-05-01T10:00:01.000Z",
+                [{"type": "text", "text": "ok"}],
+                model="claude-opus-4-7",
+                msg_id="msg-sub-a1",
+                usage={"input_tokens": 2_000_000, "output_tokens": 0},
+                is_sidechain=True,
+            ),
+        ]
+        write_jsonl(tmp_path, sid_sub, lines_sub)
+
+        # Normal session (cheaper, so it appears second)
+        _make_cost_session(tmp_path, sid_normal, 1_000_000, msg_id_suffix="-n")
+
+        db_path = tmp_path / "test.duckdb"
+        conn = duckdb.connect(str(db_path))
+        materialize_views(conn, glob_pattern(tmp_path))
+        conn.close()
+
+        with patch("introspect.mcp.tools.get_read_connection") as mock_conn:
+            mock_conn.return_value = duckdb.connect(str(db_path), read_only=True)
+            result = expensive_sessions(limit=5)
+
+    # The subagent session block should say subagents=yes
+    sub_block_start = result.index(sid_sub[:8])
+    # Find the next blank-separated block boundary or end
+    next_block = result.find("\n\n", sub_block_start)
+    sub_block = (
+        result[sub_block_start:next_block]
+        if next_block != -1
+        else result[sub_block_start:]
+    )
+    assert "subagents=yes" in sub_block
+
+
+def test_expensive_sessions_instructions_mention():
+    """INSTRUCTIONS string mentions expensive_sessions."""
+    instructions = create_mcp_server().instructions
+    assert instructions is not None
+    assert "expensive_sessions" in instructions

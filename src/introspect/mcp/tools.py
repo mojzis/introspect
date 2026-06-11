@@ -11,6 +11,14 @@ from introspect.db import DEFAULT_DB_PATH, get_read_connection
 from introspect.mcp import refresh_bridge
 from introspect.refresh import RefreshOutcome, wait_for_refresh
 from introspect.search import ensure_search_corpus, fts_search
+from introspect.sql_fragments import (
+    CACHE_READ_COST_SQL,
+    CACHE_WRITE_COST_SQL,
+    COST_EXPR_SQL,
+    OUTPUT_COST_SQL,
+    SESSION_COST_SUBQUERY,
+    session_cost_subquery_filtered,
+)
 
 _VALID_ROLES = {"user", "assistant"}
 
@@ -19,6 +27,12 @@ _VALID_ROLES = {"user", "assistant"}
 _SQL_CELL_MAX = 200
 # Hard cap on run_sql rows regardless of caller's `limit` argument.
 _SQL_ROW_CAP = 500
+# Hard cap on expensive_sessions rows displayed (clamped from caller's limit).
+_EXPENSIVE_SESSIONS_ROW_CAP = 50
+
+# Pareto cumulative-cost cutoff — mirrors cost_overview.PARETO_CUTOFF.
+# Deliberate duplication: do NOT refactor cost_overview in this change.
+_PARETO_CUTOFF = 0.80
 
 # Generous compared to the HTTP refresh handler — MCP callers tolerate
 # longer waits than a browser HTMX swap. Module-level so tests can shrink it
@@ -439,3 +453,351 @@ def tool_failures(command_prefix: str = "", limit: int = 20) -> str:
         return "\n\n".join(lines)
     finally:
         conn.close()
+
+
+def _parse_ts_epoch(ts_val: object) -> float | None:
+    """Return epoch seconds from a DB timestamp value.
+
+    Handles: datetime objects, strings with/without trailing Z, with/without
+    fractional seconds. Mirrors cost_overview._parse_timestamp robustness.
+    """
+    ts = str(ts_val).rstrip("Z").replace("T", " ")
+    try:
+        return datetime.fromisoformat(ts).timestamp()
+    except ValueError:
+        try:
+            return datetime.fromisoformat(ts.split(".")[0]).timestamp()
+        except ValueError:
+            return None
+
+
+def expensive_sessions(limit: int = 15, since: str = "") -> str:  # noqa: PLR0912, PLR0915
+    """Return the most expensive sessions ranked by cost, with Pareto analysis.
+
+    Lists sessions in descending cost order. A Pareto marker ``[pareto]``
+    flags the sessions that together account for 80% of total spend — the
+    last marked row is the one that tips the cumulative share over 80%.
+
+    Each block includes: session ID (pass to ``get_session`` for the full
+    conversation), project, start time, model, message counts, tool count,
+    file activity, cost split (cache read / cache write / output), spend
+    shape (total duration + front-load %), subagent flag, and slash commands
+    used.
+
+    Results match the web Cost Overview page's Pareto table.
+
+    Parameters
+    ----------
+    limit:
+        Number of sessions to display (1-50, default 15). Header totals
+        always cover *all* sessions regardless of limit.
+    since:
+        Optional ISO date or timestamp (e.g. ``'2026-06-01'``). When set,
+        only costs from messages at or after this point are counted. Empty
+        string means all time.
+    """
+    # Validate since — copy search_conversations' pattern.
+    if since:
+        try:
+            datetime.fromisoformat(since)
+        except ValueError as exc:
+            return f"Error: invalid 'since' (expected ISO date/timestamp): {exc}"
+
+    # Clamp limit to [1, _EXPENSIVE_SESSIONS_ROW_CAP].
+    display_limit = max(1, min(limit, _EXPENSIVE_SESSIONS_ROW_CAP))
+
+    # Choose the cost subquery: filtered or unfiltered.
+    # Trust contract: `since` was round-tripped through fromisoformat above;
+    # splicing it into SQL is safe — mirrors cost_overview._cost_subquery.
+    if since:
+        cost_subquery = session_cost_subquery_filtered(f"timestamp >= '{since}'")
+    else:
+        cost_subquery = SESSION_COST_SUBQUERY
+
+    conn = get_read_connection()
+    try:
+        # --- Query 1: Pareto ranking + metadata ---
+        # Mirrors cost_overview._build_pareto — keep cutoff semantics in sync.
+        # Fetches ALL rows (needed for pareto_session_count and totals);
+        # display is capped to `display_limit` in Python.
+        pareto_rows = conn.execute(
+            f"""
+            WITH session_costs AS (
+                SELECT session_id, cost_usd FROM {cost_subquery}
+            ),
+            ranked AS (
+                SELECT
+                    session_id,
+                    cost_usd,
+                    SUM(cost_usd) OVER () AS grand_total,
+                    SUM(cost_usd) OVER (
+                        ORDER BY cost_usd DESC, session_id
+                        ROWS BETWEEN UNBOUNDED PRECEDING AND CURRENT ROW
+                    ) AS cumulative
+                FROM session_costs
+                WHERE cost_usd IS NOT NULL AND cost_usd > 0
+            )
+            SELECT
+                r.session_id,
+                r.cost_usd,
+                r.cumulative,
+                r.grand_total,
+                r.cumulative / NULLIF(r.grand_total, 0) AS cum_frac,
+                ss.started_at,
+                ss.duration,
+                ss.project,
+                ss.model,
+                ss.git_branch,
+                ss.user_messages,
+                ss.assistant_messages,
+                ss.tool_count,
+                ss.files_read,
+                ss.files_edited,
+                ss.commands,
+                ss.first_prompt
+            FROM ranked r
+            LEFT JOIN session_stats ss ON ss.session_id = r.session_id
+            ORDER BY r.cost_usd DESC, r.session_id
+            """  # noqa: S608
+        ).fetchall()
+
+        if not pareto_rows:
+            return "No sessions with cost found."
+
+        # --- Pareto arithmetic (Python) ---
+        # Same loop as _build_pareto: row is in-pareto while prev_cum_frac < 0.80;
+        # the tipping row is included.
+        grand_total = float(pareto_rows[0][3] or 0.0)
+        total_sessions = len(pareto_rows)
+
+        prev_cum_frac = 0.0
+        cutoff_seen = False
+        pareto_count = 0
+        pareto_cost_usd = 0.0
+        enriched: list[dict] = []
+        for row in pareto_rows:
+            (
+                session_id,
+                cost_usd_raw,
+                cumulative_raw,
+                _grand_total,
+                cum_frac_raw,
+                started_at,
+                duration,
+                project,
+                model,
+                git_branch,
+                user_messages,
+                assistant_messages,
+                tool_count,
+                files_read,
+                files_edited,
+                commands,
+                first_prompt,
+            ) = row
+            cost_usd = float(cost_usd_raw or 0.0)
+            cumulative = float(cumulative_raw or 0.0)
+            cum_frac = float(cum_frac_raw or 0.0)
+
+            if cutoff_seen:
+                in_pareto = False
+            elif prev_cum_frac >= _PARETO_CUTOFF:
+                in_pareto = False
+                cutoff_seen = True
+            else:
+                in_pareto = True
+
+            is_cutoff = in_pareto and cum_frac >= _PARETO_CUTOFF
+            if in_pareto:
+                pareto_count += 1
+                pareto_cost_usd = cumulative
+
+            enriched.append(
+                {
+                    "session_id": session_id,
+                    "cost_usd": cost_usd,
+                    "cum_frac": cum_frac,
+                    "in_pareto": in_pareto,
+                    "is_cutoff": is_cutoff,
+                    "started_at": str(started_at)[:16] if started_at else "?",
+                    "duration": duration,
+                    "project": project or "",
+                    "model": model or "",
+                    "git_branch": git_branch or "",
+                    "user_messages": user_messages or 0,
+                    "assistant_messages": assistant_messages or 0,
+                    "tool_count": tool_count or 0,
+                    "files_read": files_read or 0,
+                    "files_edited": files_edited or 0,
+                    "commands": commands or "",
+                    "first_prompt": first_prompt or "",
+                }
+            )
+            prev_cum_frac = cum_frac
+
+        # Rows to display
+        display_rows = enriched[:display_limit]
+        display_ids = [r["session_id"] for r in display_rows]
+
+        # --- Query 2: spend shape/split for displayed sessions only ---
+        if display_ids:
+            placeholders = ", ".join("?" * len(display_ids))
+            shape_params: list = list(display_ids)
+            since_filter = ""
+            if since:
+                since_filter = " AND timestamp >= ?"
+                shape_params.append(since)
+            shape_rows = conn.execute(
+                f"""
+                SELECT
+                    session_id,
+                    timestamp,
+                    ({COST_EXPR_SQL}) / 1e6      AS cost_usd,
+                    ({CACHE_READ_COST_SQL}) / 1e6  AS read_usd,
+                    ({CACHE_WRITE_COST_SQL}) / 1e6 AS write_usd,
+                    ({OUTPUT_COST_SQL}) / 1e6      AS output_usd
+                FROM assistant_message_costs
+                WHERE session_id IN ({placeholders}){since_filter}
+                ORDER BY session_id, timestamp
+                """,  # noqa: S608
+                shape_params,
+            ).fetchall()
+
+            # Aggregate per session
+            per_read: dict[str, float] = {}
+            per_write: dict[str, float] = {}
+            per_output: dict[str, float] = {}
+            per_msgs: dict[str, list[tuple[float, float]]] = {}
+            for sr in shape_rows:
+                sid = sr[0]
+                cost = float(sr[2] or 0.0)
+                read = float(sr[3] or 0.0)
+                write = float(sr[4] or 0.0)
+                output = float(sr[5] or 0.0)
+                per_read[sid] = per_read.get(sid, 0.0) + read
+                per_write[sid] = per_write.get(sid, 0.0) + write
+                per_output[sid] = per_output.get(sid, 0.0) + output
+                epoch = _parse_ts_epoch(sr[1]) if sr[1] is not None else None
+                if epoch is not None:
+                    per_msgs.setdefault(sid, []).append((epoch, cost))
+        else:
+            per_read = per_write = per_output = {}  # type: ignore[assignment]
+            per_msgs = {}
+
+        # --- Query 3: subagent flags for displayed sessions ---
+        subagent_ids: set[str] = set()
+        if display_ids:
+            placeholders = ", ".join("?" * len(display_ids))
+            flag_rows = conn.execute(
+                f"""
+                SELECT DISTINCT session_id FROM (
+                    SELECT session_id FROM assistant_message_costs
+                    WHERE is_sidechain = TRUE AND session_id IN ({placeholders})
+                    UNION ALL
+                    SELECT session_id FROM tool_calls
+                    WHERE tool_name IN ('Task', 'Agent')
+                      AND session_id IN ({placeholders})
+                ) sub
+                """,  # noqa: S608
+                display_ids + display_ids,
+            ).fetchall()
+            subagent_ids = {r[0] for r in flag_rows}
+
+    finally:
+        conn.close()
+
+    # --- Build output ---
+    # Lazy import: clean_title lives in the web layer (FastAPI/Jinja2 top-level
+    # imports); keeping it lazy prevents those imports at stdio MCP startup.
+    from introspect.api.handlers._helpers import clean_title  # noqa: PLC0415
+
+    since_clause = f" (since {since})" if since else ""
+    header_lines = [
+        f"Total: ${grand_total:.2f} across {total_sessions} sessions{since_clause}.",
+        f"Pareto: {pareto_count} sessions account for 80% (${pareto_cost_usd:.2f}).",
+        f"Top {display_limit} by cost:",
+    ]
+
+    blocks: list[str] = []
+    for i, row in enumerate(display_rows, start=1):
+        sid = row["session_id"]
+        cum_pct = round(row["cum_frac"] * 100)
+        in_pareto = row["in_pareto"]
+        is_cutoff = row["is_cutoff"]
+
+        if not in_pareto:
+            pareto_marker = ""
+        elif is_cutoff:
+            pareto_marker = "  [pareto, crosses 80%]"
+        else:
+            pareto_marker = "  [pareto]"
+
+        # Line 1: cost + cumulative % + pareto marker
+        line1 = f"{i}. ${row['cost_usd']:.2f}  cum {cum_pct}%{pareto_marker}"
+
+        # Line 2: session metadata
+        line2 = (
+            f"   session={sid} project={row['project'] or '—'}"
+            f" started={row['started_at']}"
+        )
+
+        # Line 3: duration / model / branch
+        line3 = (
+            f"   duration={row['duration'] or '?'}"
+            f" model={row['model'] or '?'}"
+            f" branch={row['git_branch'] or '?'}"
+        )
+
+        # Line 4: message counts / tools / files / subagents / commands
+        has_subagents = sid in subagent_ids
+        subagent_str = "yes" if has_subagents else "none"
+        commands_str = row["commands"] or "none"
+        line4 = (
+            f"   msgs={row['user_messages']}u/{row['assistant_messages']}a"
+            f" tools={row['tool_count']}"
+            f" files={row['files_read']}r/{row['files_edited']}w"
+            f" subagents={subagent_str}"
+            f" commands={commands_str}"
+        )
+
+        # Line 5: split
+        read_usd = per_read.get(sid, 0.0)
+        write_usd = per_write.get(sid, 0.0)
+        output_usd = per_output.get(sid, 0.0)
+        split_total = read_usd + write_usd + output_usd
+        if split_total > 0:
+            read_pct = round(100 * read_usd / split_total)
+            write_pct = round(100 * write_usd / split_total)
+            output_pct = 100 - read_pct - write_pct
+            line5 = (
+                f"   split: cache read {read_pct}% (${read_usd:.2f})"
+                f" · cache write {write_pct}% (${write_usd:.2f})"
+                f" · output {output_pct}% (${output_usd:.2f})"
+            )
+        else:
+            line5 = "   split: —"
+
+        # Line 6: shape
+        msgs = per_msgs.get(sid, [])
+        if len(msgs) <= 1:
+            line6 = "   shape: single message"
+        else:
+            t0 = msgs[0][0]
+            t1 = msgs[-1][0]
+            dur_secs = t1 - t0
+            dur_min = round(dur_secs / 60)
+            total_cost_msgs = sum(c for _, c in msgs)
+            mid = t0 + dur_secs / 2
+            front = sum(c for ts, c in msgs if ts <= mid)
+            front_pct = (
+                round(100 * front / total_cost_msgs) if total_cost_msgs > 0 else 0
+            )
+            line6 = f"   shape: {dur_min} min · {front_pct}% of spend in first half"
+
+        # Line 7: title
+        title = clean_title(row["first_prompt"])[:120] if row["first_prompt"] else "—"
+        line7 = f"   title: {title}"
+
+        blocks.append("\n".join([line1, line2, line3, line4, line5, line6, line7]))
+
+    return "\n".join(header_lines) + "\n\n" + "\n\n".join(blocks)

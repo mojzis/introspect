@@ -29,6 +29,9 @@ Key views:
 Tips:
 - Costs: use session_stats.cost_usd or assistant_message_costs; don't
   recompute from raw token counts.
+- For ranked expensive sessions with cost split, spend shape, and Pareto
+  analysis, call `expensive_sessions` instead of hand-rolling SQL — it
+  mirrors the web Cost Overview page and accepts an optional `since` filter.
 - Raw JSONL fields live in raw_data / raw_messages; use json_extract() for
   nested values.
 - Data refreshes every ~10 minutes; call `refresh_data` to pick up a session

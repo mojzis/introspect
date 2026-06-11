@@ -12,6 +12,7 @@ def register_tools(mcp: FastMCP) -> None:
     """Register all introspect MCP tools on the given server instance."""
     from introspect.mcp.tools import (  # noqa: PLC0415
         describe_schema,
+        expensive_sessions,
         get_session,
         recent_sessions,
         refresh_data,
@@ -24,6 +25,7 @@ def register_tools(mcp: FastMCP) -> None:
     mcp.tool()(get_session)
     mcp.tool()(recent_sessions)
     mcp.tool()(tool_failures)
+    mcp.tool()(expensive_sessions)
     mcp.tool()(run_sql)
     mcp.tool()(describe_schema)
     mcp.tool()(refresh_data)
