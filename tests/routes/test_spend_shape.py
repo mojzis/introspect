@@ -111,6 +111,53 @@ def test_spend_shape_rw_bar_read_write_dollars():
     assert split["read_px"] + split["write_px"] + split["output_px"] == 64
 
 
+def test_spend_shape_uuid_typed_session_ids():
+    """Shapes attach when DuckDB infers session_id as UUID (real-data shape).
+
+    With real logs every session id is UUID-shaped, so read_json_auto types
+    the column UUID and fetchall returns uuid.UUID objects. _build_pareto
+    str-coerces its row ids; _attach_spend_shapes must coerce the same way
+    or no shape row ever matches and every cell falls back to the em-dash.
+    """
+    from introspect.api.handlers.cost_overview import (  # noqa: PLC0415
+        _attach_spend_shapes,
+        _build_pareto,
+    )
+
+    sid = "b5ad9712-3b75-4a3e-9a6f-aaaaaaaaaaaa"
+    specs = [
+        (
+            sid,
+            _session_with_cache(
+                sid,
+                cache_read_tokens=2_000_000,
+                cache_creation_5m=1_000_000,
+                output_tokens=200_000,
+            ),
+        )
+    ]
+    with tempfile.TemporaryDirectory() as tmp_str:
+        tmp = Path(tmp_str)
+        _cost_overview_setup(tmp, specs)
+
+        def _run(conn):
+            assert (
+                conn.execute(
+                    "SELECT typeof(session_id) FROM assistant_message_costs LIMIT 1"
+                ).fetchone()[0]
+                == "UUID"
+            ), "fixture must reproduce the UUID-typed column real data produces"
+            pareto = _build_pareto(conn)
+            _attach_spend_shapes(conn, pareto["rows"], None)
+            return pareto["rows"]
+
+        rows = _materialize_and_run(tmp, _run)
+
+    assert len(rows) == 1
+    assert rows[0]["split"] is not None, "split missing: UUID/str session-id mismatch"
+    assert rows[0]["spark"] is not None, "spark missing: UUID/str session-id mismatch"
+
+
 def test_spend_shape_sparkline_geometry():
     """Sparkline: points are time-ordered, y non-increasing, longer session wider.
 
