@@ -2583,6 +2583,75 @@ def test_tokenscape_parallel_subagents_split_by_parent_chain():
     assert by_label["agent: scan code"]["cost"] == pytest.approx(
         expected_code, rel=1e-6
     )
+    # Per-run traces carry matching colours in both charts. (Parallel
+    # agents launched in one turn lump into one run in the timestamp
+    # sweep, so a single agent trace is expected here.)
+    stripes_fig = json.loads(ctx["figure_json_stripes"])
+    stripe_colors = {
+        t["name"]: t["marker"]["color"]
+        for t in stripes_fig["data"]
+        if t["name"].startswith("agent:")
+    }
+    bar_fig = json.loads(ctx["figure_json"])
+    bar_colors = {
+        t["name"]: t["marker"]["color"]
+        for t in bar_fig["data"]
+        if t["name"].startswith("agent:")
+    }
+    assert stripe_colors
+    assert bar_colors == stripe_colors
+
+
+def test_tokenscape_stripe_colors_distinguish_runs_and_rest():
+    """Agent runs cycle distinct fills; 'everything else' is the hatched
+    'rest' colour, not the system-prompt overhead colour."""
+    from introspect.api.handlers.tokenscape import (  # noqa: PLC0415
+        _CATEGORY_FILL,
+        _AgentRun,
+        _build_stripes,
+        _render_stripes_figure,
+        _Turn,
+    )
+
+    turns = [
+        _Turn(
+            idx=i,
+            ts=None,
+            model="claude-sonnet-4-6",
+            inp=4,
+            cache_read=0,
+            cache_creation=0,
+            cc_5m=0,
+            cc_1h=0,
+            out=0,
+            ctx=100,
+            event=None,
+        )
+        for i in range(4)
+    ]
+    runs = [
+        _AgentRun(label=f"agent: run {i}", cost=1.0, first_turn=0, last_turn=3)
+        for i in range(3)
+    ]
+    # agent_costs exceeds the runs' sum by 0.5 → an "everything else" stripe.
+    stripes = _build_stripes([], turns, [0.0] * 4, [3.5, 0.0, 0.0, 0.0], runs)
+
+    agent_stripes = [s for s in stripes if s["category"] == "agent"]
+    assert len(agent_stripes) == 3
+    assert len({s["fill"] for s in agent_stripes}) == 3
+
+    (rest,) = [s for s in stripes if s["label"] == "everything else"]
+    assert rest["category"] == "rest"
+    assert _CATEGORY_FILL["rest"] != _CATEGORY_FILL["overhead"]
+
+    fig = json.loads(_render_stripes_figure(stripes, turns))
+    by_name = {t["name"]: t for t in fig["data"]}
+    assert by_name["everything else"]["marker"]["color"] == _CATEGORY_FILL["rest"]
+    assert by_name["everything else"]["marker"]["pattern"]["shape"] == "/"
+    assert (
+        by_name["agent: run 0"]["marker"]["color"]
+        != by_name["agent: run 1"]["marker"]["color"]
+    )
 
 
 def test_tokenscape_subagent_prompt_classified_as_prompt():

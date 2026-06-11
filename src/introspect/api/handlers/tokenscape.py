@@ -74,27 +74,49 @@ _CATEGORY_LABEL = {
     "tool": "tool output",
     "assistant": "assistant output",
     "agent": "subagents",
+    "rest": "everything else",
 }
 _CATEGORY_FILL = {
-    "overhead": "#cdc7b8",
-    "skill": "#b0a479",
-    "prompt": "#a8c8e8",
-    "read_edited": "#d97f5a",
-    "read": "#eeb29e",
-    "tool": "#9ec4b8",
-    "assistant": "#c0b6e0",
-    "agent": "#d98880",
+    "overhead": "#d8d2c2",  # warm sand — quiet baseline
+    "skill": "#c9b458",  # ochre
+    "prompt": "#7ca9dd",  # clear blue — the user's own words
+    "read_edited": "#e0784a",  # terracotta
+    "read": "#f0c49e",  # pale apricot
+    "tool": "#72b3a2",  # sea green
+    "assistant": "#a99bd8",  # violet
+    "agent": "#cc6677",  # rose — subagents live in the red-purple family
+    "rest": "#ececef",  # cool gray, hatched — unlike the warm overhead sand
 }
 _CATEGORY_BORDER = {
-    "overhead": "#9a937f",
-    "skill": "#857a52",
-    "prompt": "#5a8ec0",
-    "read_edited": "#a04e2e",
-    "read": "#c07a5e",
-    "tool": "#5e9483",
-    "assistant": "#7a6cb0",
-    "agent": "#a04438",
+    "overhead": "#94896c",
+    "skill": "#8a7426",
+    "prompt": "#3d6fad",
+    "read_edited": "#a64a20",
+    "read": "#ab7340",
+    "tool": "#327c6b",
+    "assistant": "#6a55a8",
+    "agent": "#943a4c",
+    "rest": "#86868f",
 }
+# Each Task/Agent run cycles through these so a subagent-heavy session
+# doesn't collapse into one flat colour. All sit in the red-purple
+# family (agents stay "reddish") but are mutually distinguishable.
+_AGENT_RUN_COLORS = (
+    ("#cc6677", "#943a4c"),  # rose
+    ("#b07aa8", "#7c4a73"),  # plum
+    ("#e09a8a", "#a85e4d"),  # salmon
+    ("#a64d62", "#6e2f40"),  # wine
+    ("#c9a0b8", "#8e607e"),  # mauve
+)
+_OTHER_AGENTS_COLOR = ("#d9b8bd", "#9c6d75")  # washed-out rose for the fold
+
+
+def _agent_run_color(run_index: int) -> tuple[str, str]:
+    """(fill, border) for the i-th Task/Agent run — stable across the
+    per-turn chart and the stripes chart."""
+    return _AGENT_RUN_COLORS[run_index % len(_AGENT_RUN_COLORS)]
+
+
 # Bottom-to-top stacking order: stable context first, volatile spenders on top.
 _CATEGORY_ORDER = (
     "overhead",
@@ -414,6 +436,7 @@ class _AgentRun:
     cost: float = 0.0
     first_turn: int | None = None
     last_turn: int | None = None
+    per_turn: dict[int, float] = field(default_factory=dict)
 
 
 def _sidechain_costs_per_turn(
@@ -458,6 +481,7 @@ def _sidechain_costs_per_turn(
         while (
             ts is not None
             and timeline_idx < len(timeline)
+            and timeline[timeline_idx][0] is not None
             and timeline[timeline_idx][0] <= ts
         ):
             current_run = runs[timeline_idx]
@@ -474,6 +498,7 @@ def _sidechain_costs_per_turn(
         idx = timed[pos][1] if timed and pos >= 0 else 0
         idx = max(0, min(idx, len(turns) - 1))
         per_turn[idx] += cost
+        current_run.per_turn[idx] = current_run.per_turn.get(idx, 0.0) + cost
         current_run.cost += cost
         if current_run.first_turn is None:
             current_run.first_turn = idx
@@ -705,11 +730,12 @@ def _time_ticks(turns: list[_Turn]) -> tuple[list[int], list[str]]:
     return vals, texts
 
 
-def _render_figure(  # noqa: PLR0912, PLR0915
+def _render_figure(  # noqa: PLR0912, PLR0913, PLR0915
     bands: list[_Band],
     turns: list[_Turn],
     generation_costs: list[float],
     agent_costs: list[float],
+    agent_runs: list[_AgentRun],
     named: list[_Band],
 ) -> str:
     """Stacked per-turn cost bars: one trace per named slab + per category."""
@@ -722,7 +748,7 @@ def _render_figure(  # noqa: PLR0912, PLR0915
     # category aggregate so same-coloured stripes group visually. The
     # band object rides along (None for aggregates) — labels can repeat
     # (the same file Read twice), so identity must not go through them.
-    series: list[tuple[str, str, list[float], _Band | None]] = []
+    series: list[tuple[str, str, str, str, list[float], _Band | None]] = []
 
     def _aggregate(category: str) -> list[float]:
         ys = [0.0] * n
@@ -740,31 +766,41 @@ def _render_figure(  # noqa: PLR0912, PLR0915
         return ys
 
     for category in _CATEGORY_ORDER:
+        fill, border = _CATEGORY_FILL[category], _CATEGORY_BORDER[category]
         aggregate = _aggregate(category)
         if category == "assistant":
             for t, dollars in enumerate(generation_costs):
                 aggregate[t] += dollars
-        if category == "agent":
-            for t, dollars in enumerate(agent_costs):
-                aggregate[t] += dollars
         if any(v > 0 for v in aggregate):
-            series.append((_CATEGORY_LABEL[category], category, aggregate, None))
+            series.append(
+                (_CATEGORY_LABEL[category], category, fill, border, aggregate, None)
+            )
         series.extend(
-            (band.label, category, _band_series(band), band)
+            (band.label, category, fill, border, _band_series(band), band)
             for band in named
             if band.category == category
         )
+        if category == "agent":
+            # One trace per Task/Agent run, each with its own colour —
+            # same assignment order as the stripes chart.
+            for run_idx, run in enumerate(agent_runs):
+                run_fill, run_border = _agent_run_color(run_idx)
+                ys = [0.0] * n
+                for t, dollars in run.per_turn.items():
+                    ys[t] += dollars
+                if any(v > 0 for v in ys):
+                    series.append((run.label, category, run_fill, run_border, ys, None))
 
     fig = go.Figure()
-    for label, category, ys, _band in series:
+    for label, _category, fill, border, ys, _band in series:
         fig.add_trace(
             go.Bar(
                 x=xs,
                 y=ys,
                 name=label,
                 marker={
-                    "color": _CATEGORY_FILL[category],
-                    "line": {"width": 0.4, "color": _CATEGORY_BORDER[category]},
+                    "color": fill,
+                    "line": {"width": 0.4, "color": border},
                 },
                 showlegend=False,
                 hovertemplate=(
@@ -779,13 +815,13 @@ def _render_figure(  # noqa: PLR0912, PLR0915
     # Stack bottoms per series, for centring inline labels.
     cumulative = [0.0] * n
     series_bottom: list[list[float]] = []
-    for _, _, ys, _band in series:
+    for _, _, _, _, ys, _band in series:
         series_bottom.append(list(cumulative))
         for i in range(n):
             cumulative[i] += ys[i]
     max_total = max(cumulative) if cumulative and max(cumulative) > 0 else 1.0
 
-    for s_idx, (_label, category, ys, band) in enumerate(series):
+    for s_idx, (_label, category, _fill, border, ys, band) in enumerate(series):
         if category == "overhead" and band is None:
             # Label the baseline at the mid-point of its widest stretch.
             active = [i for i in range(n) if ys[i] > 0]
@@ -819,7 +855,7 @@ def _render_figure(  # noqa: PLR0912, PLR0915
                 "yref": "y",
                 "text": f"{band.label} · ${band.cost:,.2f} over {persisted} turns",
                 "showarrow": False,
-                "font": {"size": 11, "color": _CATEGORY_BORDER[band.category]},
+                "font": {"size": 11, "color": border},
             }
         )
 
@@ -1035,12 +1071,15 @@ def _build_stripes(
     # Runs below the subagent threshold fold into "other subagents".
     other_agents = 0.0
     other_agents_first: int | None = None
-    for run in agent_runs:
+    for run_idx, run in enumerate(agent_runs):
         if run.cost >= agent_threshold and run.cost >= 0.01:  # noqa: PLR2004
+            fill, border = _agent_run_color(run_idx)
             stripes.append(
                 {
                     "label": run.label,
                     "category": "agent",
+                    "fill": fill,
+                    "border": border,
                     "arrival": run.first_turn or 0,
                     "end": last,
                     "cost": run.cost,
@@ -1057,6 +1096,8 @@ def _build_stripes(
             {
                 "label": "other subagents",
                 "category": "agent",
+                "fill": _OTHER_AGENTS_COLOR[0],
+                "border": _OTHER_AGENTS_COLOR[1],
                 "arrival": other_agents_first or 0,
                 "end": last,
                 "cost": other_agents,
@@ -1083,7 +1124,7 @@ def _build_stripes(
         stripes.append(
             {
                 "label": "everything else",
-                "category": "overhead",
+                "category": "rest",
                 "arrival": 0,
                 "end": last,
                 "cost": rest,
@@ -1109,14 +1150,25 @@ def _render_stripes_figure(stripes: list[dict], turns: list[_Turn]) -> str:
         ys = [
             height if stripe["arrival"] <= t <= stripe["end"] else 0.0 for t in range(n)
         ]
+        # No per-bar border — a stripe must read as one solid
+        # rectangle, not a comb of per-turn columns.
+        marker: dict = {"color": stripe.get("fill", _CATEGORY_FILL[stripe["category"]])}
+        if stripe["category"] == "rest":
+            # Hatch the catch-all so it can't be mistaken for the
+            # system-prompt overhead stripe.
+            marker["pattern"] = {
+                "shape": "/",
+                "fgcolor": "#c8c8cf",
+                "fillmode": "overlay",
+                "size": 5,
+                "solidity": 0.4,
+            }
         fig.add_trace(
             go.Bar(
                 x=xs,
                 y=ys,
                 name=stripe["label"],
-                # No per-bar border — a stripe must read as one solid
-                # rectangle, not a comb of per-turn columns.
-                marker={"color": _CATEGORY_FILL[stripe["category"]]},
+                marker=marker,
                 showlegend=False,
                 hovertemplate=(
                     f"<b>{stripe['label']}</b><br>"
@@ -1151,7 +1203,10 @@ def _render_stripes_figure(stripes: list[dict], turns: list[_Turn]) -> str:
                 "yref": "y",
                 "text": f"{stripe['label']} · ${stripe['cost']:,.2f}",
                 "showarrow": False,
-                "font": {"size": 11, "color": _CATEGORY_BORDER[stripe["category"]]},
+                "font": {
+                    "size": 11,
+                    "color": stripe.get("border", _CATEGORY_BORDER[stripe["category"]]),
+                },
             }
         )
         for t in range(stripe["arrival"], stripe["end"] + 1):
@@ -1266,7 +1321,9 @@ def build_tokenscape_context(db: duckdb.DuckDBPyConnection, session_id: str) -> 
     agent_costs, agent_runs = _sidechain_costs_per_turn(db, session_id, turns)
     named = _pick_named_bands(bands)
 
-    figure_json = _render_figure(bands, turns, generation_costs, agent_costs, named)
+    figure_json = _render_figure(
+        bands, turns, generation_costs, agent_costs, agent_runs, named
+    )
     stripes = _build_stripes(bands, turns, generation_costs, agent_costs, agent_runs)
     figure_json_stripes = _render_stripes_figure(stripes, turns)
     bill_split = _bill_split(turns, generation_costs, agent_costs)

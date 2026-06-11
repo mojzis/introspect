@@ -718,18 +718,38 @@ def _resolve_uuid_range(
     return lo, hi
 
 
+def _empty_chart_context() -> dict:
+    """Chart context with no traces — the zero-message case, the chart
+    failure fallback, and chart-less partials all share this shape."""
+    empty_view_map = {"total": [], "agent": [], "category": [], "invocations": []}
+    return {
+        "messages": 0,
+        "points": 0,
+        "bucket_size": 1,
+        "figure_json": "",
+        "view_map": empty_view_map,
+        "annotation_view_map": dict(empty_view_map),
+        "marker_trace": -1,
+        "invocation_series": [],
+        "invocation_summary": [],
+        "has_subagents": False,
+    }
+
+
 def _build_cost_context(
     db,
     session_id: str,
     *,
     range_filter: tuple[str, str] | None = None,
+    include_chart: bool = True,
 ) -> dict:
     """Build the data structures the Cost tab template needs.
 
     When ``range_filter`` is set, the bloat tables (rollup + top
     contributors) are scoped to that uuid range. The chart context still
     covers the whole session — the chart is the user's navigation surface,
-    not a filtered view.
+    not a filtered view. ``include_chart=False`` skips Plotly figure
+    construction entirely — for partials that only render the tables.
     """
     # Single query drives three consumers: per-model rollup, bloat
     # aggregator, *and* the per-message cost chart.  The parent-user-message
@@ -798,29 +818,14 @@ def _build_cost_context(
     # failures so the rest of the cost tab (per-model rollup, bloat
     # tables) still renders for the user. The template handles the
     # ``chart_error`` key by replacing the plot with an inline notice.
-    try:
-        chart = _build_chart_from_attrib(attrib_rows, subagent_type_timeline)
-        chart_error: str | None = None
-    except Exception as exc:
-        logger.exception("Failed to build session cost chart for %s", session_id)
-        chart = {
-            "messages": 0,
-            "points": 0,
-            "bucket_size": 1,
-            "figure_json": "",
-            "view_map": {"total": [], "agent": [], "category": [], "invocations": []},
-            "annotation_view_map": {
-                "total": [],
-                "agent": [],
-                "category": [],
-                "invocations": [],
-            },
-            "marker_trace": -1,
-            "invocation_series": [],
-            "invocation_summary": [],
-            "has_subagents": False,
-        }
-        chart_error = f"{type(exc).__name__}: {exc}"
+    chart = _empty_chart_context()
+    chart_error: str | None = None
+    if include_chart:
+        try:
+            chart = _build_chart_from_attrib(attrib_rows, subagent_type_timeline)
+        except Exception as exc:
+            logger.exception("Failed to build session cost chart for %s", session_id)
+            chart_error = f"{type(exc).__name__}: {exc}"
     raw_tokens = sum(c["tokens"] for c in category_totals.values())
     total_bloat_tokens = raw_tokens or 1
     total_bloat_cost = sum(c["cost_usd"] for c in category_totals.values())
@@ -1307,20 +1312,8 @@ def _render_multi_chart(  # noqa: PLR0913, PLR0915
     top-N get distinct palette colours, the rest fold into "Other".
     """
     n_messages = len(uuids)
-    empty_view_map = {"total": [], "agent": [], "category": [], "invocations": []}
     if n_messages == 0:
-        return {
-            "messages": 0,
-            "points": 0,
-            "bucket_size": 1,
-            "figure_json": "",
-            "view_map": empty_view_map,
-            "annotation_view_map": dict(empty_view_map),
-            "marker_trace": -1,
-            "invocation_series": [],
-            "invocation_summary": [],
-            "has_subagents": False,
-        }
+        return _empty_chart_context()
 
     main_inc = [0.0 if is_sidechain_list[i] else inc_usd[i] for i in range(n_messages)]
     sub_inc = [inc_usd[i] if is_sidechain_list[i] else 0.0 for i in range(n_messages)]
@@ -1742,7 +1735,9 @@ async def cost_bloat_panel(
     range_filter: tuple[str, str] | None = None
     if from_uuid and to_uuid:
         range_filter = (from_uuid, to_uuid)
-    cost_ctx = _build_cost_context(db, session_id, range_filter=range_filter)
+    cost_ctx = _build_cost_context(
+        db, session_id, range_filter=range_filter, include_chart=False
+    )
     return templates.TemplateResponse(
         request,
         "_session_cost_bloat.html",
