@@ -566,6 +566,109 @@ def mcp():
     create_mcp_server().run(transport="stdio")
 
 
+# How long to wait for a freshly-spawned server to become connectable.
+# First start materialises the DuckDB, which can take tens of seconds on a
+# large history — be generous.
+SERVER_START_TIMEOUT_SECONDS = 120.0
+SERVER_POLL_INTERVAL_SECONDS = 0.5
+
+
+def _serve_log_path() -> Path:
+    """Return the path to the background server log file.
+
+    Defined as a function (rather than a constant) so tests can monkeypatch it
+    to a temporary directory and avoid writing into the real ``~/.introspect``.
+    """
+    return DEFAULT_DB_PATH.parent / "serve.log"
+
+
+def _ensure_server_running(host: str, port: int) -> None:
+    """Ensure an introspect server is listening on *host*:*port*.
+
+    If the port is already connectable, return immediately.  Otherwise spawn
+    ``python -m introspect.cli serve`` as a detached background process,
+    stream its output to ``_serve_log_path()``, and poll until the port
+    becomes connectable or the child exits prematurely.
+
+    Raises ``typer.Exit(code=1)`` on child death or timeout without touching
+    the child process (it may still be materialising the DB).
+    """
+    import socket  # noqa: PLC0415
+    import subprocess  # noqa: PLC0415
+    import sys  # noqa: PLC0415
+    import time  # noqa: PLC0415
+
+    # Fast path: server is already up.
+    try:
+        with socket.create_connection((host, port), timeout=1):
+            pass
+    except OSError:
+        pass
+    else:
+        return
+
+    log_path = _serve_log_path()
+    log_path.parent.mkdir(parents=True, exist_ok=True)
+
+    console.print(
+        f"[dim]Starting introspect server in the background "
+        f"([cyan]{host}:{port}[/cyan])[/dim]\n"
+        f"[dim]Log: {log_path}[/dim]\n"
+        "[dim]First start may take a while while the DB is materialised...[/dim]"
+    )
+
+    # TOCTOU caveat: if another process grabs the requested port between our
+    # probe above and the child's bind, _run_web_ui will shift to port+1 and
+    # our readiness poll on the original port will time out.  Acceptable edge
+    # case; do not engineer around it.
+    with log_path.open("ab") as log_fh:
+        proc = subprocess.Popen(  # noqa: S603
+            [
+                sys.executable,
+                "-m",
+                "introspect.cli",
+                "serve",
+                "--port",
+                str(port),
+                "--host",
+                host,
+            ],
+            stdout=log_fh,
+            stderr=subprocess.STDOUT,
+            stdin=subprocess.DEVNULL,
+            start_new_session=True,
+        )
+
+    deadline = time.monotonic() + SERVER_START_TIMEOUT_SECONDS
+    while time.monotonic() < deadline:
+        time.sleep(SERVER_POLL_INTERVAL_SECONDS)
+
+        if proc.poll() is not None:
+            console.print(
+                f"[red]Error:[/red] introspect server exited with code "
+                f"{proc.returncode} before becoming ready.\n"
+                f"Check the log for details: [cyan]{log_path}[/cyan]"
+            )
+            raise typer.Exit(code=1)
+
+        try:
+            with socket.create_connection((host, port), timeout=1):
+                pass
+        except OSError:
+            pass
+        else:
+            console.print(f"[green]Server ready on http://{host}:{port}[/green]")
+            return
+
+    console.print(
+        f"[red]Error:[/red] Server did not become ready within "
+        f"{SERVER_START_TIMEOUT_SECONDS:.0f} s.\n"
+        "It was left running — it may still be materialising the DB.\n"
+        f"Check the log for details: [cyan]{log_path}[/cyan]"
+    )
+    raise typer.Exit(code=1)
+
+
 # Appended to Claude Code's system prompt by `introspy claude`. The session
 # is dedicated to log analysis, so steer it toward the MCP tools instead of
 # spelunking ~/.claude/projects with Bash.
@@ -596,13 +699,13 @@ def claude(
 ):
     """Launch Claude Code connected to the introspect MCP server.
 
-    Requires a running `introspy serve` (the MCP tools are exposed over HTTP
-    at /mcp). The MCP config is passed inline, so nothing is written to your
-    Claude Code settings — the server is only registered for this session.
+    Starts ``introspy serve`` automatically in the background when nothing is
+    listening on the target port (log at ``~/.introspect/serve.log``).  The MCP
+    config is passed inline, so nothing is written to your Claude Code settings
+    — the server is only registered for this session.
     """
     import json  # noqa: PLC0415
     import shutil  # noqa: PLC0415
-    import socket  # noqa: PLC0415
     import subprocess  # noqa: PLC0415
 
     claude_bin = shutil.which("claude")
@@ -613,15 +716,7 @@ def claude(
         )
         raise typer.Exit(code=1)
 
-    try:
-        with socket.create_connection((host, port), timeout=1):
-            pass
-    except OSError:
-        console.print(
-            f"[yellow]Warning:[/yellow] nothing is listening on "
-            f"[cyan]{host}:{port}[/cyan] — start [cyan]introspy serve[/cyan] "
-            "in another terminal, or the MCP tools won't connect."
-        )
+    _ensure_server_running(host, port)
 
     config = json.dumps(
         {

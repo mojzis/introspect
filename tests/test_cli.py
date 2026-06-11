@@ -284,17 +284,122 @@ def test_claude_propagates_claude_exit_code(monkeypatch):
     assert result.exit_code == 3
 
 
-def test_claude_warns_when_server_not_running(monkeypatch):
-    """A warning is printed when nothing is listening on the target port."""
+def test_claude_starts_server_when_not_running(monkeypatch, tmp_path):
+    """When nothing is listening, `claude` spawns the server and waits for it."""
+    call_count = 0
 
-    def refuse(*args, **kwargs):
-        raise ConnectionRefusedError
+    def _fake_create_connection(*args, **kwargs):
+        nonlocal call_count
+        call_count += 1
+        if call_count == 1:
+            # First call (probe in _ensure_server_running): simulate no server.
+            raise ConnectionRefusedError
+        # Subsequent calls (readiness poll): server is up.
+        return contextlib.nullcontext()
+
+    popen_calls = []
+
+    class _FakeProc:
+        def poll(self):
+            return None  # child still running
+
+    def _fake_popen(argv, **kwargs):
+        popen_calls.append(argv)
+        return _FakeProc()
 
     monkeypatch.setattr("shutil.which", lambda _: "/usr/bin/claude")
-    monkeypatch.setattr(socket, "create_connection", refuse)
+    monkeypatch.setattr(socket, "create_connection", _fake_create_connection)
+    monkeypatch.setattr(subprocess, "Popen", _fake_popen)
+    monkeypatch.setattr(subprocess, "call", lambda argv: 0)
+    monkeypatch.setattr("time.sleep", lambda _: None)
+    monkeypatch.setattr(
+        "introspect.cli._serve_log_path", lambda: tmp_path / "serve.log"
+    )
+
+    result = runner.invoke(app, ["claude", "--port", "3000"])
+
+    assert result.exit_code == 0, result.output
+    assert len(popen_calls) == 1
+    argv = popen_calls[0]
+    assert "-m" in argv
+    assert "introspect.cli" in argv
+    assert "serve" in argv
+    assert "--port" in argv
+    assert "3000" in argv
+    assert "--host" in argv
+
+
+def test_claude_skips_start_when_server_running(monkeypatch):
+    """When the server is already listening, `claude` does not spawn a new one."""
+    monkeypatch.setattr("shutil.which", lambda _: "/usr/bin/claude")
+    monkeypatch.setattr(
+        socket, "create_connection", lambda *a, **k: contextlib.nullcontext()
+    )
+
+    def _should_not_popen(*args, **kwargs):
+        pytest.fail("subprocess.Popen should not be called when server is running")
+
+    monkeypatch.setattr(subprocess, "Popen", _should_not_popen)
     monkeypatch.setattr(subprocess, "call", lambda argv: 0)
 
     result = runner.invoke(app, ["claude"])
 
     assert result.exit_code == 0, result.output
-    assert "introspy serve" in result.output
+
+
+def test_claude_errors_when_server_exits_during_start(monkeypatch, tmp_path):
+    """If the spawned server process exits before the port opens, exit code is 1."""
+
+    def _refuse(*args, **kwargs):
+        raise ConnectionRefusedError
+
+    class _DyingProc:
+        returncode = 1
+
+        def poll(self):
+            return self.returncode  # child exited with error
+
+    monkeypatch.setattr("shutil.which", lambda _: "/usr/bin/claude")
+    monkeypatch.setattr(socket, "create_connection", _refuse)
+    monkeypatch.setattr(subprocess, "Popen", lambda *a, **k: _DyingProc())
+    monkeypatch.setattr("time.sleep", lambda _: None)
+    monkeypatch.setattr(
+        "introspect.cli._serve_log_path", lambda: tmp_path / "serve.log"
+    )
+
+    result = runner.invoke(app, ["claude"])
+
+    assert result.exit_code == 1
+    # Rich may wrap long paths across lines; collapse whitespace before checking.
+    flat_output = result.output.replace("\n", "")
+    assert "serve.log" in flat_output
+
+
+def test_claude_errors_when_server_start_times_out(monkeypatch, tmp_path):
+    """If the server never becomes connectable within the timeout, exit code is 1."""
+
+    def _refuse(*args, **kwargs):
+        raise ConnectionRefusedError
+
+    class _HangingProc:
+        def poll(self):
+            return None  # child never exits
+
+    monkeypatch.setattr("shutil.which", lambda _: "/usr/bin/claude")
+    monkeypatch.setattr(socket, "create_connection", _refuse)
+    monkeypatch.setattr(subprocess, "Popen", lambda *a, **k: _HangingProc())
+    monkeypatch.setattr("time.sleep", lambda _: None)
+    monkeypatch.setattr("introspect.cli.SERVER_START_TIMEOUT_SECONDS", 0.0)
+    monkeypatch.setattr("introspect.cli.SERVER_POLL_INTERVAL_SECONDS", 0.0)
+    monkeypatch.setattr(
+        "introspect.cli._serve_log_path", lambda: tmp_path / "serve.log"
+    )
+
+    result = runner.invoke(app, ["claude"])
+
+    assert result.exit_code == 1
+    # Rich may wrap long paths across lines; collapse whitespace before checking.
+    flat_output = result.output.replace("\n", "")
+    assert "serve.log" in flat_output
+    # Message should mention the server was left running
+    assert "left running" in result.output

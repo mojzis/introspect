@@ -71,13 +71,11 @@ Alternatively, the web server exposes the same MCP tools over HTTP at
 `http://127.0.0.1:8347/mcp`. To launch a Claude Code session wired up to it:
 
 ```bash
-# In one terminal
-introspy serve
-
-# In another
 introspy claude
 ```
 
+`introspy claude` starts `introspy serve` automatically in the background when
+nothing is listening on the target port (log at `~/.introspect/serve.log`).
 The MCP config is passed inline to `claude`, so the server is only registered
 for that session — no changes to your global Claude Code config.
 
