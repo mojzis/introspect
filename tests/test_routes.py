@@ -2433,6 +2433,249 @@ def test_tokenscape_subagent_run_ties_out_to_run_bill():
     assert run["fill"] == stripe_color
 
 
+def test_tokenscape_subagent_label_survives_dangling_parent():
+    """Conversation threads whose root parent_uuid exists nowhere in the
+    log can't chain back to their prompt — the drill-down label falls
+    back to the most recent preceding Task call, not 'agent: run'."""
+    from introspect.api.handlers.tokenscape import (  # noqa: PLC0415
+        build_tokenscape_context,
+    )
+    from introspect.db import get_connection  # noqa: PLC0415
+
+    sid = "deadbeef-0000-0000-0000-tokenscape10"
+    model = "claude-sonnet-4-6"
+    lines = [
+        make_user_message(
+            sid,
+            "u1",
+            None,
+            "2026-04-21T10:00:00.000Z",
+            "first prompt",
+            tool_use_result={"content": "seed"},
+        ),
+        make_assistant_message(
+            sid,
+            "a1",
+            "u1",
+            "2026-04-21T10:00:01.000Z",
+            [
+                {
+                    "type": "tool_use",
+                    "id": "toolu_task1",
+                    "name": "Task",
+                    "input": {
+                        "description": "scan docs",
+                        "prompt": "analyze the docs",
+                        "subagent_type": "explore",
+                    },
+                }
+            ],
+            model=model,
+            msg_id="msg-dp-1",
+            usage={"input_tokens": 4, "output_tokens": 100},
+        ),
+        # Sidechain prompt is a parentless one-message thread; the
+        # conversation roots separately at an assistant message whose
+        # parent uuid is dangling (real Claude Code logs do this).
+        make_user_message(
+            sid,
+            "sc-u1",
+            None,
+            "2026-04-21T10:00:02.000Z",
+            "analyze the docs",
+            is_sidechain=True,
+        ),
+        make_assistant_message(
+            sid,
+            "sc-a1",
+            "nowhere-to-be-found",
+            "2026-04-21T10:00:03.000Z",
+            [{"type": "text", "text": "on it"}],
+            model=model,
+            msg_id="msg-dp-sc1",
+            usage={
+                "input_tokens": 4,
+                "output_tokens": 500,
+                "cache_creation_input_tokens": 50_000,
+            },
+            is_sidechain=True,
+        ),
+        make_assistant_message(
+            sid,
+            "sc-a2",
+            "sc-a1",
+            "2026-04-21T10:00:04.000Z",
+            [{"type": "text", "text": "docs analyzed"}],
+            model=model,
+            msg_id="msg-dp-sc2",
+            usage={
+                "input_tokens": 4,
+                "output_tokens": 500,
+                "cache_read_input_tokens": 50_000,
+                "cache_creation_input_tokens": 1_000,
+            },
+            is_sidechain=True,
+        ),
+        make_user_message(
+            sid,
+            "u2",
+            "a1",
+            "2026-04-21T10:00:06.000Z",
+            [
+                {
+                    "type": "tool_result",
+                    "tool_use_id": "toolu_task1",
+                    "content": "agent finished",
+                }
+            ],
+        ),
+        make_assistant_message(
+            sid,
+            "a2",
+            "u2",
+            "2026-04-21T10:00:07.000Z",
+            [{"type": "text", "text": "all done"}],
+            model=model,
+            msg_id="msg-dp-2",
+            usage={"input_tokens": 4, "output_tokens": 50},
+        ),
+    ]
+    with tempfile.TemporaryDirectory() as tmp_str:
+        tmp = Path(tmp_str)
+        write_jsonl(tmp, sid, lines)
+        db = get_connection(tmp / "t.duckdb", glob_pattern(tmp))
+        ctx = build_tokenscape_context(db, sid)
+
+    runs = ctx["subagent_runs"]
+    assert len(runs) == 1
+    assert runs[0]["label"] == "agent: scan docs"
+    # Both conversation messages merged into the labelled run — not just
+    # the prompt-thread fragment that carried the label.
+    assert runs[0]["turn_count"] == 2
+
+
+def test_tokenscape_concurrent_dangling_threads_stay_separate_runs():
+    """Two unlinkable sidechain threads overlapping in time (a forked
+    skill, a nested agent) inherit the call's label but must NOT be
+    concatenated — interleaving would fold the chart's time axis back
+    on itself."""
+    from introspect.api.handlers.tokenscape import (  # noqa: PLC0415
+        build_tokenscape_context,
+    )
+    from introspect.db import get_connection  # noqa: PLC0415
+
+    sid = "deadbeef-0000-0000-0000-tokenscape12"
+    model = "claude-sonnet-4-6"
+    usage = {"input_tokens": 4, "output_tokens": 500}
+
+    def sidechain_turn(uuid: str, parent: str, second: int, text: str) -> dict:
+        return make_assistant_message(
+            sid,
+            uuid,
+            parent,
+            f"2026-04-21T10:00:{second:02d}.000Z",
+            [{"type": "text", "text": text}],
+            model=model,
+            msg_id=f"msg-cd-{uuid}",
+            usage={**usage, "cache_creation_input_tokens": 30_000},
+            is_sidechain=True,
+        )
+
+    lines = [
+        make_user_message(
+            sid,
+            "u1",
+            None,
+            "2026-04-21T10:00:00.000Z",
+            "first prompt",
+            tool_use_result={"content": "seed"},
+        ),
+        make_assistant_message(
+            sid,
+            "a1",
+            "u1",
+            "2026-04-21T10:00:01.000Z",
+            [
+                {
+                    "type": "tool_use",
+                    "id": "toolu_task1",
+                    "name": "Task",
+                    "input": {
+                        "description": "scan docs",
+                        "prompt": "analyze the docs",
+                        "subagent_type": "explore",
+                    },
+                }
+            ],
+            model=model,
+            msg_id="msg-cd-1",
+            usage=usage,
+        ),
+        # Thread A (dangling parent): 10:00:03 → 10:00:10.
+        sidechain_turn("sc-a1", "gone-a", 3, "thread A start"),
+        sidechain_turn("sc-a2", "sc-a1", 10, "thread A end"),
+        # Thread B (dangling parent) overlaps A: 10:00:05 → 10:00:07.
+        sidechain_turn("sc-b1", "gone-b", 5, "thread B start"),
+        sidechain_turn("sc-b2", "sc-b1", 7, "thread B end"),
+        make_user_message(
+            sid,
+            "u2",
+            "a1",
+            "2026-04-21T10:00:12.000Z",
+            [
+                {
+                    "type": "tool_result",
+                    "tool_use_id": "toolu_task1",
+                    "content": "agent finished",
+                }
+            ],
+        ),
+        make_assistant_message(
+            sid,
+            "a2",
+            "u2",
+            "2026-04-21T10:00:13.000Z",
+            [{"type": "text", "text": "all done"}],
+            model=model,
+            msg_id="msg-cd-2",
+            usage=usage,
+        ),
+    ]
+    with tempfile.TemporaryDirectory() as tmp_str:
+        tmp = Path(tmp_str)
+        write_jsonl(tmp, sid, lines)
+        db = get_connection(tmp / "t.duckdb", glob_pattern(tmp))
+        ctx = build_tokenscape_context(db, sid)
+
+    runs = ctx["subagent_runs"]
+    assert len(runs) == 2
+    assert {r["label"] for r in runs} == {"agent: scan docs"}
+    assert sorted(r["turn_count"] for r in runs) == [2, 2]
+
+
+def test_tokenscape_stripe_labels_use_dark_ink():
+    """Stripe captions render in the high-contrast label font, not the
+    greyish category border colours."""
+    from introspect.api.handlers.tokenscape import (  # noqa: PLC0415
+        _STRIPE_LABEL_FONT,
+        build_tokenscape_context,
+    )
+    from introspect.db import get_connection  # noqa: PLC0415
+
+    sid = "deadbeef-0000-0000-0000-tokenscape11"
+    with tempfile.TemporaryDirectory() as tmp_str:
+        tmp = Path(tmp_str)
+        _tokenscape_session_jsonl(tmp, sid)
+        db = get_connection(tmp / "t.duckdb", glob_pattern(tmp))
+        ctx = build_tokenscape_context(db, sid)
+
+    fig = json.loads(ctx["figure_json_stripes"])
+    annotations = fig["layout"]["annotations"]
+    assert annotations
+    for annotation in annotations:
+        assert annotation["font"] == _STRIPE_LABEL_FONT
+
+
 def test_tokenscape_parallel_subagents_split_by_parent_chain():
     """Interleaved sidechain threads split per Task via parent chains —
     a timestamp sweep would lump them into one run."""

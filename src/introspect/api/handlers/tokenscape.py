@@ -109,6 +109,9 @@ _AGENT_RUN_COLORS = (
     ("#c9a0b8", "#8e607e"),  # mauve
 )
 _OTHER_AGENTS_COLOR = ("#d9b8bd", "#9c6d75")  # washed-out rose for the fold
+# Stripe captions sit on light pastel fills — near-black ink beats the
+# mid-tone category borders for readability.
+_STRIPE_LABEL_FONT = {"size": 13, "color": "#2d2a26"}
 
 
 def _agent_run_color(run_index: int) -> tuple[str, str]:
@@ -378,46 +381,101 @@ def _fetch_agent_calls(db: duckdb.DuckDBPyConnection, session_id: str) -> list[t
     ).fetchall()
 
 
-def _label_subagent_groups(
+def _label_and_merge_subagent_groups(
     db: duckdb.DuckDBPyConnection,
     session_id: str,
     groups: list[list[tuple]],
     prompts: dict[str, str],
-) -> list[str]:
-    """One ``agent: <description>`` label per group (session-stripe format).
+) -> list[tuple[list[tuple], str]]:
+    """``(rows, "agent: <description>")`` per Task/Agent invocation.
 
     Primary linkage: the group's root prompt text equals a Task/Agent
-    call's ``prompt`` input verbatim (each call consumed once). Leftover
-    groups pair with leftover calls in timestamp order; anything still
-    unmatched falls back to ``agent: run``.
+    call's ``prompt`` input verbatim (each call consumed once). Groups
+    without a prompt root — subagent conversations often arrive with a
+    ``parent_uuid`` that exists nowhere in the log, so they can't chain
+    back to their prompt — inherit the most recent preceding call by
+    timestamp (the sweep ``_sidechain_costs_per_turn`` uses, so the
+    drill-down agrees with the chart). Remaining groups pair with
+    leftover calls in order; anything still unmatched is ``agent: run``.
+
+    Groups resolving to the same call are fragments of one invocation
+    (the prompt thread, the conversation, post-break continuations) —
+    time-disjoint fragments merge into a single run, in group order
+    (groups arrive ordered by first timestamp). A fragment overlapping
+    the run in time is a concurrent thread (a forked skill or a nested
+    agent), not a continuation — it becomes its own run; see
+    ``_chain_disjoint_fragments``.
     """
     calls = _fetch_agent_calls(db, session_id)
 
-    labels: list[str | None] = [None] * len(groups)
+    assigned: list[int | None] = [None] * len(groups)
     used = [False] * len(calls)
     for gi, group in enumerate(groups):
         root_text = next((prompts[r[0]] for r in group if r[0] in prompts), None)
         if root_text is None:
             continue
-        for ci, (_called_at, descr, stype, prompt) in enumerate(calls):
+        for ci, (_called_at, _descr, _stype, prompt) in enumerate(calls):
             if not used[ci] and prompt == root_text:
                 used[ci] = True
-                labels[gi] = _agent_label(descr, stype)
+                assigned[gi] = ci
                 break
 
-    leftover = (c for ci, c in enumerate(calls) if not used[ci])
-    resolved: list[str] = []
-    for label in labels:
-        if label is not None:
-            resolved.append(label)
+    for gi, group in enumerate(groups):
+        if assigned[gi] is not None:
             continue
-        call = next(leftover, None)
-        if call is None:
-            resolved.append("agent: run")
+        first_ts = next((r[1] for r in group if r[1] is not None), None)
+        if first_ts is None:
+            continue
+        for ci, (called_at, _descr, _stype, _prompt) in enumerate(calls):
+            if called_at is not None and called_at <= first_ts:
+                assigned[gi] = ci
+
+    leftover = (ci for ci in range(len(calls)) if not used[ci])
+    by_call: dict[int, list[list[tuple]]] = {}
+    unmatched: list[list[tuple]] = []
+    for gi, group in enumerate(groups):
+        ci = assigned[gi] if assigned[gi] is not None else next(leftover, None)
+        if ci is None:
+            unmatched.append(group)
         else:
-            _called_at, descr, stype, _prompt = call
-            resolved.append(_agent_label(descr, stype))
-    return resolved
+            by_call.setdefault(ci, []).append(group)
+
+    runs = [
+        (rows, _agent_label(calls[ci][1], calls[ci][2]))
+        for ci, fragments in sorted(by_call.items())
+        for rows in _chain_disjoint_fragments(fragments)
+    ]
+    runs.extend((group, "agent: run") for group in unmatched)
+    return runs
+
+
+def _chain_disjoint_fragments(fragments: list[list[tuple]]) -> list[list[tuple]]:
+    """Concatenate one invocation's fragments into time-monotonic chains.
+
+    A dangling ``parent_uuid`` splits a single conversation into
+    sequential fragments — those belong end-to-end in one chain. But a
+    thread that *overlaps* the chain in time is a concurrent
+    conversation (a forked skill load, a nested agent): interleaving it
+    would corrupt the context-delta walk and fold the x-axis time ticks
+    back on themselves, so it starts a new chain. Each fragment joins
+    the first chain it doesn't overlap.
+    """
+    chains: list[list[tuple]] = []
+    chain_ends: list[datetime.datetime | None] = []
+    for fragment in fragments:
+        stamps = [r[1] for r in fragment if r[1] is not None]
+        first = stamps[0] if stamps else None
+        last = stamps[-1] if stamps else None
+        for i, end in enumerate(chain_ends):
+            if first is None or end is None or first >= end:
+                chains[i].extend(fragment)
+                if last is not None and (end is None or last > end):
+                    chain_ends[i] = last
+                break
+        else:
+            chains.append(list(fragment))
+            chain_ends.append(last)
+    return chains
 
 
 def _fetch_edited_files(db: duckdb.DuckDBPyConnection, session_id: str) -> set[str]:
@@ -1073,13 +1131,12 @@ def _build_stripes(
     other_agents_first: int | None = None
     for run_idx, run in enumerate(agent_runs):
         if run.cost >= agent_threshold and run.cost >= 0.01:  # noqa: PLR2004
-            fill, border = _agent_run_color(run_idx)
+            fill, _border = _agent_run_color(run_idx)
             stripes.append(
                 {
                     "label": run.label,
                     "category": "agent",
                     "fill": fill,
-                    "border": border,
                     "arrival": run.first_turn or 0,
                     "end": last,
                     "cost": run.cost,
@@ -1097,7 +1154,6 @@ def _build_stripes(
                 "label": "other subagents",
                 "category": "agent",
                 "fill": _OTHER_AGENTS_COLOR[0],
-                "border": _OTHER_AGENTS_COLOR[1],
                 "arrival": other_agents_first or 0,
                 "end": last,
                 "cost": other_agents,
@@ -1203,10 +1259,7 @@ def _render_stripes_figure(stripes: list[dict], turns: list[_Turn]) -> str:
                 "yref": "y",
                 "text": f"{stripe['label']} · ${stripe['cost']:,.2f}",
                 "showarrow": False,
-                "font": {
-                    "size": 11,
-                    "color": stripe.get("border", _CATEGORY_BORDER[stripe["category"]]),
-                },
+                "font": dict(_STRIPE_LABEL_FONT),
             }
         )
         for t in range(stripe["arrival"], stripe["end"] + 1):
@@ -1312,9 +1365,9 @@ def _build_subagent_runs(
             return empty
         groups = _group_sidechain_rows(sidechain_rows)
         prompts = _fetch_subagent_prompts(db, session_id)
-        labels = _label_subagent_groups(db, session_id, groups, prompts)
+        merged = _label_and_merge_subagent_groups(db, session_id, groups, prompts)
         run_ctxs = []
-        for group, label in zip(groups, labels, strict=True):
+        for group, label in merged:
             run_ctx = _build_subagent_run_context(group, label, edited_files)
             if run_ctx is not None:
                 run_ctxs.append(run_ctx)
