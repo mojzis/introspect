@@ -360,9 +360,9 @@ def test_subagents_table_renders_for_one_task_session(tmp_path):
 
         # Read file should show up in file counts
         assert "/tmp/doc.md" not in html  # paths aren't shown directly...
-        # ...but tool counts must be non-zero (the Read call)
-        # The sidechain has 1 tool call (Read)
-        assert ">1<" in html or "1</td>" in html
+        # tool_count == 1 and files_read == 1 are verified precisely in
+        # test_context_builder_per_run_metrics; here we just confirm the page
+        # renders without error and includes the expected labels.
 
         # Cost: expected run cost from tokenscape test
         expected_cost = compute_cost_usd(

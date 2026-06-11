@@ -11,7 +11,7 @@ import logging
 from datetime import UTC, datetime
 from typing import TYPE_CHECKING
 
-from introspect.pricing import compute_cost_usd, rates_for
+from introspect.pricing import rates_for
 
 from ._helpers import format_cost, format_duration, safe_json
 from .cost_overview import _build_cost_split_shape
@@ -48,7 +48,10 @@ def _to_posix_timestamp(t: object) -> float:
     if s.endswith("Z"):
         s = s[:-1] + "+00:00"
     try:
-        return datetime.fromisoformat(s).timestamp()
+        dt = datetime.fromisoformat(s)
+        if dt.tzinfo is None:
+            dt = dt.replace(tzinfo=UTC)
+        return dt.timestamp()
     except ValueError:
         # Strip sub-second precision and retry
         return (
@@ -65,7 +68,7 @@ def _compute_duration(timestamps: list[object]) -> str:
     try:
         posix = sorted(_to_posix_timestamp(t) for t in timestamps)
         return format_duration(posix[-1] - posix[0])
-    except Exception:
+    except (ValueError, OSError, TypeError):
         return "—"
 
 
@@ -100,21 +103,17 @@ def _accumulate_cost(  # noqa: PLR0913
     if cc_5m == 0 and cc_1h == 0 and cc_total > 0:
         eff_5m = cc_total
 
+    # Compute all sub-costs from a single rate lookup so the split bar and
+    # row total are derived from the same rates and can never drift apart.
     r = rates_for(model)
+    input_usd = input_tokens * r.input / 1_000_000
     read_usd = cache_read_tokens * r.cache_read / 1_000_000
     write_usd = (eff_5m * r.cache_write_5m + cc_1h * r.cache_write_1h) / 1_000_000
     output_usd = output_tokens * r.output / 1_000_000
+    row_cost_usd = input_usd + read_usd + write_usd + output_usd
 
     return (
-        total_cost_usd
-        + compute_cost_usd(
-            model=model,
-            input_tokens=input_tokens,
-            output_tokens=output_tokens,
-            cache_read_tokens=cache_read_tokens,
-            cache_creation_5m=eff_5m,
-            cache_creation_1h=cc_1h,
-        ),
+        total_cost_usd + row_cost_usd,
         total_read_usd + read_usd,
         total_write_usd + write_usd,
         total_output_usd + output_usd,
