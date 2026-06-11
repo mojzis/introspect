@@ -13,6 +13,7 @@ import pytest
 
 from introspect.db import materialize_views
 from introspect.mcp import refresh_bridge
+from introspect.mcp.server import create_mcp_server
 from introspect.mcp.tools import (
     _SQL_CELL_MAX,
     _SQL_ROW_CAP,
@@ -508,3 +509,11 @@ def test_refresh_bridge_rejects_double_registration():
     # Clearing first allows re-registration.
     refresh_bridge.set_state(None)
     refresh_bridge.set_state(other_state)
+
+
+def test_server_instructions_mention_key_views():
+    """The MCP server ships instructions orienting external clients."""
+    instructions = create_mcp_server().instructions
+    assert instructions is not None
+    assert "session_stats" in instructions
+    assert "describe_schema" in instructions

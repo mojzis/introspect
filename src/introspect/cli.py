@@ -428,6 +428,10 @@ def materialize(
         conn.close()
 
 
+# Deliberately off the beaten path: 8000/8080 collide with every other dev
+# server, and the MCP registration in Claude Code must match the live port.
+DEFAULT_PORT = 8347
+
 PORT_PROBE_ATTEMPTS = 20
 
 
@@ -522,7 +526,7 @@ def _run_web_ui(
 
 @app.command()
 def serve(
-    port: int = typer.Option(8000, help="Port to listen on"),
+    port: int = typer.Option(DEFAULT_PORT, help="Port to listen on"),
     host: str = typer.Option("127.0.0.1", help="Host to bind to"),
     days: int = typer.Option(
         10, "-d", "--days", help="Days of history to load (0 = no limit)"
@@ -539,7 +543,7 @@ def serve(
 
 @app.command()
 def devserve(
-    port: int = typer.Option(8000, help="Port to listen on"),
+    port: int = typer.Option(DEFAULT_PORT, help="Port to listen on"),
     host: str = typer.Option("127.0.0.1", help="Host to bind to"),
     days: int = typer.Option(
         10, "-d", "--days", help="Days of history to load (0 = no limit)"
@@ -562,9 +566,29 @@ def mcp():
     create_mcp_server().run(transport="stdio")
 
 
+# Appended to Claude Code's system prompt by `introspy claude`. The session
+# is dedicated to log analysis, so steer it toward the MCP tools instead of
+# spelunking ~/.claude/projects with Bash.
+CLAUDE_SYSTEM_PROMPT_SUFFIX = (
+    "This session is dedicated to analyzing Claude Code conversation logs "
+    "via the `introspect` MCP server. Prefer the mcp__introspect__* tools "
+    "(run_sql, describe_schema, search_conversations, get_session, "
+    "recent_sessions, tool_failures, refresh_data) over reading "
+    "~/.claude/projects JSONL files directly — the views already handle "
+    "session stitching, cost attribution, and project resolution. Call "
+    "describe_schema before writing SQL."
+)
+
+# Permission rule covering every tool on the introspect MCP server, so the
+# dedicated session doesn't permission-prompt on each query.
+INTROSPECT_MCP_PERMISSION = "mcp__introspect"
+
+
 @app.command()
 def claude(
-    port: int = typer.Option(8000, help="Port the introspect server is listening on"),
+    port: int = typer.Option(
+        DEFAULT_PORT, help="Port the introspect server is listening on"
+    ),
     host: str = typer.Option(
         "127.0.0.1", help="Host the introspect server is bound to"
     ),
@@ -606,7 +630,17 @@ def claude(
         }
     )
     raise typer.Exit(
-        code=subprocess.call([claude_bin, "--mcp-config", config])  # noqa: S603
+        code=subprocess.call(  # noqa: S603
+            [
+                claude_bin,
+                "--mcp-config",
+                config,
+                "--append-system-prompt",
+                CLAUDE_SYSTEM_PROMPT_SUFFIX,
+                "--allowedTools",
+                INTROSPECT_MCP_PERMISSION,
+            ]
+        )
     )
 
 

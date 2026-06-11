@@ -1,5 +1,6 @@
 """Tests for CLI helpers."""
 
+import asyncio
 import contextlib
 import json
 import socket
@@ -10,7 +11,8 @@ from pathlib import Path
 import pytest
 from typer.testing import CliRunner
 
-from introspect.cli import _find_available_port, app
+from introspect.cli import CLAUDE_SYSTEM_PROMPT_SUFFIX, _find_available_port, app
+from introspect.mcp.server import create_mcp_server
 
 runner = CliRunner()
 
@@ -238,6 +240,35 @@ def test_claude_passes_inline_mcp_config(monkeypatch):
     config = json.loads(argv[2])
     server = config["mcpServers"]["introspect"]
     assert server == {"type": "http", "url": "http://127.0.0.1:3000/mcp"}
+
+
+def test_claude_steers_session_toward_mcp_tools(monkeypatch):
+    """`claude` appends a dedicated system prompt and pre-allows the MCP tools."""
+    calls = []
+    monkeypatch.setattr("shutil.which", lambda _: "/usr/bin/claude")
+    monkeypatch.setattr(
+        socket, "create_connection", lambda *a, **k: contextlib.nullcontext()
+    )
+    monkeypatch.setattr(subprocess, "call", lambda argv: calls.append(argv) or 0)
+
+    result = runner.invoke(app, ["claude"])
+
+    assert result.exit_code == 0, result.output
+    argv = calls[0]
+    prompt = argv[argv.index("--append-system-prompt") + 1]
+    assert "mcp__introspect__" in prompt
+    assert argv[argv.index("--allowedTools") + 1] == "mcp__introspect"
+
+
+def test_claude_system_prompt_lists_every_registered_tool():
+    """The hand-written tool list in the system prompt must not drift.
+
+    `CLAUDE_SYSTEM_PROMPT_SUFFIX` enumerates the MCP tools by name; when a
+    tool is added or renamed in the registry, the prompt must be updated too.
+    """
+    registered = {tool.name for tool in asyncio.run(create_mcp_server().list_tools())}
+    missing = {name for name in registered if name not in CLAUDE_SYSTEM_PROMPT_SUFFIX}
+    assert not missing, f"system prompt omits registered MCP tools: {missing}"
 
 
 def test_claude_propagates_claude_exit_code(monkeypatch):
