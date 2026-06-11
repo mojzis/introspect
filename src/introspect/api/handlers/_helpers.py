@@ -1,10 +1,12 @@
 """Shared helpers, constants, and template setup for route handlers."""
 
+import json
 import logging
 import re
-from pathlib import Path
+from pathlib import Path, PurePosixPath
 
 import duckdb
+import nolegend
 from fastapi import Request
 from fastapi.templating import Jinja2Templates
 
@@ -39,6 +41,41 @@ log = logging.getLogger(__name__)
 
 TEMPLATE_DIR = Path(__file__).resolve().parent.parent.parent / "templates"
 templates = Jinja2Templates(directory=str(TEMPLATE_DIR))
+
+# Single-element list lets us flip the flag without a ``global`` statement
+# (and without exposing a settable module attribute).
+_chart_template_activated: list[bool] = [False]
+
+
+def ensure_chart_template() -> None:
+    """Register nolegend's "tufte" template the first time a chart is built.
+
+    Doing it here rather than at import keeps module import side-effect-free
+    so importing a handler from a CLI or test that doesn't render charts
+    doesn't mutate Plotly's default-template state.
+    """
+    if not _chart_template_activated[0]:
+        nolegend.activate()
+        _chart_template_activated[0] = True
+
+
+def path_basename(path: str | None) -> str:
+    """Best-effort POSIX basename of an arbitrary path string."""
+    if not path:
+        return "(unknown)"
+    return PurePosixPath(path).name or path
+
+
+def safe_json(raw: str | None) -> dict:
+    """Parse JSON, returning an empty dict on failure."""
+    if not raw:
+        return {}
+    try:
+        parsed = json.loads(raw)
+    except (TypeError, ValueError):
+        return {}
+    return parsed if isinstance(parsed, dict) else {}
+
 
 SESSIONS_PER_PAGE_DEFAULT = 50
 SESSIONS_PAGE_SIZES = [25, 50, 100, 200]

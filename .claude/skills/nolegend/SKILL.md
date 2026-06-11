@@ -203,5 +203,5 @@ gauge charts.
 - [ ] Right margin ≥ 80–110px when direct-labeling
 - [ ] `customdata` carries enough info for click/select handlers
 - [ ] `cliponaxis=False` on text-bearing traces so end labels render
-- [ ] Test added in `tests/test_routes.py` asserting the figure JSON
+- [ ] Test added in `tests/routes/` asserting the figure JSON
   shape (e.g. trace name, customdata presence, no `<polyline>`)

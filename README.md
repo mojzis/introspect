@@ -22,6 +22,14 @@ source .venv/bin/activate
 
 ## Usage
 
+### Web UI
+
+```bash
+introspect serve
+# Runs on http://127.0.0.1:8000 by default
+introspect serve --port 3000 --host 0.0.0.0
+```
+
 ### CLI
 
 ```bash
@@ -44,14 +52,6 @@ introspect query "SELECT * FROM logical_sessions LIMIT 5"
 
 # Rebuild the search index
 introspect refresh
-```
-
-### Web UI
-
-```bash
-introspect serve
-# Runs on http://127.0.0.1:8000 by default
-introspect serve --port 3000 --host 0.0.0.0
 ```
 
 ### MCP Server

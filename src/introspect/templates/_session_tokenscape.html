@@ -1,0 +1,130 @@
+{% if not tokenscape_ctx.has_data %}
+<div class="card">
+    <p>{% if tokenscape_ctx.error %}<strong>Tokenscape unavailable.</strong> {{ tokenscape_ctx.error }}{% else %}No assistant turns yet — nothing to plot.{% endif %}</p>
+</div>
+{% else %}
+
+<div class="card">
+    <h2>Where the money went · ${{ "%.2f"|format(tokenscape_ctx.total_cost) }}</h2>
+    <p style="color:#666;margin:0 0 0.6rem;">
+        Each stripe is one piece of context: it loads once, then drags along in the cache every turn until the session ends (or /compact wipes it). Later content stacks on top from the turn it arrived. <strong>Area = dollars</strong> — the stripe's label shows the total it cost. Only pieces worth ≥ 1/20 of the bill get their own stripe.
+    </p>
+    <div id="session-tokenscape-stripes-chart"
+         class="cost-chart"
+         data-figure-id="session-tokenscape-stripes-data"
+         data-modebar="hover"
+         data-height="420"
+         style="width:100%;min-height:420px;"></div>
+    <script type="application/json" id="session-tokenscape-stripes-data">{{ tokenscape_ctx.figure_json_stripes|safe }}</script>
+    {% set bs = tokenscape_ctx.bill_split %}
+    <p style="color:#888;margin:0.6rem 0 0;font-size:0.85rem;">
+        Bill by token type:
+        cache reads ${{ "%.2f"|format(bs.cache_read) }} ({{ "%.0f"|format(tokenscape_ctx.cache_read_pct) }}%)
+        · cache writes ${{ "%.2f"|format(bs.cache_write) }}
+        · output ${{ "%.2f"|format(bs.output) }}
+        {% if bs.subagents > 0.005 %} · subagents ${{ "%.2f"|format(bs.subagents) }}{% endif %}
+        {% if bs.uncached_input > 0.005 %} · uncached input ${{ "%.2f"|format(bs.uncached_input) }}{% endif %}
+    </p>
+</div>
+
+<h2>Per-turn spend (exact)</h2>
+<div class="card">
+    <p style="color:#666;margin:0 0 0.6rem;">
+        Same data, no smoothing: every column is one assistant turn and sums to what that API call actually cost. New content pays the cache-write rate when it arrives; persisting content pays the cheap cache-read rate. Tall red columns are subagent runs; dotted vertical lines are idle gaps where the whole cache was re-billed.
+    </p>
+    <div id="session-tokenscape-chart"
+         class="cost-chart"
+         data-figure-id="session-tokenscape-data"
+         data-modebar="hover"
+         data-height="500"
+         style="width:100%;min-height:500px;"></div>
+    <script type="application/json" id="session-tokenscape-data">{{ tokenscape_ctx.figure_json|safe }}</script>
+    <p style="color:#888;margin:0.6rem 0 0;font-size:0.85rem;">
+        {% for s in tokenscape_ctx.swatches %}<span style="display:inline-block;width:0.75em;height:0.75em;background:{{ s.color }};border:1px solid #999;margin:0 0.3em 0 {{ '0' if loop.first else '1em' }};"></span>{{ s.label }}{% endfor %}
+    </p>
+    <p style="color:#888;margin:0.4rem 0 0;font-size:0.85rem;">
+        {{ tokenscape_ctx.turn_count }} assistant turns
+        {% if tokenscape_ctx.compact_count %} · {{ tokenscape_ctx.compact_count }} /compact{% endif %}
+        {% if tokenscape_ctx.ttl_break_count %} · {{ tokenscape_ctx.ttl_break_count }} cache rebuild{{ 's' if tokenscape_ctx.ttl_break_count != 1 else '' }}{% endif %}
+    </p>
+</div>
+
+{% if tokenscape_ctx.subagent_runs %}
+<h2>Subagents — what each agent read</h2>
+{% for run in tokenscape_ctx.subagent_runs %}
+<div class="card">
+    <h2><span style="display:inline-block;width:0.75em;height:0.75em;background:{{ run.fill }};border:1px solid {{ run.border }};margin-right:0.4em;"></span>{{ run.label }} · ${{ "%.2f"|format(run.cost) }} · {{ run.turn_count }} turns{% if run.models %} · <span style="color:#888;font-weight:normal;">{{ run.models|join(', ') }}</span>{% endif %}</h2>
+    <div id="subagent-tokenscape-{{ loop.index }}-chart"
+         class="cost-chart"
+         data-figure-id="subagent-tokenscape-{{ loop.index }}-data"
+         data-modebar="hover"
+         data-height="260"
+         style="width:100%;min-height:260px;"></div>
+    <script type="application/json" id="subagent-tokenscape-{{ loop.index }}-data">{{ run.figure_json|safe }}</script>
+</div>
+{% endfor %}
+{% if tokenscape_ctx.subagent_runs_hidden.count %}
+<p style="color:#888;margin:0.4rem 0 0;font-size:0.85rem;">
+    + {{ tokenscape_ctx.subagent_runs_hidden.count }} smaller runs · ${{ "%.2f"|format(tokenscape_ctx.subagent_runs_hidden.cost) }} combined
+</p>
+{% endif %}
+{% endif %}
+
+<h2>Cost by category</h2>
+<div class="card">
+    <table>
+        <thead>
+            <tr>
+                <th>Category</th>
+                <th style="text-align:right;">Cost</th>
+                <th style="text-align:right;">Share</th>
+            </tr>
+        </thead>
+        <tbody>
+            {% for c in tokenscape_ctx.category_totals %}
+            <tr>
+                <td>{{ c.label }}</td>
+                <td style="text-align:right;">${{ "%.2f"|format(c.cost) }}</td>
+                <td style="text-align:right;">{{ "%.1f"|format(c.pct) }}%</td>
+            </tr>
+            {% endfor %}
+        </tbody>
+    </table>
+</div>
+
+{% if tokenscape_ctx.top_bands %}
+<h2>Most expensive single pieces of context</h2>
+<div class="card">
+    <p style="color:#888;margin:0 0 0.6rem;">Ranked by total dollars caused — cache-write on arrival plus cache-read every turn it persisted. The top one is what to investigate first.</p>
+    <table>
+        <thead>
+            <tr>
+                <th>#</th>
+                <th>What</th>
+                <th>Category</th>
+                <th style="text-align:right;">Cost</th>
+                <th style="text-align:right;">≈ tokens</th>
+                <th style="text-align:right;">arrived turn</th>
+                <th style="text-align:right;">persisted turns</th>
+                <th style="text-align:right;">share of bill</th>
+            </tr>
+        </thead>
+        <tbody>
+            {% for r in tokenscape_ctx.top_bands %}
+            <tr>
+                <td>{{ loop.index }}</td>
+                <td>{{ r.label }}</td>
+                <td>{{ r.category }}</td>
+                <td style="text-align:right;">${{ "%.2f"|format(r.cost) }}</td>
+                <td style="text-align:right;">{{ "{:,}".format(r.tokens) }}</td>
+                <td style="text-align:right;">{{ r.arrival_turn }}</td>
+                <td style="text-align:right;">{{ r.persisted }}</td>
+                <td style="text-align:right;">{{ "%.1f"|format(r.pct) }}%</td>
+            </tr>
+            {% endfor %}
+        </tbody>
+    </table>
+</div>
+{% endif %}
+
+{% endif %}
