@@ -465,7 +465,7 @@ wheels = [
 ]
 
 [[package]]
-name = "introspect"
+name = "introspy"
 version = "0.1.0"
 source = { editable = "." }
 dependencies = [
