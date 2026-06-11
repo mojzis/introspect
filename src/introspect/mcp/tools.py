@@ -459,7 +459,11 @@ def _parse_ts_epoch(ts_val: object) -> float | None:
     """Return epoch seconds from a DB timestamp value.
 
     Handles: datetime objects, strings with/without trailing Z, with/without
-    fractional seconds. Mirrors cost_overview._parse_timestamp robustness.
+    fractional seconds. Unlike cost_overview._parse_timestamp, this function
+    does not apply `.replace(tzinfo=UTC)` — it returns local-naive epochs
+    suitable only for computing intra-session time deltas (where the constant
+    offset cancels out). Do not compare the returned values against wall-clock
+    UTC timestamps.
     """
     ts = str(ts_val).rstrip("Z").replace("T", " ")
     try:
@@ -685,21 +689,30 @@ def expensive_sessions(limit: int = 15, since: str = "") -> str:  # noqa: PLR091
             per_msgs = {}
 
         # --- Query 3: subagent flags for displayed sessions ---
+        # The `since` predicate is applied to both UNION branches so the flag
+        # reflects only activity within the cost window — consistent with Query 1
+        # and Query 2. Without it, a session could show subagents=yes due to a
+        # sidechain message or Task/Agent call that occurred before `since`.
+        # Note: assistant_message_costs uses `timestamp`; tool_calls uses `called_at`.
         subagent_ids: set[str] = set()
         if display_ids:
             placeholders = ", ".join("?" * len(display_ids))
+            amc_since_filter = " AND timestamp >= ?" if since else ""
+            tc_since_filter = " AND called_at >= ?" if since else ""
+            since_params = [since] if since else []
             flag_rows = conn.execute(
                 f"""
                 SELECT DISTINCT session_id FROM (
                     SELECT session_id FROM assistant_message_costs
-                    WHERE is_sidechain = TRUE AND session_id IN ({placeholders})
+                    WHERE is_sidechain = TRUE
+                      AND session_id IN ({placeholders}){amc_since_filter}
                     UNION ALL
                     SELECT session_id FROM tool_calls
                     WHERE tool_name IN ('Task', 'Agent')
-                      AND session_id IN ({placeholders})
+                      AND session_id IN ({placeholders}){tc_since_filter}
                 ) sub
                 """,  # noqa: S608
-                display_ids + display_ids,
+                display_ids + since_params + display_ids + since_params,
             ).fetchall()
             subagent_ids = {r[0] for r in flag_rows}
 
