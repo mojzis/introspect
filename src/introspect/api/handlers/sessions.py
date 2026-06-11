@@ -30,6 +30,7 @@ from ._helpers import (
     session_row_to_dict,
     templates,
 )
+from .subagents import build_subagent_breakdown_context
 from .tokenscape import build_tokenscape_context
 
 logger = logging.getLogger(__name__)
@@ -1619,7 +1620,7 @@ def _build_chart_from_attrib(
     )
 
 
-_VALID_TABS = {"messages", "cost", "tokenscape"}
+_VALID_TABS = {"messages", "cost", "tokenscape", "subagents"}
 
 
 async def session_detail(
@@ -1677,9 +1678,26 @@ async def session_detail(
         [session_id, session_id, session_cwd or ""],
     ).fetchone()
 
+    # Compute has_subagents on every render (tab strip needs it regardless of
+    # active tab).  Cheap query: EXISTS short-circuits on first matching row.
+    has_subagents_row = db.execute(
+        """
+        SELECT (
+            EXISTS (SELECT 1 FROM assistant_message_costs
+                    WHERE session_id = ? AND is_sidechain)
+            OR
+            EXISTS (SELECT 1 FROM tool_calls
+                    WHERE session_id = ? AND tool_name IN ('Task', 'Agent'))
+        )
+        """,
+        [session_id, session_id],
+    ).fetchone()
+    has_subagents: bool = bool(has_subagents_row and has_subagents_row[0])
+
     parsed_messages: list[dict] = []
     cost_ctx: dict = {}
     tokenscape_ctx: dict = {}
+    subagents_ctx: dict = {}
     if active_tab == "messages":
         parsed_messages = _build_messages_context(db, session_id)
     elif active_tab == "tokenscape":
@@ -1688,6 +1706,17 @@ async def session_detail(
         except Exception as exc:
             logger.exception("Failed to build tokenscape for %s", session_id)
             tokenscape_ctx = {
+                "has_data": False,
+                "error": f"{type(exc).__name__}: {exc}",
+            }
+    elif active_tab == "subagents":
+        try:
+            subagents_ctx = build_subagent_breakdown_context(
+                db, session_id, session_cwd
+            )
+        except Exception as exc:
+            logger.exception("Failed to build subagents for %s", session_id)
+            subagents_ctx = {
                 "has_data": False,
                 "error": f"{type(exc).__name__}: {exc}",
             }
@@ -1707,6 +1736,8 @@ async def session_detail(
             "active_tab": active_tab,
             "cost_ctx": cost_ctx,
             "tokenscape_ctx": tokenscape_ctx,
+            "subagents_ctx": subagents_ctx,
+            "has_subagents": has_subagents,
             "file_metrics": {
                 "files_read": file_metrics[0] or 0,
                 "files_edited": file_metrics[1] or 0,

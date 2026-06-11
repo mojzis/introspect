@@ -1,0 +1,92 @@
+{% if not has_subagents %}
+<div class="card">
+    <p>No subagents in this session.</p>
+</div>
+{% elif subagents_ctx and subagents_ctx.get('error') %}
+<div class="card">
+    <p style="color:#c00;">Error building subagents view: {{ subagents_ctx.error }}</p>
+</div>
+{% elif not subagents_ctx or not subagents_ctx.has_data %}
+<div class="card">
+    <p>No subagents in this session.</p>
+</div>
+{% else %}
+<div class="card">
+    <p style="color:#888;margin:0 0 0.6rem;">
+        {{ subagents_ctx.subagent_count }} subagent invocation{{ 's' if subagents_ctx.subagent_count != 1 else '' }}
+        &middot; session total {{ subagents_ctx.total_cost }}
+    </p>
+    <p style="color:#888;margin:0 0 0.6rem;font-size:0.82rem;display:flex;gap:1rem;align-items:center;flex-wrap:wrap;">
+        <span style="font-weight:600;">Cost split:</span>
+        <span style="display:inline-flex;align-items:center;gap:0.35rem;"><span style="width:12px;height:8px;background:#c9c9c9;display:inline-block;border-radius:1px;"></span>cache read</span>
+        <span style="display:inline-flex;align-items:center;gap:0.35rem;"><span style="width:12px;height:8px;background:#3b5bdb;display:inline-block;border-radius:1px;"></span>cache write</span>
+        <span style="display:inline-flex;align-items:center;gap:0.35rem;"><span style="width:12px;height:8px;background:#e8590c;display:inline-block;border-radius:1px;"></span>output</span>
+    </p>
+    <table>
+        <thead>
+            <tr>
+                <th>#</th>
+                <th>Agent</th>
+                <th>Model</th>
+                <th>Duration</th>
+                <th style="text-align:right;">User</th>
+                <th style="text-align:right;">Asst</th>
+                <th style="text-align:right;">Tools</th>
+                <th style="text-align:right;">Read</th>
+                <th style="text-align:right;">Edited</th>
+                <th style="text-align:right;">Read Only</th>
+                <th style="text-align:right;">Outside</th>
+                <th>Skills</th>
+                <th style="text-align:right;">Cost</th>
+                <th>Cost split</th>
+                <th style="text-align:right;">% of session</th>
+                <th style="text-align:right;">Cumulative %</th>
+            </tr>
+        </thead>
+        <tbody>
+            {% for row in subagents_ctx.rows %}
+            <tr{% if row.is_main %} style="background:#f8f8f8;"{% endif %}>
+                <td>{{ row.rank }}</td>
+                <td>
+                    {% if row.is_main %}
+                    <strong>{{ row.label }}</strong>
+                    {% else %}
+                    <a href="/sessions/{{ session_id }}?tab=messages#msg-{{ row.first_uuid }}">{{ row.label }}</a>
+                    {% endif %}
+                </td>
+                <td style="font-size:0.85em;color:#555;">{{ row.model }}</td>
+                <td>{{ row.duration }}</td>
+                <td style="text-align:right;">{{ row.user_msgs }}</td>
+                <td style="text-align:right;">{{ row.asst_msgs }}</td>
+                <td style="text-align:right;">{{ row.tool_count }}</td>
+                <td style="text-align:right;">{{ row.files_read }}</td>
+                <td style="text-align:right;">{{ row.files_edited }}</td>
+                <td style="text-align:right;">{{ row.files_read_only }}</td>
+                <td style="text-align:right;">{{ row.files_outside }}</td>
+                <td style="font-size:0.85em;">
+                    {% if row.skills %}
+                    {{ row.skills | join(', ') }}
+                    {% else %}
+                    &mdash;
+                    {% endif %}
+                </td>
+                <td style="text-align:right;">{{ row.cost }}</td>
+                <td title="{{ row.split.tooltip if row.split else '' }}">
+                    {% if row.split %}
+                    <div style="display:inline-flex;width:64px;height:8px;overflow:hidden;border-radius:1px;">
+                        <div style="width:{{ row.split.read_px }}px;height:8px;background:#c9c9c9;"></div>
+                        <div style="width:{{ row.split.write_px }}px;height:8px;background:#3b5bdb;"></div>
+                        <div style="width:{{ row.split.output_px }}px;height:8px;background:#e8590c;"></div>
+                    </div>
+                    {% else %}
+                    &mdash;
+                    {% endif %}
+                </td>
+                <td style="text-align:right;">{{ "%.1f"|format(row.pct) }}%</td>
+                <td style="text-align:right;">{{ "%.1f"|format(row.cum_pct) }}%</td>
+            </tr>
+            {% endfor %}
+        </tbody>
+    </table>
+</div>
+{% endif %}
