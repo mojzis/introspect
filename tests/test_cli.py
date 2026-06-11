@@ -319,6 +319,7 @@ def test_claude_starts_server_when_not_running(monkeypatch, tmp_path):
     result = runner.invoke(app, ["claude", "--port", "3000"])
 
     assert result.exit_code == 0, result.output
+    assert "Server ready" in result.output
     assert len(popen_calls) == 1
     argv = popen_calls[0]
     assert "-m" in argv

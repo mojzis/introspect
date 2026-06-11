@@ -663,8 +663,10 @@ def _ensure_server_running(host: str, port: int) -> None:
     console.print(
         f"[red]Error:[/red] Server did not become ready within "
         f"{SERVER_START_TIMEOUT_SECONDS:.0f} s.\n"
-        "It was left running — it may still be materialising the DB.\n"
-        f"Check the log for details: [cyan]{log_path}[/cyan]"
+        "It was left running — check the log for the actual bound port and any "
+        "startup errors (a port-shift or slow DB materialisation can both cause "
+        "this).\n"
+        f"Log: [cyan]{log_path}[/cyan]"
     )
     raise typer.Exit(code=1)
 
