@@ -11,7 +11,7 @@ jobs:
     name: Lint
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v6
+      - uses: actions/checkout@v7
       - uses: astral-sh/setup-uv@v7
       - run: uv sync --frozen
       - run: uv run ruff check .
@@ -20,7 +20,7 @@ jobs:
     name: Format
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v6
+      - uses: actions/checkout@v7
       - uses: astral-sh/setup-uv@v7
       - run: uv sync --frozen
       - run: uv run ruff format --check .
@@ -29,7 +29,7 @@ jobs:
     name: Type Check
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v6
+      - uses: actions/checkout@v7
       - uses: astral-sh/setup-uv@v7
       - run: uv sync --frozen
       - run: uv run ty check
@@ -38,7 +38,7 @@ jobs:
     name: Dependency Vulnerabilities
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v6
+      - uses: actions/checkout@v7
       - uses: astral-sh/setup-uv@v7
       - run: uv sync --frozen
       - run: uvx pysentry-rs .
@@ -48,7 +48,7 @@ jobs:
     name: Dead Code Detection
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v6
+      - uses: actions/checkout@v7
       - uses: astral-sh/setup-uv@v7
       - run: uv sync --frozen
       - run: uv run vulture src
@@ -57,7 +57,7 @@ jobs:
     name: Unused Dependencies
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v6
+      - uses: actions/checkout@v7
       - uses: astral-sh/setup-uv@v7
       - run: uv sync --frozen
       - run: uv run deptry .
@@ -66,7 +66,7 @@ jobs:
     name: Test
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v6
+      - uses: actions/checkout@v7
       - uses: astral-sh/setup-uv@v7
       - run: uv sync --frozen
       - run: uv run pytest -q --tb=short
