@@ -17,7 +17,7 @@ import pytest
 
 from introspect.db import materialize_views
 from introspect.mcp.tools import describe_schema, list_query_templates
-from introspect.query_templates import QUERY_TEMPLATES
+from introspect.query_templates import QUERY_TEMPLATES, QueryTemplate, get_template
 from introspect.search import build_search_corpus
 
 from .conftest import (
@@ -173,7 +173,7 @@ _MIN_EXPECTED_ROWS: dict[str, int] = {
 
 
 @pytest.mark.parametrize("template", QUERY_TEMPLATES, ids=lambda t: t.name)
-def test_template_sql_executes(fixture_db_path: Path, template) -> None:
+def test_template_sql_executes(fixture_db_path: Path, template: QueryTemplate) -> None:
     """Every registry entry's SQL binds, executes, and returns the rows the
     fixture guarantees — proving the SQL matches real data, not just that it
     parses."""
@@ -184,6 +184,16 @@ def test_template_sql_executes(fixture_db_path: Path, template) -> None:
     finally:
         conn.close()
     assert len(rows) >= _MIN_EXPECTED_ROWS[template.name]
+
+
+def test_get_template_lookup_hit_and_miss() -> None:
+    """get_template() returns the matching entry by name, or None for an
+    unknown name."""
+    template = get_template("tool_failure_rate")
+    assert template is not None
+    assert template.name == "tool_failure_rate"
+
+    assert get_template("not_a_real_template") is None
 
 
 def test_all_template_names_have_sample_params() -> None:

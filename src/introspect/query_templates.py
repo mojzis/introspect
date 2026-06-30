@@ -147,7 +147,7 @@ QUERY_TEMPLATES: tuple[QueryTemplate, ...] = (
             "tool_calls stores it as JSON/bool serialized to text. "
             "min_calls filters out tools called once or twice whose failure "
             "rate is meaningless. Not yet a dedicated tool — run this SQL "
-            "via run_sql for now; a bound tool_failure_rate tool is planned."
+            "via run_sql for now."
         ),
         kind="deterministic",
     ),
