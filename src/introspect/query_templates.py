@@ -146,8 +146,9 @@ QUERY_TEMPLATES: tuple[QueryTemplate, ...] = (
             "is_error is compared as the string 'true', not a SQL boolean — "
             "tool_calls stores it as JSON/bool serialized to text. "
             "min_calls filters out tools called once or twice whose failure "
-            "rate is meaningless. Not yet a dedicated tool — run this SQL "
-            "via run_sql for now."
+            "rate is meaningless. Also registered as the `tool_failure_rate` "
+            "MCP tool, which executes this exact SQL and formats the rows — "
+            "prefer that tool over run_sql for this question."
         ),
         kind="deterministic",
     ),
@@ -232,9 +233,8 @@ QUERY_TEMPLATES: tuple[QueryTemplate, ...] = (
 def get_template(name: str) -> QueryTemplate | None:
     """Look up a template by name, or None if no such template exists.
 
-    Not yet called internally — scaffolding for the Phase 2 deterministic
-    tool registration, which will look up a template by name to bind and
-    execute its SQL.
+    Used by deterministic-tool adapters (e.g. ``mcp.tools.tool_failure_rate``)
+    to fetch the registry entry whose SQL they bind and execute.
     """
     for template in QUERY_TEMPLATES:
         if template.name == name:

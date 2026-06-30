@@ -13,7 +13,9 @@ from introspect.mcp import refresh_bridge
 from introspect.query_templates import (
     QUERY_TEMPLATES,
     Param,
+    QueryTemplate,
     TemplateKind,
+    get_template,
     templates_by_kind,
 )
 from introspect.refresh import RefreshOutcome, wait_for_refresh
@@ -49,6 +51,22 @@ _PARETO_CUTOFF = 0.80
 REFRESH_TIMEOUT = 30.0
 
 
+def _validate_since(since: str) -> str | None:
+    """Return a friendly error message if `since` isn't empty or ISO-parseable.
+
+    Shared by every tool using the empty-string-disables `since` convention
+    (`search_conversations`, `expensive_sessions`, `tool_failure_rate`) so the
+    validation and error wording can't drift between them.
+    """
+    if not since:
+        return None
+    try:
+        datetime.fromisoformat(since)
+    except ValueError as exc:
+        return f"Error: invalid 'since' (expected ISO date/timestamp): {exc}"
+    return None
+
+
 def search_conversations(  # noqa: PLR0913
     query: str,
     limit: int = 10,
@@ -76,11 +94,9 @@ def search_conversations(  # noqa: PLR0913
     """
     if role and role not in _VALID_ROLES:
         return f"Error: role must be one of {sorted(_VALID_ROLES)} (got {role!r})."
-    if since:
-        try:
-            datetime.fromisoformat(since)
-        except ValueError as exc:
-            return f"Error: invalid 'since' (expected ISO date/timestamp): {exc}"
+    since_error = _validate_since(since)
+    if since_error:
+        return since_error
 
     conn = get_read_connection()
     try:
@@ -477,6 +493,71 @@ async def refresh_data() -> str:
             raise RuntimeError(msg)
 
 
+def run_query_template(
+    template: QueryTemplate,
+    conn: duckdb.DuckDBPyConnection,
+    params: dict[str, object],
+) -> list[tuple]:
+    """Bind `params` and execute `template.sql` on `conn`.
+
+    The single execution path for a registry entry's SQL — deterministic
+    tools (e.g. `tool_failure_rate`) and the registry/tool parity test both
+    call this, so the SQL the tool actually runs can never drift from the
+    SQL the cookbook advertises. `params` is bound as a DuckDB `$named` dict,
+    never string-interpolated.
+    """
+    return conn.execute(template.sql, params).fetchall()
+
+
+def tool_failure_rate(limit: int = 20, since: str = "", min_calls: int = 5) -> str:
+    """Rank tools by failure rate — which tools fail most, by rate and count?
+
+    Groups `tool_calls` by `tool_name` and reports call count, failure count,
+    and failure rate, sorted worst-first. Executes the `tool_failure_rate`
+    entry from the query-template registry (`list_query_templates`) so the
+    tool and the cookbook never drift apart.
+
+    Parameters
+    ----------
+    limit:
+        Max rows to return (default 20).
+    since:
+        Optional ISO date/timestamp (e.g. ``'2026-06-01'``); only calls at or
+        after this point are counted. Empty string (default) means all time
+        — matching `expensive_sessions`' empty-string-disables convention.
+    min_calls:
+        Suppress low-N noise: only tools with at least this many calls are
+        included (default 5).
+    """
+    since_error = _validate_since(since)
+    if since_error:
+        return since_error
+
+    template = get_template("tool_failure_rate")
+    if template is None:  # pragma: no cover - defensive, registry can't drop this
+        return "Error: 'tool_failure_rate' template not found in registry."
+
+    conn = get_read_connection()
+    try:
+        rows = run_query_template(
+            template,
+            conn,
+            {"limit": limit, "since": since or None, "min_calls": min_calls},
+        )
+    finally:
+        conn.close()
+
+    if not rows:
+        return "No tools met the min_calls threshold."
+
+    lines: list[str] = []
+    for tool_name, calls, failures, failure_rate in rows:
+        lines.append(
+            f"{tool_name}: {failures}/{calls} failed ({float(failure_rate):.1%})"
+        )
+    return "\n".join(lines)
+
+
 def tool_failures(command_prefix: str = "", limit: int = 20) -> str:
     """List failed tool calls, optionally filtered by tool name prefix."""
     conn = get_read_connection()
@@ -574,12 +655,9 @@ def expensive_sessions(limit: int = 15, since: str = "") -> str:  # noqa: PLR091
         only costs from messages at or after this point are counted. Empty
         string means all time.
     """
-    # Validate since — copy search_conversations' pattern.
-    if since:
-        try:
-            datetime.fromisoformat(since)
-        except ValueError as exc:
-            return f"Error: invalid 'since' (expected ISO date/timestamp): {exc}"
+    since_error = _validate_since(since)
+    if since_error:
+        return since_error
 
     # Clamp limit to [1, _EXPENSIVE_SESSIONS_ROW_CAP].
     display_limit = max(1, min(limit, _EXPENSIVE_SESSIONS_ROW_CAP))

@@ -6,17 +6,27 @@ adapters.
 - Cookbook render: ``list_query_templates`` renders every entry and filters
   by ``kind``.
 - Discoverability: ``describe_schema`` mentions the template count.
+- Parity: the ``tool_failure_rate`` MCP tool's output reflects exactly what
+  the registry's SQL returns when run directly — tool and cookbook can't
+  drift apart.
+- Behavior: ``tool_failure_rate``'s failure-rate math and ``min_calls``
+  noise filter.
 """
 
 import tempfile
 from collections.abc import Iterator
 from pathlib import Path
+from unittest.mock import patch
 
 import duckdb
 import pytest
 
 from introspect.db import materialize_views
-from introspect.mcp.tools import describe_schema, list_query_templates
+from introspect.mcp.tools import (
+    describe_schema,
+    list_query_templates,
+    tool_failure_rate,
+)
 from introspect.query_templates import QUERY_TEMPLATES, QueryTemplate, get_template
 from introspect.search import build_search_corpus
 
@@ -29,6 +39,7 @@ from .conftest import (
 
 SID = "qt-fixture-session"
 SEARCH_WORD = "refactor"
+RATE_SID = "qt-rate-session"
 
 
 def _write_fixture_jsonl(tmp_dir: Path) -> None:
@@ -245,3 +256,153 @@ def test_describe_schema_mentions_query_templates(
     result = describe_schema()
     assert f"{len(QUERY_TEMPLATES)} query templates" in result
     assert "list_query_templates()" in result
+
+
+# --- tool_failure_rate: parity + behavior -----------------------------------
+
+# (tool_name, tool_use_id, tool_input, is_error). Bash: 4 calls, 2 failures
+# (50%). Read: 2 calls, 0 failures — below a min_calls=3 threshold, so it
+# exercises the noise filter without ever showing a failure of its own.
+_RATE_CALLS: tuple[tuple[str, str, dict, bool], ...] = (
+    ("Bash", "toolu_b1", {"command": "ls"}, False),
+    ("Bash", "toolu_b2", {"command": "false"}, True),
+    ("Bash", "toolu_b3", {"command": "pwd"}, False),
+    ("Bash", "toolu_b4", {"command": "exit 1"}, True),
+    ("Read", "toolu_r1", {"file_path": "/tmp/a"}, False),
+    ("Read", "toolu_r2", {"file_path": "/tmp/b"}, False),
+)
+
+
+def _write_failure_rate_jsonl(tmp_dir: Path) -> None:
+    """Write a session with two tools at different call volumes — enough to
+    verify failure-rate math (Bash) and the min_calls noise filter (Read).
+    """
+    lines: list[dict] = [
+        make_user_message(
+            RATE_SID, "u0", None, "2026-05-01T09:00:00.000Z", "Run some commands"
+        )
+    ]
+    parent = "u0"
+    second = 0
+    for i, (tool_name, tool_use_id, tool_input, is_error) in enumerate(_RATE_CALLS):
+        second += 1
+        a_uuid = f"a{i}"
+        lines.append(
+            make_assistant_message(
+                RATE_SID,
+                a_uuid,
+                parent,
+                f"2026-05-01T09:00:{second:02d}.000Z",
+                [
+                    {
+                        "type": "tool_use",
+                        "id": tool_use_id,
+                        "name": tool_name,
+                        "input": tool_input,
+                    }
+                ],
+                msg_id=f"qt-rate-msg-{i}",
+            )
+        )
+        second += 1
+        u_uuid = f"u{i + 1}"
+        lines.append(
+            make_user_message(
+                RATE_SID,
+                u_uuid,
+                a_uuid,
+                f"2026-05-01T09:00:{second:02d}.000Z",
+                [
+                    {
+                        "type": "tool_result",
+                        "tool_use_id": tool_use_id,
+                        "content": "error" if is_error else "ok",
+                        "is_error": is_error,
+                    }
+                ],
+                tool_use_result={
+                    "stdout": "" if is_error else "ok",
+                    "stderr": "boom" if is_error else "",
+                },
+                source_tool_uuid=a_uuid,
+            )
+        )
+        parent = u_uuid
+    write_jsonl(tmp_dir, RATE_SID, lines)
+
+
+@pytest.fixture
+def failure_rate_db_path() -> Iterator[Path]:
+    """Materialize the two-tool failure-rate fixture into a DuckDB file."""
+    with tempfile.TemporaryDirectory() as tmp:
+        tmp_path = Path(tmp)
+        _write_failure_rate_jsonl(tmp_path)
+        db_path = tmp_path / "rate.duckdb"
+        conn = duckdb.connect(str(db_path))
+        materialize_views(conn, glob_pattern(tmp_path))
+        conn.close()
+        yield db_path
+
+
+def test_tool_failure_rate_parity_with_registry_sql(
+    failure_rate_db_path: Path,
+) -> None:
+    """The tool's reported failures/calls/failure_rate for every tool match
+    exactly what running the registry's SQL directly (bound dict) returns —
+    proving the tool can't drift from the cookbook entry."""
+    template = get_template("tool_failure_rate")
+    assert template is not None
+    params = {"limit": 20, "since": None, "min_calls": 1}
+
+    conn = duckdb.connect(str(failure_rate_db_path), read_only=True)
+    try:
+        direct_rows = conn.execute(template.sql, params).fetchall()
+    finally:
+        conn.close()
+
+    assert direct_rows  # sanity: the fixture actually produced rows
+
+    with patch("introspect.mcp.tools.get_read_connection") as mock_conn:
+        mock_conn.return_value = duckdb.connect(
+            str(failure_rate_db_path), read_only=True
+        )
+        result = tool_failure_rate(limit=20, since="", min_calls=1)
+
+    for tool_name, calls, failures, failure_rate in direct_rows:
+        expected_line = (
+            f"{tool_name}: {failures}/{calls} failed ({float(failure_rate):.1%})"
+        )
+        assert expected_line in result
+
+
+def test_tool_failure_rate_counts_and_rate(failure_rate_db_path: Path) -> None:
+    """N calls / K failures yields the right failures, calls, and rate."""
+    with patch("introspect.mcp.tools.get_read_connection") as mock_conn:
+        mock_conn.return_value = duckdb.connect(
+            str(failure_rate_db_path), read_only=True
+        )
+        result = tool_failure_rate(min_calls=1)
+
+    assert "Bash: 2/4 failed (50.0%)" in result
+    assert "Read: 0/2 failed (0.0%)" in result
+
+
+def test_tool_failure_rate_min_calls_suppresses_low_n(
+    failure_rate_db_path: Path,
+) -> None:
+    """min_calls filters out tools below the call-count threshold."""
+    with patch("introspect.mcp.tools.get_read_connection") as mock_conn:
+        mock_conn.return_value = duckdb.connect(
+            str(failure_rate_db_path), read_only=True
+        )
+        result = tool_failure_rate(min_calls=3)
+
+    assert "Bash" in result
+    assert "Read" not in result
+
+
+def test_tool_failure_rate_invalid_since() -> None:
+    """An unparseable `since` returns a friendly Error: string, not a
+    traceback — mirrors expensive_sessions' validation."""
+    result = tool_failure_rate(since="not-a-date")
+    assert result.startswith("Error:")

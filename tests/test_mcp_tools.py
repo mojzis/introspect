@@ -520,6 +520,21 @@ def test_server_instructions_mention_key_views():
     assert "describe_schema" in instructions
 
 
+def test_register_tools_adds_tool_failure_rate_without_shadowing_expensive_sessions():
+    """register_tools wires `tool_failure_rate` as a deterministic-template
+    adapter exactly once, and does not double-register or shadow the
+    existing richer `expensive_sessions` tool with a generated passthrough."""
+    tools = asyncio.run(create_mcp_server().list_tools())
+    names = [t.name for t in tools]
+
+    assert names.count("tool_failure_rate") == 1
+    assert names.count("expensive_sessions") == 1
+
+    expensive_tool = next(t for t in tools if t.name == "expensive_sessions")
+    assert expensive_tool.description is not None
+    assert "Pareto" in expensive_tool.description
+
+
 # ---------------------------------------------------------------------------
 # expensive_sessions tests
 # ---------------------------------------------------------------------------
