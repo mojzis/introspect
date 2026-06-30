@@ -11,8 +11,11 @@ adapters.
   drift apart.
 - Behavior: ``tool_failure_rate``'s failure-rate math and ``min_calls``
   noise filter.
+- Exploratory prompts: ``session_cost_tail``/``topic_to_cost`` render seed
+  text from the registry and are discoverable via ``list_prompts``.
 """
 
+import asyncio
 import tempfile
 from collections.abc import Iterator
 from pathlib import Path
@@ -20,8 +23,10 @@ from unittest.mock import patch
 
 import duckdb
 import pytest
+from mcp.types import GetPromptResult, TextContent
 
 from introspect.db import materialize_views
+from introspect.mcp.server import create_mcp_server
 from introspect.mcp.tools import (
     describe_schema,
     list_query_templates,
@@ -406,3 +411,59 @@ def test_tool_failure_rate_invalid_since() -> None:
     traceback — mirrors expensive_sessions' validation."""
     result = tool_failure_rate(since="not-a-date")
     assert result.startswith("Error:")
+
+
+# --- exploratory prompts: render + discoverability --------------------------
+
+# Sample args per exploratory prompt, mirroring _SAMPLE_PARAMS above.
+_PROMPT_SAMPLE_ARGS: dict[str, dict[str, object]] = {
+    "session_cost_tail": {"session_id": SID},
+    "topic_to_cost": {"query": SEARCH_WORD},
+}
+
+
+def _prompt_text(result: GetPromptResult) -> str:
+    """Extract the rendered text from a single-message prompt result.
+
+    Every introspect prompt fn returns a plain `str`, which FastMCP wraps as
+    one `TextContent`-bearing message — narrows the `content` union so ty
+    doesn't flag `.text` as missing on the other content variants.
+    """
+    content = result.messages[0].content
+    assert isinstance(content, TextContent)
+    return content.text
+
+
+@pytest.mark.parametrize("name", sorted(_PROMPT_SAMPLE_ARGS), ids=lambda n: n)
+def test_prompt_renders_registry_sql_and_note(name: str) -> None:
+    """Each exploratory prompt's seed message contains its registry entry's
+    canonical SQL and note — the seed is built FROM the registry, not
+    hand-duplicated."""
+    template = get_template(name)
+    assert template is not None
+
+    mcp = create_mcp_server()
+    result = asyncio.run(mcp.get_prompt(name, _PROMPT_SAMPLE_ARGS[name]))
+
+    text = _prompt_text(result)
+    assert template.sql in text
+    assert template.note in text
+
+
+def test_prompt_frames_as_starting_point() -> None:
+    """The seed message explicitly says it's a starting point to adapt, not
+    a canned answer — the spec's anti-anchoring mitigation."""
+    mcp = create_mcp_server()
+    result = asyncio.run(mcp.get_prompt("session_cost_tail", {"session_id": SID}))
+    text = _prompt_text(result)
+    assert "starting point to adapt" in text
+    assert "not a canned answer" in text
+
+
+def test_list_prompts_includes_both_exploratory_prompts() -> None:
+    """Both exploratory-template prompts are discoverable via list_prompts,
+    matching the registry's exploratory entries."""
+    mcp = create_mcp_server()
+    prompts = asyncio.run(mcp.list_prompts())
+    names = {p.name for p in prompts}
+    assert names == {t.name for t in QUERY_TEMPLATES if t.kind == "exploratory"}
