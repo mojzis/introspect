@@ -4,11 +4,20 @@ from __future__ import annotations
 
 import re
 from datetime import datetime
+from typing import cast, get_args
 
 import duckdb
 
 from introspect.db import DEFAULT_DB_PATH, get_read_connection
 from introspect.mcp import refresh_bridge
+from introspect.query_templates import (
+    QUERY_TEMPLATES,
+    Param,
+    QueryTemplate,
+    TemplateKind,
+    get_template,
+    templates_by_kind,
+)
 from introspect.refresh import RefreshOutcome, wait_for_refresh
 from introspect.search import ensure_search_corpus, fts_search
 from introspect.sql_fragments import (
@@ -21,6 +30,8 @@ from introspect.sql_fragments import (
 )
 
 _VALID_ROLES = {"user", "assistant"}
+# Derived from the QueryTemplate.kind Literal so the two can't drift.
+_VALID_TEMPLATE_KINDS: frozenset[str] = frozenset(get_args(TemplateKind))
 
 # Max characters per cell in run_sql output; long values (e.g. tool_input JSON
 # blobs) are truncated so one wide row doesn't blow up the response.
@@ -38,6 +49,22 @@ _PARETO_CUTOFF = 0.80
 # longer waits than a browser HTMX swap. Module-level so tests can shrink it
 # without waiting half a minute on the STILL_RUNNING branch.
 REFRESH_TIMEOUT = 30.0
+
+
+def _validate_since(since: str) -> str | None:
+    """Return a friendly error message if `since` isn't empty or ISO-parseable.
+
+    Shared by every tool using the empty-string-disables `since` convention
+    (`search_conversations`, `expensive_sessions`, `tool_failure_rate`) so the
+    validation and error wording can't drift between them.
+    """
+    if not since:
+        return None
+    try:
+        datetime.fromisoformat(since)
+    except ValueError as exc:
+        return f"Error: invalid 'since' (expected ISO date/timestamp): {exc}"
+    return None
 
 
 def search_conversations(  # noqa: PLR0913
@@ -67,11 +94,9 @@ def search_conversations(  # noqa: PLR0913
     """
     if role and role not in _VALID_ROLES:
         return f"Error: role must be one of {sorted(_VALID_ROLES)} (got {role!r})."
-    if since:
-        try:
-            datetime.fromisoformat(since)
-        except ValueError as exc:
-            return f"Error: invalid 'since' (expected ISO date/timestamp): {exc}"
+    since_error = _validate_since(since)
+    if since_error:
+        return since_error
 
     conn = get_read_connection()
     try:
@@ -348,7 +373,72 @@ def describe_schema() -> str:
         lines.append(f"{table_name}:")
         lines.extend(f"  {col}" for col in by_table[table_name])
         lines.append("")
-    return "\n".join(lines).rstrip()
+    schema_text = "\n".join(lines).rstrip()
+    return (
+        f"{schema_text}\n\n"
+        f"{len(QUERY_TEMPLATES)} query templates available via "
+        "list_query_templates()."
+    )
+
+
+def _format_param(p: Param) -> str:
+    """Render one Param as a cookbook bullet line."""
+    requiredness = "required" if p.required else f"default={p.default!r}"
+    return f"  - {p.name} ({p.type}, {requiredness}): {p.description}"
+
+
+def list_query_templates(kind: str = "") -> str:
+    """Render the curated SQL investigation-template cookbook.
+
+    These are STARTING POINTS to adapt, not canned answers — read the SQL,
+    tweak it for the question actually being asked, and run it through
+    `run_sql`. Each entry shows the question it answers, its parameters
+    (`$named` DuckDB placeholders), the SQL itself, and a `note` carrying the
+    non-obvious schema knowledge (e.g. dedup rules, what a flag column really
+    means) needed to adapt it correctly.
+
+    A `kind="deterministic"` template ("one fixed query answers this") may
+    also be available as a dedicated MCP tool — check the tool list first.
+    A `kind="exploratory"` template ("the value is in adapting and following
+    threads") is meant to be reshaped per investigation.
+
+    Parameters
+    ----------
+    kind:
+        Optional filter: 'deterministic' or 'exploratory'. Empty string
+        (default) returns all — empty string rather than Optional for
+        tool-schema simplicity, matching the rest of this module.
+    """
+    if kind and kind not in _VALID_TEMPLATE_KINDS:
+        return (
+            f"Error: kind must be one of {sorted(_VALID_TEMPLATE_KINDS)} "
+            f"(got {kind!r})."
+        )
+
+    templates = (
+        templates_by_kind(cast("TemplateKind", kind)) if kind else QUERY_TEMPLATES
+    )
+    if not templates:
+        return f"No templates of kind {kind!r}."
+
+    blocks: list[str] = []
+    for template in templates:
+        param_lines = [_format_param(p) for p in template.params]
+        params_text = "\n".join(param_lines) if param_lines else "  (none)"
+        blocks.append(
+            f"### {template.name}  [{template.kind}]\n"
+            f"Q: {template.question}\n"
+            f"Params:\n{params_text}\n"
+            f"SQL:\n{template.sql}\n"
+            f"Note: {template.note}"
+        )
+
+    header = (
+        "Query template cookbook — starting points to adapt, not canned "
+        "answers. Adjust the SQL to the actual question, then run it "
+        "through `run_sql`.\n"
+    )
+    return header + "\n\n".join(blocks)
 
 
 async def refresh_data() -> str:
@@ -401,6 +491,74 @@ async def refresh_data() -> str:
             # gap loudly at runtime if static checks miss it.
             msg = f"unhandled refresh outcome: {result.outcome}"
             raise RuntimeError(msg)
+
+
+def run_query_template(
+    template: QueryTemplate,
+    conn: duckdb.DuckDBPyConnection,
+    params: dict[str, object],
+) -> list[tuple]:
+    """Bind `params` and execute `template.sql` on `conn`.
+
+    The single execution path for a registry entry's SQL — deterministic
+    tools (e.g. `tool_failure_rate`) call this, so the SQL the tool actually
+    runs can never drift from the SQL the cookbook advertises. The
+    registry/tool parity test (`test_tool_failure_rate_parity_with_registry_sql`)
+    exercises this path indirectly: it calls `tool_failure_rate`, which calls
+    `run_query_template`, and compares the result to `template.sql` executed
+    directly. `params` is bound as a DuckDB `$named` dict, never
+    string-interpolated.
+    """
+    return conn.execute(template.sql, params).fetchall()
+
+
+def tool_failure_rate(limit: int = 20, since: str = "", min_calls: int = 5) -> str:
+    """Rank tools by failure rate — which tools fail most, by rate and count?
+
+    Groups `tool_calls` by `tool_name` and reports call count, failure count,
+    and failure rate, sorted worst-first. Executes the `tool_failure_rate`
+    entry from the query-template registry (`list_query_templates`) so the
+    tool and the cookbook never drift apart.
+
+    Parameters
+    ----------
+    limit:
+        Max rows to return (default 20).
+    since:
+        Optional ISO date/timestamp (e.g. ``'2026-06-01'``); only calls at or
+        after this point are counted. Empty string (default) means all time
+        — matching `expensive_sessions`' empty-string-disables convention.
+    min_calls:
+        Suppress low-N noise: only tools with at least this many calls are
+        included (default 5).
+    """
+    since_error = _validate_since(since)
+    if since_error:
+        return since_error
+
+    template = get_template("tool_failure_rate")
+    if template is None:  # pragma: no cover - defensive, registry can't drop this
+        return "Error: 'tool_failure_rate' template not found in registry."
+
+    conn = get_read_connection()
+    try:
+        rows = run_query_template(
+            template,
+            conn,
+            {"limit": limit, "since": since or None, "min_calls": min_calls},
+        )
+    finally:
+        conn.close()
+
+    if not rows:
+        return "No tools met the min_calls threshold."
+
+    lines: list[str] = []
+    for tool_name, calls, failures, failure_rate in rows:
+        lines.append(
+            f"{tool_name}: {failures}/{calls} failed ({float(failure_rate):.1%})"
+        )
+    return "\n".join(lines)
 
 
 def tool_failures(command_prefix: str = "", limit: int = 20) -> str:
@@ -500,12 +658,9 @@ def expensive_sessions(limit: int = 15, since: str = "") -> str:  # noqa: PLR091
         only costs from messages at or after this point are counted. Empty
         string means all time.
     """
-    # Validate since — copy search_conversations' pattern.
-    if since:
-        try:
-            datetime.fromisoformat(since)
-        except ValueError as exc:
-            return f"Error: invalid 'since' (expected ISO date/timestamp): {exc}"
+    since_error = _validate_since(since)
+    if since_error:
+        return since_error
 
     # Clamp limit to [1, _EXPENSIVE_SESSIONS_ROW_CAP].
     display_limit = max(1, min(limit, _EXPENSIVE_SESSIONS_ROW_CAP))

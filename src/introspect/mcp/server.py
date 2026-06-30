@@ -2,7 +2,7 @@
 
 from mcp.server.fastmcp import FastMCP
 
-from introspect.mcp._register import register_tools
+from introspect.mcp._register import register_prompts, register_tools
 
 # Sent to MCP clients at initialize. Most users connect from outside this
 # repo and have no other context about the data, so this carries the schema
@@ -51,4 +51,5 @@ def create_mcp_server() -> FastMCP:
     # it at `/mcp` in FastAPI yields a final path of `/mcp`, not `/mcp/mcp`.
     server.settings.streamable_http_path = "/"
     register_tools(server)
+    register_prompts(server)
     return server
