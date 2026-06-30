@@ -51,7 +51,18 @@ def register_tools(mcp: FastMCP) -> None:
     # or clobbered — the `registered_names` check below is what keeps the
     # richer tool from being shadowed by a generated one.
     _deterministic_tool_fns = {"tool_failure_rate": tool_failure_rate}
-    for template in templates_by_kind("deterministic"):
+    _deterministic_templates = templates_by_kind("deterministic")
+    _template_names = {t.name for t in _deterministic_templates}
+    _orphaned_fns = set(_deterministic_tool_fns) - _template_names
+    if _orphaned_fns:
+        verb = "is" if len(_orphaned_fns) == 1 else "are"
+        raise RuntimeError(  # noqa: TRY003
+            f"_deterministic_tool_fns in register_tools references "
+            f"{sorted(_orphaned_fns)}, which {verb} not a kind='deterministic' "
+            "template in query_templates.py. Remove the stale entry or fix "
+            "the template's kind/name."
+        )
+    for template in _deterministic_templates:
         if template.name in registered_names:
             continue
         fn = _deterministic_tool_fns.get(template.name)

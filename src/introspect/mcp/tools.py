@@ -501,10 +501,13 @@ def run_query_template(
     """Bind `params` and execute `template.sql` on `conn`.
 
     The single execution path for a registry entry's SQL — deterministic
-    tools (e.g. `tool_failure_rate`) and the registry/tool parity test both
-    call this, so the SQL the tool actually runs can never drift from the
-    SQL the cookbook advertises. `params` is bound as a DuckDB `$named` dict,
-    never string-interpolated.
+    tools (e.g. `tool_failure_rate`) call this, so the SQL the tool actually
+    runs can never drift from the SQL the cookbook advertises. The
+    registry/tool parity test (`test_tool_failure_rate_parity_with_registry_sql`)
+    exercises this path indirectly: it calls `tool_failure_rate`, which calls
+    `run_query_template`, and compares the result to `template.sql` executed
+    directly. `params` is bound as a DuckDB `$named` dict, never
+    string-interpolated.
     """
     return conn.execute(template.sql, params).fetchall()
 
