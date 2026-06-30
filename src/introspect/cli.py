@@ -701,11 +701,13 @@ CLAUDE_SYSTEM_PROMPT_SUFFIX = (
     "This session is dedicated to analyzing Claude Code conversation logs "
     "via the `introspect` MCP server. Prefer the mcp__introspect__* tools "
     "(run_sql, describe_schema, search_conversations, get_session, "
-    "recent_sessions, tool_failures, refresh_data, expensive_sessions) over "
-    "reading ~/.claude/projects JSONL files directly — the views already "
-    "handle session stitching, cost attribution, and project resolution. "
-    "For ranked expensive sessions with cost split and Pareto analysis, call "
-    "expensive_sessions. Call describe_schema before writing SQL."
+    "recent_sessions, tool_failures, refresh_data, expensive_sessions, "
+    "list_query_templates) over reading ~/.claude/projects JSONL files "
+    "directly — the views already handle session stitching, cost "
+    "attribution, and project resolution. For ranked expensive sessions "
+    "with cost split and Pareto analysis, call expensive_sessions. Call "
+    "describe_schema before writing SQL, and list_query_templates for "
+    "curated starting-point queries to adapt."
 )
 
 # Permission rule covering every tool on the introspect MCP server, so the

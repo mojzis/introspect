@@ -4,11 +4,18 @@ from __future__ import annotations
 
 import re
 from datetime import datetime
+from typing import cast, get_args
 
 import duckdb
 
 from introspect.db import DEFAULT_DB_PATH, get_read_connection
 from introspect.mcp import refresh_bridge
+from introspect.query_templates import (
+    QUERY_TEMPLATES,
+    Param,
+    TemplateKind,
+    templates_by_kind,
+)
 from introspect.refresh import RefreshOutcome, wait_for_refresh
 from introspect.search import ensure_search_corpus, fts_search
 from introspect.sql_fragments import (
@@ -21,6 +28,8 @@ from introspect.sql_fragments import (
 )
 
 _VALID_ROLES = {"user", "assistant"}
+# Derived from the QueryTemplate.kind Literal so the two can't drift.
+_VALID_TEMPLATE_KINDS: frozenset[str] = frozenset(get_args(TemplateKind))
 
 # Max characters per cell in run_sql output; long values (e.g. tool_input JSON
 # blobs) are truncated so one wide row doesn't blow up the response.
@@ -348,7 +357,72 @@ def describe_schema() -> str:
         lines.append(f"{table_name}:")
         lines.extend(f"  {col}" for col in by_table[table_name])
         lines.append("")
-    return "\n".join(lines).rstrip()
+    schema_text = "\n".join(lines).rstrip()
+    return (
+        f"{schema_text}\n\n"
+        f"{len(QUERY_TEMPLATES)} query templates available via "
+        "list_query_templates()."
+    )
+
+
+def _format_param(p: Param) -> str:
+    """Render one Param as a cookbook bullet line."""
+    requiredness = "required" if p.required else f"default={p.default!r}"
+    return f"  - {p.name} ({p.type}, {requiredness}): {p.description}"
+
+
+def list_query_templates(kind: str = "") -> str:
+    """Render the curated SQL investigation-template cookbook.
+
+    These are STARTING POINTS to adapt, not canned answers — read the SQL,
+    tweak it for the question actually being asked, and run it through
+    `run_sql`. Each entry shows the question it answers, its parameters
+    (`$named` DuckDB placeholders), the SQL itself, and a `note` carrying the
+    non-obvious schema knowledge (e.g. dedup rules, what a flag column really
+    means) needed to adapt it correctly.
+
+    A `kind="deterministic"` template ("one fixed query answers this") may
+    also be available as a dedicated MCP tool — check the tool list first.
+    A `kind="exploratory"` template ("the value is in adapting and following
+    threads") is meant to be reshaped per investigation.
+
+    Parameters
+    ----------
+    kind:
+        Optional filter: 'deterministic' or 'exploratory'. Empty string
+        (default) returns all — empty string rather than Optional for
+        tool-schema simplicity, matching the rest of this module.
+    """
+    if kind and kind not in _VALID_TEMPLATE_KINDS:
+        return (
+            f"Error: kind must be one of {sorted(_VALID_TEMPLATE_KINDS)} "
+            f"(got {kind!r})."
+        )
+
+    templates = (
+        templates_by_kind(cast("TemplateKind", kind)) if kind else QUERY_TEMPLATES
+    )
+    if not templates:
+        return f"No templates of kind {kind!r}."
+
+    blocks: list[str] = []
+    for template in templates:
+        param_lines = [_format_param(p) for p in template.params]
+        params_text = "\n".join(param_lines) if param_lines else "  (none)"
+        blocks.append(
+            f"### {template.name}  [{template.kind}]\n"
+            f"Q: {template.question}\n"
+            f"Params:\n{params_text}\n"
+            f"SQL:\n{template.sql}\n"
+            f"Note: {template.note}"
+        )
+
+    header = (
+        "Query template cookbook — starting points to adapt, not canned "
+        "answers. Adjust the SQL to the actual question, then run it "
+        "through `run_sql`.\n"
+    )
+    return header + "\n\n".join(blocks)
 
 
 async def refresh_data() -> str:
