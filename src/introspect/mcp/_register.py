@@ -3,11 +3,14 @@
 from __future__ import annotations
 
 from collections.abc import Callable
+from dataclasses import dataclass
 from types import FunctionType
 from typing import TYPE_CHECKING
 
 if TYPE_CHECKING:
     from mcp.server.fastmcp import FastMCP
+
+    from introspect.query_templates import TemplateKind
 
 
 def register_tools(mcp: FastMCP) -> None:
@@ -40,11 +43,62 @@ def register_tools(mcp: FastMCP) -> None:
     _register(refresh_data)
     _register(list_query_templates)
 
-    _register_deterministic_template_tools(mcp, registered_names, _register)
+    _register_deterministic_template_tools(registered_names, _register)
+
+
+@dataclass(frozen=True)
+class _AdapterSpec:
+    """Static, per-call-site description used to phrase drift errors."""
+
+    kind: TemplateKind
+    fns_var_name: str
+    caller_name: str
+    adapter_label: str
+    extra_missing_hint: str = ""
+
+
+def _wire_template_adapters(
+    spec: _AdapterSpec,
+    fns: dict[str, FunctionType],
+    register: Callable[[FunctionType], None],
+    skip_names: frozenset[str] = frozenset(),
+) -> None:
+    """Wire a {template name: adapter fn} mapping against the registry.
+
+    Shared by `_register_deterministic_template_tools` (MCP tools) and
+    `register_prompts` (MCP prompts): both raise rather than silently
+    registering nothing when the registry and the adapter dict drift apart —
+    either `fns` names a template that doesn't exist (orphaned fn), or a
+    `kind=...` template (not in `skip_names`) has no matching fn (missing
+    adapter).
+    """
+    from introspect.query_templates import templates_by_kind  # noqa: PLC0415
+
+    templates = templates_by_kind(spec.kind)
+    template_names = {t.name for t in templates}
+    orphaned_fns = set(fns) - template_names
+    if orphaned_fns:
+        verb = "is" if len(orphaned_fns) == 1 else "are"
+        raise RuntimeError(  # noqa: TRY003
+            f"{spec.fns_var_name} in {spec.caller_name} references "
+            f"{sorted(orphaned_fns)}, which {verb} not a kind={spec.kind!r} "
+            "template in query_templates.py. Remove the stale entry or fix "
+            "the template's kind/name."
+        )
+    for template in templates:
+        if template.name in skip_names:
+            continue
+        fn = fns.get(template.name)
+        if fn is None:
+            raise RuntimeError(  # noqa: TRY003
+                f"No {spec.adapter_label} registered for kind={spec.kind!r} "
+                f"template {template.name!r}. Add it to {spec.fns_var_name} "
+                f"in {spec.caller_name}.{spec.extra_missing_hint}"
+            )
+        register(fn)
 
 
 def _register_deterministic_template_tools(
-    mcp: FastMCP,
     registered_names: set[str],
     register: Callable[[FunctionType], None],
 ) -> None:
@@ -59,39 +113,22 @@ def _register_deterministic_template_tools(
     deliberately skipped here rather than re-registered or clobbered — the
     `registered_names` check is what keeps the richer tool from being
     shadowed by a generated one.
-
-    Mirrors `register_prompts`' loud-failure shape: both directions of
-    registry/adapter drift raise rather than silently registering nothing —
-    a stale fn with no matching template, or a template with no fn and no
-    pre-existing hand-built tool.
     """
     from introspect.mcp.tools import tool_failure_rate  # noqa: PLC0415
-    from introspect.query_templates import templates_by_kind  # noqa: PLC0415
 
-    _deterministic_tool_fns = {"tool_failure_rate": tool_failure_rate}
-    _deterministic_templates = templates_by_kind("deterministic")
-    _template_names = {t.name for t in _deterministic_templates}
-    _orphaned_fns = set(_deterministic_tool_fns) - _template_names
-    if _orphaned_fns:
-        verb = "is" if len(_orphaned_fns) == 1 else "are"
-        raise RuntimeError(  # noqa: TRY003
-            f"_deterministic_tool_fns in register_tools references "
-            f"{sorted(_orphaned_fns)}, which {verb} not a kind='deterministic' "
-            "template in query_templates.py. Remove the stale entry or fix "
-            "the template's kind/name."
-        )
-    for template in _deterministic_templates:
-        if template.name in registered_names:
-            continue
-        fn = _deterministic_tool_fns.get(template.name)
-        if fn is None:
-            raise RuntimeError(  # noqa: TRY003
-                f"No MCP tool registered for kind='deterministic' template "
-                f"{template.name!r}. Add it to _deterministic_tool_fns in "
-                "_register_deterministic_template_tools, or hand-register a "
-                "tool of the same name in register_tools."
-            )
-        register(fn)
+    deterministic_tool_fns = {"tool_failure_rate": tool_failure_rate}
+    spec = _AdapterSpec(
+        kind="deterministic",
+        fns_var_name="deterministic_tool_fns",
+        caller_name="_register_deterministic_template_tools",
+        adapter_label="MCP tool",
+        extra_missing_hint=(
+            " Or hand-register a tool of the same name in register_tools."
+        ),
+    )
+    _wire_template_adapters(
+        spec, deterministic_tool_fns, register, frozenset(registered_names)
+    )
 
 
 def register_prompts(mcp: FastMCP) -> None:
@@ -107,29 +144,19 @@ def register_prompts(mcp: FastMCP) -> None:
         session_cost_tail,
         topic_to_cost,
     )
-    from introspect.query_templates import templates_by_kind  # noqa: PLC0415
 
-    _exploratory_prompt_fns = {
+    exploratory_prompt_fns = {
         "session_cost_tail": session_cost_tail,
         "topic_to_cost": topic_to_cost,
     }
-    _exploratory_templates = templates_by_kind("exploratory")
-    _template_names = {t.name for t in _exploratory_templates}
-    _orphaned_fns = set(_exploratory_prompt_fns) - _template_names
-    if _orphaned_fns:
-        verb = "is" if len(_orphaned_fns) == 1 else "are"
-        raise RuntimeError(  # noqa: TRY003
-            f"_exploratory_prompt_fns in register_prompts references "
-            f"{sorted(_orphaned_fns)}, which {verb} not a kind='exploratory' "
-            "template in query_templates.py. Remove the stale entry or fix "
-            "the template's kind/name."
-        )
-    for template in _exploratory_templates:
-        fn = _exploratory_prompt_fns.get(template.name)
-        if fn is None:
-            raise RuntimeError(  # noqa: TRY003
-                f"No prompt function registered for kind='exploratory' "
-                f"template {template.name!r}. Add it to "
-                "_exploratory_prompt_fns in register_prompts."
-            )
+
+    def _register_prompt(fn: FunctionType) -> None:
         mcp.prompt()(fn)
+
+    spec = _AdapterSpec(
+        kind="exploratory",
+        fns_var_name="exploratory_prompt_fns",
+        caller_name="register_prompts",
+        adapter_label="prompt function",
+    )
+    _wire_template_adapters(spec, exploratory_prompt_fns, _register_prompt)
