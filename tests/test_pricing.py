@@ -23,6 +23,7 @@ _RATE_CASES = [
     ("claude-opus-4-5", Rates(5, 6.25, 10, 0.50, 25)),
     ("claude-opus-4-1", Rates(15, 18.75, 30, 1.50, 75)),
     ("claude-opus-3", Rates(15, 18.75, 30, 1.50, 75)),
+    ("claude-sonnet-5", Rates(2, 2.50, 4, 0.20, 10)),
     ("claude-sonnet-4-6", Rates(3, 3.75, 6, 0.30, 15)),
     ("claude-sonnet-3-7", Rates(3, 3.75, 6, 0.30, 15)),
     ("claude-haiku-4-5-20251001", Rates(1, 1.25, 2, 0.10, 5)),
@@ -132,6 +133,7 @@ _SQL_RATE_PAIRS = [
 _SQL_TEST_MODELS = [
     "claude-opus-4-7",
     "claude-opus-4-1",
+    "claude-sonnet-5",
     "claude-sonnet-4-6",
     "claude-haiku-4-5-20251001",
     "claude-haiku-3-5",

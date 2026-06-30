@@ -51,6 +51,9 @@ _PRICING: dict[str, Rates] = {
     "claude-opus-4": Rates(15, 18.75, 30, 1.50, 75),
     "claude-opus-3": Rates(15, 18.75, 30, 1.50, 75),
     # Sonnet
+    # Sonnet 5 introductory pricing ($2/$10), active through 2026-08-31;
+    # reverts to standard $3/$15 after — update this entry then.
+    "claude-sonnet-5": Rates(2, 2.50, 4, 0.20, 10),
     "claude-sonnet-4-6": Rates(3, 3.75, 6, 0.30, 15),
     "claude-sonnet-4-5": Rates(3, 3.75, 6, 0.30, 15),
     "claude-sonnet-4": Rates(3, 3.75, 6, 0.30, 15),
