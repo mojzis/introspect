@@ -10,6 +10,8 @@ Explore Claude Code conversation logs via CLI, web UI, MCP server.
 - `sql_fragments.py` — shared SQL building blocks (cost / tool / file / command rollups)
 - `projects.py` — git worktree-aware `cwd` → canonical project
 - `search.py` — FTS via BM25, ILIKE fallback
+- `sql_query.py` — shared read-only SQL guard (SELECT/WITH-only validator, row-cap wrapping, loopback host check) used by both MCP `run_sql` and the HTTP SQL API
+- `api/handlers/query.py` — local-only `POST /api/query` + `GET /api/schema` JSON SQL API; gated on `app.state.sql_api_enabled` (loopback bind only, set in `main.py` lifespan from `INTROSPECT_HOST`)
 - `api/routes.py` → `api/handlers/<name>.py` → `templates/<name>.html`
 - `api/handlers/_helpers.py` — shared: `parent(request)`, `conn(request)`, pagination, sort allowlists; re-exports SQL fragments
 - `mcp/` — FastMCP tools mounted on FastAPI; `refresh_bridge.py` plumbs `app.state` to stateless tool fns

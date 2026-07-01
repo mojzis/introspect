@@ -29,8 +29,27 @@ from introspect.refresh import (
     window_to_days,
 )
 from introspect.search import build_search_corpus
+from introspect.sql_query import is_loopback_host
 
 log = logging.getLogger(__name__)
+
+
+def _configure_sql_api(app: FastAPI) -> None:
+    """Decide whether to expose the local-only SQL API and record it on state.
+
+    Exposed only when the server is bound to a loopback address (the CLI
+    passes the bind host through ``INTROSPECT_HOST``); an explicit
+    ``INTROSPECT_SQL_API=off`` disables it even on loopback.
+
+    Fails closed: an unset ``INTROSPECT_HOST`` (e.g. launching the app under
+    bare ``uvicorn`` instead of via ``introspy serve``) counts as "not known
+    to be loopback" and leaves the API disabled — the bind host must be
+    explicitly loopback to expose it.
+    """
+    bind_host = os.environ.get("INTROSPECT_HOST", "")
+    api_toggle = os.environ.get("INTROSPECT_SQL_API", "").strip().lower()
+    app.state.bind_host = bind_host
+    app.state.sql_api_enabled = api_toggle != "off" and is_loopback_host(bind_host)
 
 
 @asynccontextmanager
@@ -74,6 +93,8 @@ async def lifespan(app: FastAPI):
     # Always set the attribute (None when disabled) so callers can check
     # ``state.refresh_trigger is None`` instead of falling back to ``getattr``.
     app.state.refresh_trigger = None
+
+    _configure_sql_api(app)
 
     refresh_task: asyncio.Task[None] | None = None
     if interval > 0:

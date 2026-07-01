@@ -222,20 +222,26 @@ def _write_sample_jsonl(tmp_dir: Path) -> Path:
 
 
 @contextmanager
-def _patched_client(tmp_path: Path):
-    """Context manager that yields a TestClient with materialized test data."""
+def _patched_client(tmp_path: Path, extra_env: dict[str, str] | None = None):
+    """Context manager that yields a TestClient with materialized test data.
+
+    ``extra_env`` overlays additional environment variables read by the app
+    lifespan (e.g. ``INTROSPECT_HOST`` to exercise the SQL API bind gate).
+    """
     _write_sample_jsonl(tmp_path)
     db_path = tmp_path / "test.duckdb"
 
+    env = {
+        "INTROSPECT_DB_PATH": str(db_path),
+        "INTROSPECT_JSONL_GLOB": glob_pattern(tmp_path),
+        "INTROSPECT_DAYS": "0",
+        # The SQL API fails closed on an unset host; tests run as a loopback
+        # bind unless a case overrides it via ``extra_env``.
+        "INTROSPECT_HOST": "127.0.0.1",
+        **(extra_env or {}),
+    }
     with (
-        patch.dict(
-            os.environ,
-            {
-                "INTROSPECT_DB_PATH": str(db_path),
-                "INTROSPECT_JSONL_GLOB": glob_pattern(tmp_path),
-                "INTROSPECT_DAYS": "0",
-            },
-        ),
+        patch.dict(os.environ, env),
         TestClient(app) as client,
     ):
         yield client
