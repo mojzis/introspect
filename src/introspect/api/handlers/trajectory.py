@@ -181,6 +181,7 @@ def build_trajectory_context(
                 "label": label,
                 "detail": _detail_label(tool_name, cat, inp),
                 "tip": _tooltip(tool_name, inp),
+                # is_error is DuckDB JSON text: 'true'/'false'/NULL, not a bool
                 "is_error": str(is_error).lower() == "true",
             }
         )

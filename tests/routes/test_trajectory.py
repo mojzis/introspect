@@ -1,15 +1,43 @@
 """Tests for the session Trajectory tab."""
 
+import json
 import tempfile
 from pathlib import Path
+
+import duckdb
 
 from introspect.api.handlers.trajectory import (
     _classify,
     _detail_label,
     _prefix,
+    _tooltip,
+    build_trajectory_context,
 )
 
 from .conftest import SID, _patched_client
+
+
+def _conn(calls: list[tuple[str, dict, str | None]]) -> duckdb.DuckDBPyConnection:
+    """In-memory ``tool_calls`` table from ``(tool_name, input, is_error)`` rows.
+
+    ``is_error`` mirrors DuckDB's JSON text: ``'true'`` / ``'false'`` / ``None``.
+    Rows are ordered by insertion (called_at + tool_use_id both increment).
+    """
+    conn = duckdb.connect(":memory:")
+    conn.execute(
+        """
+        CREATE TABLE tool_calls (
+            session_id VARCHAR, called_at BIGINT, tool_use_id VARCHAR,
+            tool_name VARCHAR, tool_input VARCHAR, is_error VARCHAR
+        )
+        """
+    )
+    for i, (tool_name, inp, is_error) in enumerate(calls):
+        conn.execute(
+            "INSERT INTO tool_calls VALUES ('s', ?, ?, ?, ?, ?)",
+            [i, f"tu{i:03d}", tool_name, json.dumps(inp), is_error],
+        )
+    return conn
 
 
 def test_classify_tool_names():
@@ -49,6 +77,105 @@ def test_detail_label():
     assert _detail_label("Bash", "git", {"command": "git status -s"}) == "git status"
     assert _detail_label("Read", "read", {"file_path": "/a/b/main.py"}) == "main.py"
     assert _detail_label("mcp__github__get_me", "mcp", {}) == "github__get_me"
+    # non-file, non-bash, non-mcp tool falls through to the bare name
+    assert _detail_label("Task", "task", {}) == "Task"
+
+
+def test_tooltip():
+    assert _tooltip("Bash", {"command": "  ls -la  "}) == "ls -la"
+    assert _tooltip("Bash", {}) == "Bash"
+    assert _tooltip("Read", {"file_path": "/a/b.py"}) == "Read: /a/b.py"
+    assert _tooltip("mcp__github__get_me", {}) == "mcp__github__get_me"
+    assert _tooltip("Task", {}) == "Task"
+
+
+def test_build_empty_session():
+    ctx = build_trajectory_context(_conn([]), "s")
+    assert ctx == {"has_data": False, "view": "category"}
+
+
+def test_build_normal_locate_implement_verify():
+    # read (locate) -> edit (implement) -> test (verify)
+    ctx = build_trajectory_context(
+        _conn(
+            [
+                ("Read", {"file_path": "/a.py"}, None),
+                ("Edit", {"file_path": "/a.py"}, None),
+                ("Bash", {"command": "uv run pytest"}, None),
+            ]
+        ),
+        "s",
+    )
+    assert ctx["phases"] == {"locate_end": 1, "implement_end": 2}
+    assert ctx["metrics"]["locate_len"] == 1
+    assert ctx["metrics"]["edits"] == 1
+
+
+def test_build_edits_but_no_tests_leaves_verify_band_empty():
+    ctx = build_trajectory_context(
+        _conn(
+            [
+                ("Read", {"file_path": "/a.py"}, None),
+                ("Edit", {"file_path": "/a.py"}, None),
+                ("Read", {"file_path": "/a.py"}, None),
+            ]
+        ),
+        "s",
+    )
+    # verify starts at end -> [3, 3) is empty
+    assert ctx["phases"] == {"locate_end": 1, "implement_end": 3}
+
+
+def test_build_no_edits_puts_everything_in_locate():
+    ctx = build_trajectory_context(
+        _conn(
+            [
+                ("Read", {"file_path": "/a.py"}, None),
+                ("Bash", {"command": "grep foo"}, None),
+                ("Read", {"file_path": "/b.py"}, None),
+            ]
+        ),
+        "s",
+    )
+    assert ctx["phases"] == {"locate_end": 3, "implement_end": 3}
+    assert ctx["metrics"]["locate_len"] == 3
+    assert ctx["metrics"]["edits"] == 0
+
+
+def test_build_test_before_edit_collapses_implement_band():
+    # test precedes the first edit -> implement band [1, 1) is empty
+    ctx = build_trajectory_context(
+        _conn(
+            [
+                ("Bash", {"command": "uv run pytest"}, None),
+                ("Edit", {"file_path": "/a.py"}, None),
+            ]
+        ),
+        "s",
+    )
+    assert ctx["phases"] == {"locate_end": 1, "implement_end": 1}
+
+
+def test_build_reread_metrics_and_is_error():
+    ctx = build_trajectory_context(
+        _conn(
+            [
+                ("Read", {"file_path": "/hot.py"}, None),
+                ("Read", {"file_path": "/hot.py"}, None),
+                ("Bash", {"command": "false"}, "true"),
+            ]
+        ),
+        "s",
+    )
+    assert ctx["metrics"]["distinct_files"] == 1
+    assert ctx["metrics"]["max_rereads"] == 2
+    assert ctx["calls"][2]["is_error"] is True
+    assert ctx["calls"][0]["is_error"] is False
+
+
+def test_build_invalid_view_falls_back_to_default():
+    ctx = build_trajectory_context(_conn([]), "s", view="bogus")
+    assert ctx["view"] == "category"
 
 
 def test_trajectory_tab_renders():
