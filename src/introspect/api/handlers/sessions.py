@@ -37,6 +37,7 @@ from ._helpers import (
 )
 from .subagents import build_subagent_breakdown_context
 from .tokenscape import build_tokenscape_context
+from .trajectory import DEFAULT_VIEW, build_trajectory_context
 
 logger = logging.getLogger(__name__)
 
@@ -1773,11 +1774,14 @@ def _build_chart_from_attrib(
     )
 
 
-_VALID_TABS = {"messages", "cost", "tokenscape", "subagents"}
+_VALID_TABS = {"messages", "cost", "tokenscape", "subagents", "trajectory"}
 
 
 async def session_detail(
-    request: Request, session_id: str, tab: str = "messages"
+    request: Request,
+    session_id: str,
+    tab: str = "messages",
+    view: str = DEFAULT_VIEW,
 ) -> HTMLResponse:
     """Full session detail: Messages tab (default) or Cost tab (?tab=cost)."""
     db = conn(request)
@@ -1857,6 +1861,7 @@ async def session_detail(
     cost_ctx: dict = {}
     tokenscape_ctx: dict = {}
     subagents_ctx: dict = {}
+    trajectory_ctx: dict = {}
     if active_tab == "messages":
         parsed_messages = _build_messages_context(
             db, session_id, cache_loss_events=cache_loss_events
@@ -1881,6 +1886,15 @@ async def session_detail(
                 "has_data": False,
                 "error": f"{type(exc).__name__}: {exc}",
             }
+    elif active_tab == "trajectory":
+        try:
+            trajectory_ctx = build_trajectory_context(db, session_id, view)
+        except Exception as exc:
+            logger.exception("Failed to build trajectory for %s", session_id)
+            trajectory_ctx = {
+                "has_data": False,
+                "error": f"{type(exc).__name__}: {exc}",
+            }
     else:  # "cost"
         cost_ctx = _build_cost_context(db, session_id)
 
@@ -1899,6 +1913,7 @@ async def session_detail(
             "cache_loss_summary": cache_loss_summary,
             "tokenscape_ctx": tokenscape_ctx,
             "subagents_ctx": subagents_ctx,
+            "trajectory_ctx": trajectory_ctx,
             "has_subagents": has_subagents,
             "file_metrics": {
                 "files_read": file_metrics[0] or 0,
