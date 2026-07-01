@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-import re
 from datetime import datetime
 from typing import cast, get_args
 
@@ -28,6 +27,12 @@ from introspect.sql_fragments import (
     SESSION_COST_SUBQUERY,
     session_cost_subquery_filtered,
 )
+from introspect.sql_query import (
+    MCP_SQL_ROW_CAP,
+    clamp_row_limit,
+    validate_read_only_sql,
+    wrap_with_row_cap,
+)
 
 _VALID_ROLES = {"user", "assistant"}
 # Derived from the QueryTemplate.kind Literal so the two can't drift.
@@ -37,7 +42,8 @@ _VALID_TEMPLATE_KINDS: frozenset[str] = frozenset(get_args(TemplateKind))
 # blobs) are truncated so one wide row doesn't blow up the response.
 _SQL_CELL_MAX = 200
 # Hard cap on run_sql rows regardless of caller's `limit` argument.
-_SQL_ROW_CAP = 500
+# Re-exported alias for tests/back-compat — canonical value lives in sql_query.
+_SQL_ROW_CAP = MCP_SQL_ROW_CAP
 # Hard cap on expensive_sessions rows displayed (clamped from caller's limit).
 _EXPENSIVE_SESSIONS_ROW_CAP = 50
 
@@ -218,41 +224,6 @@ def recent_sessions(n: int = 10) -> str:
         conn.close()
 
 
-_SQL_COMMENT_BLOCK = re.compile(r"/\*.*?\*/", re.DOTALL)
-_SQL_COMMENT_LINE = re.compile(r"--[^\n]*")
-# Only single-quoted strings are SQL literals; double-quoted tokens are
-# identifiers and must not be rewritten by the validator.
-_SQL_STRING_LITERAL = re.compile(r"'(?:[^']|'')*'")
-_SQL_ALLOWED_FIRST_KEYWORDS = {"select", "with"}
-
-
-def _validate_read_only_sql(sql: str) -> str | None:
-    """Return an error message if `sql` is not a safe read-only query.
-
-    This is the PRIMARY guard — do not weaken it assuming the connection is
-    read-only. ``run_sql`` opens a fresh ``read_only=True`` connection as a
-    defense-in-depth backstop, but even that permits some side-effecting
-    statements (e.g. ``COPY ... TO '/file'`` can write outside the DB).
-    The "first keyword must be SELECT or WITH" check blocks ATTACH, INSTALL,
-    LOAD, PRAGMA, COPY, INSERT, UPDATE, DELETE, DROP, CREATE, CALL, etc.
-    """
-    stripped = _SQL_COMMENT_BLOCK.sub(" ", sql)
-    stripped = _SQL_COMMENT_LINE.sub(" ", stripped)
-    # Replace string-literal contents before scanning so a `;` or keyword
-    # inside a literal doesn't trip the multi-statement / first-keyword
-    # checks. Double-quoted identifiers are intentionally preserved.
-    scan = _SQL_STRING_LITERAL.sub("''", stripped)
-    scan = scan.strip().rstrip(";").strip()
-    if not scan:
-        return "SQL is empty."
-    if ";" in scan:
-        return "Multiple statements are not allowed."
-    first_word = scan.split(None, 1)[0].lower()
-    if first_word not in _SQL_ALLOWED_FIRST_KEYWORDS:
-        return f"Only SELECT / WITH queries are allowed (got: {first_word!r})."
-    return None
-
-
 def _format_rows(columns: list[str], rows: list[tuple]) -> str:
     """Format a result set as an aligned text table with truncated cells."""
     if not rows:
@@ -292,11 +263,11 @@ def run_sql(sql: str, limit: int = 100) -> str:
     than the cap before the tool fetches rows. Long cell values are
     truncated. Returns an aligned text table.
     """
-    error = _validate_read_only_sql(sql)
+    error = validate_read_only_sql(sql)
     if error:
         return f"Error: {error}"
 
-    capped_limit = max(1, min(limit, _SQL_ROW_CAP))
+    capped_limit = clamp_row_limit(limit, _SQL_ROW_CAP)
 
     # Fresh strict read-only connection — do NOT route through
     # get_read_connection(), which silently falls back to a writable
@@ -314,8 +285,7 @@ def run_sql(sql: str, limit: int = 100) -> str:
     # Wrap the user query so the row cap is applied by the planner, not
     # just by fetchmany. Safe because the inner SQL has already passed the
     # read-only validator and `capped_limit` is a clamped int.
-    inner = sql.strip().rstrip(";").strip()
-    wrapped = f"SELECT * FROM ({inner}) AS _introspect_q LIMIT {capped_limit}"  # noqa: S608
+    wrapped = wrap_with_row_cap(sql, capped_limit)
 
     try:
         try:

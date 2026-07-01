@@ -4,7 +4,7 @@ Each route delegates to a handler function in the handlers/ package.
 """
 
 from fastapi import APIRouter, Query, Request
-from fastapi.responses import HTMLResponse
+from fastapi.responses import HTMLResponse, JSONResponse
 
 from introspect.api.handlers._helpers import (
     SESSIONS_PER_PAGE_DEFAULT,
@@ -24,6 +24,9 @@ from introspect.api.handlers.cost_overview import (
 )
 from introspect.api.handlers.dashboard import dashboard as _dashboard
 from introspect.api.handlers.mcps import mcps as _mcps
+from introspect.api.handlers.query import QueryRequest
+from introspect.api.handlers.query import run_query as _run_query
+from introspect.api.handlers.query import schema as _schema
 from introspect.api.handlers.raw import raw_data as _raw_data
 from introspect.api.handlers.refresh import refresh_now as _refresh_now
 from introspect.api.handlers.refresh import refresh_status as _refresh_status
@@ -178,6 +181,16 @@ async def cost_portfolio_panel(
     hour: str | None = Query(default=None),
 ):
     return await _cost_portfolio_panel(request, day, hour)
+
+
+@router.post("/api/query", response_class=JSONResponse)
+async def api_query(request: Request, body: QueryRequest):
+    return await _run_query(request, body)
+
+
+@router.get("/api/schema", response_class=JSONResponse)
+async def api_schema(request: Request):
+    return await _schema(request)
 
 
 @router.post("/refresh", response_class=HTMLResponse)

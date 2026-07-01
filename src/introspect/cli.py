@@ -21,6 +21,7 @@ from introspect.db import (
     materialize_views,
 )
 from introspect.search import build_search_corpus, ensure_search_corpus, fts_search
+from introspect.sql_query import is_loopback_host
 
 SID_TRUNCATE = 12
 
@@ -504,12 +505,19 @@ def _run_web_ui(
         port = available
 
     os.environ["INTROSPECT_DAYS"] = str(days)
+    # The app reads INTROSPECT_HOST in its lifespan to decide whether to expose
+    # the local-only SQL API (loopback bind only). Keep it in sync with `host`.
+    os.environ["INTROSPECT_HOST"] = host
     if no_resolve_projects:
         os.environ["INTROSPECT_RESOLVE_PROJECTS"] = "0"
 
     banner = "dev server" if reload else "web UI"
     console.print(f"[bold]Starting Introspect {banner} on http://{host}:{port}[/bold]")
     console.print(f"[dim]MCP endpoint: http://{host}:{port}/mcp[/dim]")
+    if is_loopback_host(host):
+        console.print(
+            f"[dim]SQL API: POST http://{host}:{port}/api/query (local only)[/dim]"
+        )
     if days > 0:
         console.print(f"[dim]Loading last {days} days of data...[/dim]")
     else:
