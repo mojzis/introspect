@@ -179,12 +179,14 @@ _SAMPLE_PARAMS: dict[str, dict[str, object]] = {
     "tool_failure_rate": {"limit": 5, "since": None, "min_calls": 1},
     "session_cost_tail": {"session_id": SID},
     "topic_to_cost": {"query": SEARCH_WORD, "limit": 5},
+    "first_prompt_triggers": {"limit": 5, "project": None},
 }
 _MIN_EXPECTED_ROWS: dict[str, int] = {
     "expensive_sessions": 1,  # fixture session has cost
     "tool_failure_rate": 1,  # Bash has one failure out of two calls
     "session_cost_tail": 2,  # two cost-bearing assistant messages
     "topic_to_cost": 1,  # SEARCH_WORD appears in the fixture's first prompt
+    "first_prompt_triggers": 1,  # fixture session has a first prompt
 }
 
 
@@ -419,6 +421,7 @@ def test_tool_failure_rate_invalid_since() -> None:
 _PROMPT_SAMPLE_ARGS: dict[str, dict[str, object]] = {
     "session_cost_tail": {"session_id": SID},
     "topic_to_cost": {"query": SEARCH_WORD},
+    "first_prompt_triggers": {},
 }
 
 
@@ -460,10 +463,123 @@ def test_prompt_frames_as_starting_point() -> None:
     assert "not a canned answer" in text
 
 
-def test_list_prompts_includes_both_exploratory_prompts() -> None:
-    """Both exploratory-template prompts are discoverable via list_prompts,
+def test_list_prompts_includes_all_exploratory_prompts() -> None:
+    """Every exploratory-template prompt is discoverable via list_prompts,
     matching the registry's exploratory entries."""
     mcp = create_mcp_server()
     prompts = asyncio.run(mcp.list_prompts())
     names = {p.name for p in prompts}
     assert names == {t.name for t in QUERY_TEMPLATES if t.kind == "exploratory"}
+
+
+# --- first_prompt_triggers: path-extraction behavior ------------------------
+
+# (session_id, first_prompt, expected referenced_paths). Covers @mentions,
+# rooted + relative paths, and the prose false-positive ("and/or") the regex
+# must NOT catch — the heuristic's whole value is separating real file refs
+# from incidental slashes in prose.
+_TRIGGER_CASES: tuple[tuple[str, str, list[str]], ...] = (
+    (
+        "fpt-refs",
+        "please look at @src/db.py and ./scripts/run.sh now",
+        ["@src/db.py", "./scripts/run.sh"],
+    ),
+    ("fpt-prose", "use the right skill / claude file, and/or the project", []),
+    ("fpt-none", "just a plain question with no paths at all", []),
+)
+
+
+def _write_trigger_jsonl(tmp_dir: Path) -> None:
+    """Write one session per _TRIGGER_CASES entry, each a single human prompt,
+    so first_prompt_triggers' path regex can be exercised end to end. Each
+    session lives in its own file (one sessionId per file).
+
+    Also writes a schema-anchor session carrying a tool_use_result so the
+    union-by-name JSONL load produces every column raw_messages references
+    (``toolUseResult`` in particular); a corpus of prompt-only sessions would
+    otherwise fail to bind. The anchor is not part of _TRIGGER_CASES, so it
+    doesn't affect the assertions.
+    """
+    for sid, prompt, _expected in _TRIGGER_CASES:
+        write_jsonl(
+            tmp_dir,
+            sid,
+            [
+                make_user_message(
+                    sid, f"{sid}-u1", None, "2026-06-01T10:00:00.000Z", prompt
+                )
+            ],
+        )
+    anchor = "fpt-anchor"
+    write_jsonl(
+        tmp_dir,
+        anchor,
+        [
+            make_user_message(
+                anchor, "an-u0", None, "2026-06-09T10:00:00.000Z", "anchor session"
+            ),
+            make_assistant_message(
+                anchor,
+                "an-a1",
+                "an-u0",
+                "2026-06-09T10:00:01.000Z",
+                [
+                    {
+                        "type": "tool_use",
+                        "id": "toolu_an",
+                        "name": "Bash",
+                        "input": {"command": "ls"},
+                    }
+                ],
+            ),
+            make_user_message(
+                anchor,
+                "an-u1",
+                "an-a1",
+                "2026-06-09T10:00:02.000Z",
+                [
+                    {
+                        "type": "tool_result",
+                        "tool_use_id": "toolu_an",
+                        "content": "ok",
+                        "is_error": False,
+                    }
+                ],
+                tool_use_result={"stdout": "ok", "stderr": ""},
+                source_tool_uuid="an-a1",
+            ),
+        ],
+    )
+
+
+@pytest.fixture
+def trigger_db_path() -> Iterator[Path]:
+    """Materialize the path-extraction fixture sessions into a DuckDB file."""
+    with tempfile.TemporaryDirectory() as tmp:
+        tmp_path = Path(tmp)
+        _write_trigger_jsonl(tmp_path)
+        db_path = tmp_path / "triggers.duckdb"
+        conn = duckdb.connect(str(db_path))
+        materialize_views(conn, glob_pattern(tmp_path))
+        conn.close()
+        yield db_path
+
+
+def test_first_prompt_triggers_extracts_paths(trigger_db_path: Path) -> None:
+    """The path regex captures real file/dir references and ignores prose
+    slashes like 'and/or'."""
+    template = get_template("first_prompt_triggers")
+    assert template is not None
+
+    conn = duckdb.connect(str(trigger_db_path), read_only=True)
+    try:
+        rows = conn.execute(template.sql, {"limit": 50, "project": None}).fetchall()
+    finally:
+        conn.close()
+
+    # Map session_id -> (n_referenced_paths, referenced_paths).
+    by_session = {r[0]: (r[3], r[4]) for r in rows}
+    for sid, _prompt, expected in _TRIGGER_CASES:
+        n_paths, paths = by_session[sid]
+        assert list(paths) == expected, sid
+        assert n_paths == len(expected), sid

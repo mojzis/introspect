@@ -141,11 +141,13 @@ def register_prompts(mcp: FastMCP) -> None:
     pairing each entry with its named prompt function.
     """
     from introspect.mcp.prompts import (  # noqa: PLC0415
+        first_prompt_triggers,
         session_cost_tail,
         topic_to_cost,
     )
 
     exploratory_prompt_fns = {
+        "first_prompt_triggers": first_prompt_triggers,
         "session_cost_tail": session_cost_tail,
         "topic_to_cost": topic_to_cost,
     }

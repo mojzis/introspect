@@ -193,6 +193,87 @@ QUERY_TEMPLATES: tuple[QueryTemplate, ...] = (
         kind="exploratory",
     ),
     QueryTemplate(
+        name="first_prompt_triggers",
+        question=(
+            "For each session, what did the opening prompt reference and "
+            "trigger — file/dir paths, skills, slash commands?"
+        ),
+        sql=(
+            "WITH first_prompts AS (\n"
+            "    SELECT session_id, project, started_at, first_prompt, commands\n"
+            "    FROM session_stats\n"
+            "    WHERE first_prompt IS NOT NULL\n"
+            "      AND ($project IS NULL OR project = $project)\n"
+            "),\n"
+            "refs AS (\n"
+            "    SELECT session_id, regexp_extract_all(\n"
+            "        first_prompt,\n"
+            r"        '(?:@[\w./~-]+)|(?:[~.]?/[\w.~-]+/[\w./~-]+)"
+            r"|(?:[\w-]+/[\w./~-]*\.[\w]+)'"
+            "\n    ) AS referenced_paths\n"
+            "    FROM first_prompts\n"
+            "),\n"
+            "skills AS (\n"
+            "    SELECT session_id, count(*) AS skills_invoked\n"
+            "    FROM session_messages_enriched\n"
+            "    WHERE kind = 'agent_tool_call' AND tool_name = 'Skill'\n"
+            "    GROUP BY session_id\n"
+            ")\n"
+            "SELECT\n"
+            "    fp.session_id,\n"
+            "    fp.project,\n"
+            "    fp.started_at,\n"
+            "    len(r.referenced_paths) AS n_referenced_paths,\n"
+            "    r.referenced_paths,\n"
+            "    COALESCE(s.skills_invoked, 0) AS skills_invoked,\n"
+            "    fp.commands,\n"
+            "    left(fp.first_prompt, 200) AS first_prompt\n"
+            "FROM first_prompts fp\n"
+            "LEFT JOIN refs r USING (session_id)\n"
+            "LEFT JOIN skills s USING (session_id)\n"
+            "ORDER BY fp.started_at DESC\n"
+            "LIMIT $limit"
+        ),
+        params=(
+            _LIMIT_PARAM,
+            Param(
+                name="project",
+                type="str",
+                required=False,
+                default=None,
+                description=(
+                    "Restrict to one project (session_stats.project). "
+                    "None means all projects."
+                ),
+            ),
+        ),
+        note=(
+            "Answers 'did my opening prompt set the session up right?'. "
+            "referenced_paths is a HEURISTIC regex over first_prompt: it "
+            "catches @mentions, rooted paths (/a/b, ./a/b, ~/a/b), and any "
+            "token with a slash + file extension. It deliberately misses "
+            "bare filenames without a slash (e.g. 'fix db.py') to avoid "
+            "matching prose like 'e.g.'; widen the pattern if you want those. "
+            "skills_invoked counts Skill tool calls (kind='agent_tool_call', "
+            "tool_name='Skill') — this covers BOTH skills the user typed as "
+            "/name AND skills the model auto-triggered, since both emit a "
+            "Skill tool_use. commands reuses session_stats.commands (the "
+            "canonical COMMAND_LIST_SUBQUERY rollup — noise commands like "
+            "/clear and /compact already filtered out), so it can't drift "
+            "from the sessions listing. Exploratory because the payoff is "
+            "comparing "
+            "prompt WORDING against what loaded: e.g. sessions where "
+            "n_referenced_paths=0 and skills_invoked=0 are candidates for a "
+            "vaguer opening prompt. IMPORTANT GAP: files auto-loaded by the "
+            "harness (CLAUDE.md, @-file expansions, skill listings, hooks) "
+            "are NOT visible here — they live in type='attachment' records "
+            "that the derived views drop; query raw_data (attachment column) "
+            "for those, or see docs/first-prompt-triggers-plan.md for the "
+            "planned session_context_loads view."
+        ),
+        kind="exploratory",
+    ),
+    QueryTemplate(
         name="topic_to_cost",
         question="Sessions about <topic>, ranked by cost.",
         sql=(
