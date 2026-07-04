@@ -1,0 +1,112 @@
+site_name: Introspect
+site_description: Explore and search your Claude Code conversation logs via SQL, full-text search, a web UI, and an MCP server.
+site_url: https://mojzis.github.io/introspect/
+repo_url: https://github.com/mojzis/introspect
+repo_name: mojzis/introspect
+edit_uri: edit/main/docs/
+copyright: Made for exploring Claude Code conversation logs
+
+theme:
+  name: material
+  icon:
+    repo: fontawesome/brands/github
+    logo: material/magnify-scan
+  palette:
+    - media: "(prefers-color-scheme)"
+      toggle:
+        icon: material/brightness-auto
+        name: Switch to light mode
+    - media: "(prefers-color-scheme: light)"
+      scheme: default
+      primary: deep purple
+      accent: deep purple
+      toggle:
+        icon: material/brightness-7
+        name: Switch to dark mode
+    - media: "(prefers-color-scheme: dark)"
+      scheme: slate
+      primary: deep purple
+      accent: purple
+      toggle:
+        icon: material/brightness-4
+        name: Switch to system preference
+  features:
+    - navigation.instant
+    - navigation.tracking
+    - navigation.sections
+    - navigation.top
+    - navigation.footer
+    - toc.follow
+    - search.suggest
+    - search.highlight
+    - content.code.copy
+    - content.code.annotate
+    - content.action.edit
+
+nav:
+  - Home: index.md
+  - Installation: installation.md
+  - Usage:
+      - Web UI: usage/web-ui.md
+      - CLI: usage/cli.md
+      - MCP server: usage/mcp.md
+      - SQL API: usage/sql-api.md
+  - Reference:
+      - Architecture: architecture.md
+      - JSONL schema: schema.md
+      - Configuration: configuration.md
+  - Development: development.md
+  - For LLMs: llms.md
+
+markdown_extensions:
+  - admonition
+  - attr_list
+  - md_in_html
+  - tables
+  - toc:
+      permalink: true
+  - pymdownx.details
+  - pymdownx.superfences
+  - pymdownx.highlight:
+      anchor_linenums: true
+  - pymdownx.inlinehilite
+  - pymdownx.snippets
+  - pymdownx.tabbed:
+      alternate_style: true
+  - pymdownx.emoji:
+      emoji_index: !!python/name:material.extensions.emoji.twemoji
+      emoji_generator: !!python/name:material.extensions.emoji.to_svg
+
+plugins:
+  - search
+  - llmstxt:
+      markdown_description: >-
+        Introspect (published on PyPI as `introspy`) is a tool for exploring and
+        searching Claude Code conversation logs. It reads the JSONL files under
+        `~/.claude/projects/**/*.jsonl` into a DuckDB database and exposes them
+        through a CLI, a FastAPI web UI, and an MCP server. It surfaces sessions,
+        tool calls, token/cost breakdowns, full-text search, and ad-hoc read-only
+        SQL over a fixed schema of views.
+      full_output: llms-full.txt
+      sections:
+        Overview:
+          - index.md
+          - installation.md
+        Usage:
+          - usage/web-ui.md
+          - usage/cli.md
+          - usage/mcp.md
+          - usage/sql-api.md
+        Reference:
+          - architecture.md
+          - schema.md
+          - configuration.md
+        Development:
+          - development.md
+
+extra:
+  social:
+    - icon: fontawesome/brands/github
+      link: https://github.com/mojzis/introspect
+    - icon: fontawesome/brands/python
+      link: https://pypi.org/project/introspy/
