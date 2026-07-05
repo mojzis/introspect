@@ -536,6 +536,111 @@ def _run_web_ui(
     uvicorn.run("introspect.api.main:app", **kwargs)  # ty: ignore[invalid-argument-type]
 
 
+# Dev-server databases are namespaced per git branch so that switching branches
+# (which may change the schema) never reuses a stale DB built on another branch.
+_BRANCH_DB_PREFIX = "introspect-"
+
+
+def _current_git_branch() -> str | None:
+    """Return the current git branch, or None on detached HEAD / not a repo."""
+    import subprocess  # noqa: PLC0415
+
+    try:
+        result = subprocess.run(
+            ["git", "symbolic-ref", "--short", "-q", "HEAD"],  # noqa: S607
+            capture_output=True,
+            text=True,
+            check=True,
+        )
+    except (subprocess.CalledProcessError, OSError):
+        return None
+    return result.stdout.strip() or None
+
+
+def _sanitize_branch(branch: str) -> str:
+    """Make a branch name safe for use in a filename (``feat/x`` -> ``feat-x``)."""
+    import re  # noqa: PLC0415
+
+    return re.sub(r"[^A-Za-z0-9._-]", "-", branch)
+
+
+def _branch_db_path(branch: str) -> Path:
+    """Per-branch DuckDB path alongside the default DB."""
+    return (
+        DEFAULT_DB_PATH.parent / f"{_BRANCH_DB_PREFIX}{_sanitize_branch(branch)}.duckdb"
+    )
+
+
+def _remove_db(db_path: Path) -> None:
+    """Delete a DuckDB file and its DuckDB/refresh sidecars, if present."""
+    for f in (
+        db_path,
+        db_path.with_name(db_path.name + ".wal"),
+        db_path.with_name(db_path.name + ".next"),
+    ):
+        f.unlink(missing_ok=True)
+
+
+def _git_toplevel(cwd: str | Path) -> Path | None:
+    """Return the git worktree root for ``cwd``, or None if not a repo."""
+    import subprocess  # noqa: PLC0415
+
+    try:
+        result = subprocess.run(  # noqa: S603
+            ["git", "-C", str(cwd), "rev-parse", "--show-toplevel"],  # noqa: S607
+            capture_output=True,
+            text=True,
+            check=True,
+        )
+    except (subprocess.CalledProcessError, OSError):
+        return None
+    return Path(result.stdout.strip()).resolve()
+
+
+def _prune_stale_branch_dbs(keep: Path) -> list[Path]:
+    """Delete branch DBs whose branch no longer exists locally.
+
+    Branch DBs are keyed by bare branch name and shared across all repos in
+    ``~/.introspect/``, so pruning is only safe when ``devserve`` is launched
+    from the introspect repo itself (its own dev scenario) — otherwise another
+    project's branch list would nuke introspect's dev DBs. Bail out unless the
+    cwd's git worktree is the same repo this code is running from.
+
+    Never touches ``keep`` (the current branch's DB) or the shared default DB.
+    Returns the removed primary DB paths.
+    """
+    import subprocess  # noqa: PLC0415
+
+    parent = DEFAULT_DB_PATH.parent
+    if not parent.exists():
+        return []
+    cwd_repo = _git_toplevel(".")
+    src_repo = _git_toplevel(Path(__file__).parent)
+    if cwd_repo is None or cwd_repo != src_repo:
+        return []  # not developing introspect here — don't touch its DBs
+    try:
+        result = subprocess.run(
+            ["git", "branch", "--format=%(refname:short)"],  # noqa: S607
+            capture_output=True,
+            text=True,
+            check=True,
+        )
+    except (subprocess.CalledProcessError, OSError):
+        return []  # not a git repo — don't delete anything
+    live = {
+        f"{_BRANCH_DB_PREFIX}{_sanitize_branch(b)}.duckdb"
+        for b in result.stdout.split()
+        if b
+    }
+    removed: list[Path] = []
+    for db in parent.glob(f"{_BRANCH_DB_PREFIX}*.duckdb"):
+        if db == keep or db.name in live:
+            continue
+        _remove_db(db)
+        removed.append(db)
+    return removed
+
+
 @app.command()
 def serve(
     port: int = typer.Option(DEFAULT_PORT, help="Port to listen on"),
@@ -565,8 +670,36 @@ def devserve(
         "--no-resolve-projects",
         help="Skip git worktree resolution for project names",
     ),
+    clean: bool = typer.Option(
+        False,
+        "--clean",
+        help="Rebuild this branch's dev DB from scratch instead of reusing it",
+    ),
 ):
-    """Launch the web UI with auto-reload on source changes."""
+    """Launch the web UI with auto-reload on source changes.
+
+    Uses a per-branch DuckDB (``introspect-<branch>.duckdb``) so dev servers on
+    different branches never share a schema-mismatched database. Respects an
+    explicit ``INTROSPECT_DB_PATH`` if set. Also prunes dev DBs for branches
+    that no longer exist.
+    """
+    import os  # noqa: PLC0415
+
+    if "INTROSPECT_DB_PATH" not in os.environ:
+        branch = _current_git_branch()
+        if branch is not None:
+            db_path = _branch_db_path(branch)
+            os.environ["INTROSPECT_DB_PATH"] = str(db_path)
+            console.print(f"[dim]Dev DB (branch '{branch}'): {db_path}[/dim]")
+            if clean:
+                _remove_db(db_path)
+                console.print("[dim]--clean: removed existing dev DB[/dim]")
+            pruned = _prune_stale_branch_dbs(keep=db_path)
+            if pruned:
+                console.print(
+                    f"[dim]Pruned {len(pruned)} dev DB(s) for deleted branches[/dim]"
+                )
+
     _run_web_ui(host, port, days, no_resolve_projects, reload=True)
 
 
