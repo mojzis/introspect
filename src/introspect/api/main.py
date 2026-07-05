@@ -11,7 +11,8 @@ from pathlib import Path
 
 import duckdb
 from fastapi import FastAPI, Request
-from fastapi.responses import HTMLResponse, JSONResponse
+from fastapi.responses import FileResponse, HTMLResponse, JSONResponse
+from fastapi.staticfiles import StaticFiles
 
 from introspect.api.routes import router
 from introspect.db import (
@@ -152,6 +153,26 @@ async def db_middleware(request: Request, call_next):
 
 
 app.include_router(router)
+
+STATIC_DIR = Path(__file__).resolve().parent.parent / "static"
+app.mount("/static", StaticFiles(directory=STATIC_DIR), name="static")
+
+
+@app.get("/manifest.webmanifest", include_in_schema=False)
+async def manifest() -> FileResponse:
+    """Serve the web app manifest at the site root.
+
+    Served from a dedicated route (rather than under ``/static/``) so the
+    ``application/manifest+json`` media type is explicit — ``.webmanifest`` is
+    absent from Python's default ``mimetypes`` table — and so ``scope`` /
+    ``start_url`` resolve against the root.
+    """
+    return FileResponse(
+        STATIC_DIR / "manifest.webmanifest",
+        media_type="application/manifest+json",
+    )
+
+
 # Placeholder mount — replaced with a fresh MCP app in lifespan
 app.mount("/mcp", FastAPI())
 
