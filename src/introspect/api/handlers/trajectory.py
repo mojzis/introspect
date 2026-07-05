@@ -87,6 +87,29 @@ _TOOL_CAT: dict[str, str] = {
 # tools that count as "edits" for the locate-phase boundary
 _EDIT_TOOLS = {"edit", "write"}
 
+# Verification signals: running tests, linters, type-checkers, or builds.
+# Broader than the ``test`` display category (which is test *runners* only) —
+# a ``ruff`` / ``tsc`` run is a verify signal but keeps its own glyph.  Used
+# only to place the verify-phase boundary, and kept deliberately
+# language-agnostic (Python / JS / Go / Rust / Ruby / .NET / JVM / …) rather
+# than keyed on any single test runner.
+VERIFY_SIGNAL = re.compile(
+    r"\b("
+    # test runners
+    r"pytest|jest|vitest|mocha|jasmine|ava|tox|nox|phpunit|rspec|minitest|"
+    r"ctest|deno test|bun test|dotnet test|mix test|"
+    r"cargo (test|clippy)|go (test|vet)|golangci-lint|"
+    # linters / type-checkers / formatters-in-check-mode
+    r"ruff|flake8|pylint|mypy|pyright|eslint|tslint|tsc|biome|rubocop|"
+    r"clippy|checkstyle|vet"
+    r")\b"
+    # task-runner recipes whose name signals verification
+    r"|\b(poe|make|just|rake|mvn|gradle)\w* (test|check|lint|typecheck|verify)"
+    r"|npm (run )?(test|lint|typecheck|check)"
+    # `uv run ty check`, `ty check` — `ty` is too short to match unanchored
+    r"|\bty check\b"
+)
+
 
 def _classify(tool_name: str, cmd: str) -> str:
     """Map a tool call to a coarse category key."""
@@ -100,6 +123,27 @@ def _classify(tool_name: str, cmd: str) -> str:
     if tool_name.startswith("mcp__"):
         return "mcp"
     return "other"
+
+
+# A command whose *leading* token is a search tool is navigation, not
+# verification — ``grep -rn ruff src/`` / ``rg pytest`` mention a checker's
+# name but don't run it, so they must not open the verify phase.
+_SEARCH_LEAD = re.compile(r"^\s*(grep|rg|ripgrep|ag|fd|find|tyf|biston)\b")
+
+
+def _is_verify(cat: str, tool_name: str, cmd: str) -> bool:
+    """Whether a call is a verification signal (test / lint / typecheck / build).
+
+    Test *runners* already land in the ``test`` category; this additionally
+    catches linters, type-checkers and check recipes that classify as
+    ``pkg`` / ``bash`` so the verify phase isn't blind to non-test checks.
+    A leading search tool disqualifies the call even if it names a checker.
+    """
+    if tool_name == "Bash" and _SEARCH_LEAD.match(cmd):
+        return False
+    if cat == "test":
+        return True
+    return tool_name == "Bash" and bool(VERIFY_SIGNAL.search(cmd))
 
 
 def _prefix(cmd: str) -> str:
@@ -158,17 +202,20 @@ def build_trajectory_context(
     calls: list[dict] = []
     reads: list[str] = []
     first_edit: int | None = None
-    first_test: int | None = None
+    last_edit: int | None = None
+    verify_idxs: list[int] = []
 
     for i, (tool_name, tool_input, is_error) in enumerate(rows):
         inp = safe_json(tool_input)
         cmd = str(inp.get("command", "")) if tool_name == "Bash" else ""
         cat = _classify(tool_name, cmd)
         glyph, color, label = CATEGORIES[cat]
-        if cat in _EDIT_TOOLS and first_edit is None:
-            first_edit = i
-        if cat == "test" and first_test is None:
-            first_test = i
+        if cat in _EDIT_TOOLS:
+            if first_edit is None:
+                first_edit = i
+            last_edit = i
+        if _is_verify(cat, tool_name, cmd):
+            verify_idxs.append(i)
         if cat == "read":
             path = inp.get("file_path")
             if path:
@@ -186,11 +233,18 @@ def build_trajectory_context(
             }
         )
 
-    # phase boundaries: locate [0, edit), implement [edit, test), verify [test, end)
+    # phase boundaries: locate [0, edit), implement [edit, verify), verify [verify, end)
+    #
+    # Verify begins at the *trailing* verification streak — the first verify
+    # signal with no edit after it — not the first test seen.  A single early
+    # test (TDD: write a failing test, run it, then implement) or a red/green
+    # fix loop no longer collapses the implement phase into "verify".
     locate_len = first_edit if first_edit is not None else len(calls)
     implement_start = first_edit if first_edit is not None else len(calls)
-    verify_start = first_test if first_test is not None else len(calls)
-    # test before first edit -> no implement band
+    verify_start = next(
+        (v for v in verify_idxs if last_edit is None or v > last_edit), len(calls)
+    )
+    # keep verify at/after implement so a pre-edit test can't open the band early
     verify_start = max(verify_start, implement_start)
 
     reread_counts = Counter(reads)

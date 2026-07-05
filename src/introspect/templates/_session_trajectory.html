@@ -25,8 +25,9 @@
     <p style="color:#666;margin:0.4rem 0 0.8rem;font-size:0.9rem;">
         Each tile is one tool call, in order. The strip is split into
         <strong>locate</strong> (before the first edit) ·
-        <strong>implement</strong> (up to the first test run) ·
-        <strong>verify</strong>. Hover a tile for the command or file.
+        <strong>implement</strong> (editing, plus any test/fix cycles) ·
+        <strong>verify</strong> (the trailing test/lint/typecheck run once
+        editing has stopped). Hover a tile for the command or file.
     </p>
 
     <div style="display:flex;flex-wrap:wrap;gap:0.4rem 1.5rem;margin-bottom:0.8rem;font-size:0.9rem;">

@@ -9,6 +9,7 @@ import duckdb
 from introspect.api.handlers.trajectory import (
     _classify,
     _detail_label,
+    _is_verify,
     _prefix,
     _tooltip,
     build_trajectory_context,
@@ -65,6 +66,25 @@ def test_classify_bash_subcategories():
 def test_classify_bash_first_match_wins():
     # command greps AND runs pytest -> primary intent is the test run
     assert _classify("Bash", "grep -q x && pytest") == "test"
+
+
+def test_is_verify_signal():
+    # test runners land in the `test` category and count directly
+    assert _is_verify("test", "Bash", "uv run pytest") is True
+    # linters / type-checkers classify as pkg/bash but are still verify signals
+    assert _is_verify("pkg", "Bash", "uv run ruff check .") is True
+    assert _is_verify("pkg", "Bash", "uv run ty check") is True
+    assert _is_verify("pkg", "Bash", "npx tsc --noEmit") is True
+    assert _is_verify("bash", "Bash", "cargo clippy") is True
+    assert _is_verify("test", "Bash", "go test ./...") is True
+    # plain edits / unrelated commands are not
+    assert _is_verify("edit", "Edit", "") is False
+    assert _is_verify("bash", "Bash", "echo hi") is False
+    assert _is_verify("pkg", "Bash", "uv sync") is False
+    # a search that merely names a checker is navigation, not verification —
+    # even when _classify mislabels `rg pytest` as the `test` category
+    assert _is_verify("search", "Bash", "grep -rn ruff src/") is False
+    assert _is_verify("test", "Bash", "rg pytest tests/") is False
 
 
 def test_prefix():
@@ -142,8 +162,9 @@ def test_build_no_edits_puts_everything_in_locate():
     assert ctx["metrics"]["edits"] == 0
 
 
-def test_build_test_before_edit_collapses_implement_band():
-    # test precedes the first edit -> implement band [1, 1) is empty
+def test_build_test_before_edit_stays_out_of_verify():
+    # a test that precedes the (final) edit is not a verify signal: the edit
+    # is last, so there's no trailing verify band and the edit stays in implement
     ctx = build_trajectory_context(
         _conn(
             [
@@ -153,7 +174,40 @@ def test_build_test_before_edit_collapses_implement_band():
         ),
         "s",
     )
-    assert ctx["phases"] == {"locate_end": 1, "implement_end": 1}
+    # locate is the pytest run, implement is the edit, verify band is empty
+    assert ctx["phases"] == {"locate_end": 1, "implement_end": 2}
+
+
+def test_build_early_test_does_not_open_verify_early():
+    # TDD shape: write test -> run it (fails) -> implement -> run it (passes).
+    # Verify must be only the final run, not everything after the first test.
+    ctx = build_trajectory_context(
+        _conn(
+            [
+                ("Write", {"file_path": "/test_a.py"}, None),  # 0 write test
+                ("Bash", {"command": "uv run pytest"}, None),  # 1 red run
+                ("Edit", {"file_path": "/a.py"}, None),  # 2 implement
+                ("Bash", {"command": "uv run pytest"}, None),  # 3 green run
+            ]
+        ),
+        "s",
+    )
+    # empty locate, implement spans write/test/edit, verify is only the green run
+    assert ctx["phases"] == {"locate_end": 0, "implement_end": 3}
+
+
+def test_build_lint_run_after_edits_starts_verify():
+    # a linter / type-checker (not a test runner) is still a verify signal
+    ctx = build_trajectory_context(
+        _conn(
+            [
+                ("Edit", {"file_path": "/a.py"}, None),
+                ("Bash", {"command": "uv run ruff check ."}, None),
+            ]
+        ),
+        "s",
+    )
+    assert ctx["phases"] == {"locate_end": 0, "implement_end": 1}
 
 
 def test_build_reread_metrics_and_is_error():
