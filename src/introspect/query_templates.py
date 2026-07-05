@@ -23,7 +23,11 @@ from __future__ import annotations
 from dataclasses import dataclass
 from typing import Literal
 
-from introspect.sql_fragments import COST_EXPR_SQL
+from introspect.sql_fragments import (
+    CONTEXT_LOADS_ROLLUP_SQL,
+    COST_EXPR_SQL,
+    SKILLS_INVOKED_ROLLUP_SQL,
+)
 
 TemplateKind = Literal["deterministic", "exploratory"]
 
@@ -65,6 +69,15 @@ _LIMIT_PARAM = Param(
     required=False,
     default=20,
     description="Max rows to return.",
+)
+
+# Heuristic regex for file/dir references in a first prompt. Catches @mentions,
+# rooted paths (/a/b, ./a/b, ~/a/b), and any token with a slash + file
+# extension; deliberately misses bare filenames without a slash to avoid
+# matching prose. Shared so ``first_prompt_triggers`` and the ``/triggers`` web
+# page can't drift.
+FIRST_PROMPT_PATH_REGEX = (
+    r"(?:@[\w./~-]+)|(?:[~.]?/[\w.~-]+/[\w./~-]+)|(?:[\w-]+/[\w./~-]*\.[\w]+)"
 )
 
 QUERY_TEMPLATES: tuple[QueryTemplate, ...] = (
@@ -189,6 +202,88 @@ QUERY_TEMPLATES: tuple[QueryTemplate, ...] = (
             "point where cum_cost accelerates relative to turn_index, and "
             "report the tail's share of total cost — that judgment call is "
             "why this is a prompt, not a fixed tool."
+        ),
+        kind="exploratory",
+    ),
+    QueryTemplate(
+        name="first_prompt_triggers",
+        question=(
+            "For each session, what did the opening prompt reference and "
+            "trigger — file/dir paths, skills, slash commands?"
+        ),
+        sql=(
+            "WITH first_prompts AS (\n"  # noqa: S608 — path regex is a constant
+            "    SELECT session_id, project, started_at, first_prompt, commands\n"
+            "    FROM session_stats\n"
+            "    WHERE first_prompt IS NOT NULL\n"
+            "      AND ($project IS NULL OR project = $project)\n"
+            "),\n"
+            "refs AS (\n"
+            "    SELECT session_id, regexp_extract_all(\n"
+            "        first_prompt,\n"
+            "        '" + FIRST_PROMPT_PATH_REGEX + "'"
+            "\n    ) AS referenced_paths\n"
+            "    FROM first_prompts\n"
+            "),\n"
+            "skills AS (" + SKILLS_INVOKED_ROLLUP_SQL + "),\n"
+            "loads AS (" + CONTEXT_LOADS_ROLLUP_SQL + ")\n"
+            "SELECT\n"
+            "    fp.session_id,\n"
+            "    fp.project,\n"
+            "    fp.started_at,\n"
+            "    len(r.referenced_paths) AS n_referenced_paths,\n"
+            "    r.referenced_paths,\n"
+            "    COALESCE(s.skills_invoked, 0) AS skills_invoked,\n"
+            "    COALESCE(l.auto_loaded_claude_md, FALSE)\n"
+            "        AS auto_loaded_claude_md,\n"
+            "    COALESCE(l.n_auto_loaded_files, 0) AS n_auto_loaded_files,\n"
+            "    COALESCE(l.skill_menu_loaded, FALSE) AS skill_menu_loaded,\n"
+            "    fp.commands,\n"
+            "    left(fp.first_prompt, 200) AS first_prompt\n"
+            "FROM first_prompts fp\n"
+            "LEFT JOIN refs r USING (session_id)\n"
+            "LEFT JOIN skills s USING (session_id)\n"
+            "LEFT JOIN loads l USING (session_id)\n"
+            "ORDER BY fp.started_at DESC\n"
+            "LIMIT $limit"
+        ),
+        params=(
+            _LIMIT_PARAM,
+            Param(
+                name="project",
+                type="str",
+                required=False,
+                default=None,
+                description=(
+                    "Restrict to one project (session_stats.project). "
+                    "None means all projects."
+                ),
+            ),
+        ),
+        note=(
+            "Answers 'did my opening prompt set the session up right?'. "
+            "referenced_paths is a HEURISTIC regex over first_prompt: it "
+            "catches @mentions, rooted paths (/a/b, ./a/b, ~/a/b), and any "
+            "token with a slash + file extension. It deliberately misses "
+            "bare filenames without a slash (e.g. 'fix db.py') to avoid "
+            "matching prose like 'e.g.'; widen the pattern if you want those. "
+            "skills_invoked counts Skill tool calls (kind='agent_tool_call', "
+            "tool_name='Skill') — this covers BOTH skills the user typed as "
+            "/name AND skills the model auto-triggered, since both emit a "
+            "Skill tool_use. commands reuses session_stats.commands (the "
+            "canonical COMMAND_LIST_SUBQUERY rollup — noise commands like "
+            "/clear and /compact already filtered out), so it can't drift "
+            "from the sessions listing. The auto_loaded_* columns roll up "
+            "session_context_loads (harness-injected context): "
+            "auto_loaded_claude_md is TRUE when a nested CLAUDE.md / "
+            ".claude/rules file loaded on directory entry; n_auto_loaded_files "
+            "counts @-file expansions; skill_menu_loaded is TRUE when the "
+            "skill menu was shown. (The ROOT/global CLAUDE.md arrives inline "
+            "as a first-message <system-reminder>, not an attachment, so it is "
+            "NOT counted — near-universal anyway.) Exploratory because the "
+            "payoff is comparing prompt WORDING against what loaded: e.g. "
+            "sessions where n_referenced_paths=0 and skills_invoked=0 are "
+            "candidates for a vaguer opening prompt."
         ),
         kind="exploratory",
     ),

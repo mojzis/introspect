@@ -23,6 +23,7 @@ from introspect.db import (
 from .conftest import (
     glob_pattern,
     make_assistant_message,
+    make_attachment_message,
     make_user_message,
     write_jsonl,
 )
@@ -88,13 +89,26 @@ def _write_sample_jsonl(tmp_dir: Path) -> Path:
     return write_jsonl(tmp_dir, SID, lines)
 
 
-_DERIVED_RELATION_NAMES = (
-    "logical_sessions",
-    "tool_calls",
-    "conversation_turns",
-    "session_titles",
-    "session_stats",
+# Raw/infra relations that exist independently of the derived-view layer. The
+# derived relations are everything *else* a built DB exposes — discovered from
+# the connection rather than hardcoded, so a newly added ``_make()`` can't
+# escape the lazy-vs-materialized coverage check below.
+_RAW_INFRA_NAMES = frozenset(
+    {"raw_data", "raw_messages", "project_map", "search_corpus", "materialize_meta"}
 )
+
+
+def _relations_by_type(conn: duckdb.DuckDBPyConnection) -> dict[str, str]:
+    """Map every relation in ``conn`` to its ``information_schema`` table_type."""
+    rows = conn.execute(
+        "SELECT table_name, table_type FROM information_schema.tables"
+    ).fetchall()
+    return dict(rows)
+
+
+def _derived_relation_names(by_type: dict[str, str]) -> set[str]:
+    """Derived relations = everything the build path exposes minus raw infra."""
+    return {name for name in by_type if name not in _RAW_INFRA_NAMES}
 
 
 def test_lazy_creates_views():
@@ -108,46 +122,54 @@ def test_lazy_creates_views():
         conn = get_connection(db_path, glob_pat)
 
         try:
-            rows = conn.execute("""
-                SELECT table_name, table_type FROM information_schema.tables
-            """).fetchall()
-            type_by_name = dict(rows)
+            by_type = _relations_by_type(conn)
             # raw_messages is also a VIEW in lazy mode.
-            assert type_by_name.get("raw_messages") == "VIEW"
-            for name in _DERIVED_RELATION_NAMES:
-                assert type_by_name.get(name) == "VIEW", (
-                    f"expected lazy path to back {name} as VIEW, got "
-                    f"{type_by_name.get(name)!r}"
+            assert by_type.get("raw_messages") == "VIEW"
+            derived = _derived_relation_names(by_type)
+            assert derived, "lazy path created no derived relations"
+            for name in derived:
+                assert by_type[name] == "VIEW", (
+                    f"expected lazy path to back {name} as VIEW, got {by_type[name]!r}"
                 )
         finally:
             conn.close()
 
 
 def test_materialize_creates_tables():
-    """``materialize_views`` backs the same derived names with BASE TABLEs."""
+    """Every relation the lazy path exposes must also be materialized as a BASE
+    TABLE.
+
+    Cross-checks the two build paths so a new ``_make()`` added to the derived
+    layer can't be built as a lazy VIEW yet silently omitted from
+    ``materialize_views`` — the drift that made ``/triggers`` 500 when
+    ``session_context_loads`` was queried against a materialized DB that never
+    built it.
+    """
     with tempfile.TemporaryDirectory() as tmp:
         tmp_path = Path(tmp)
         _write_sample_jsonl(tmp_path)
-
-        db_path = tmp_path / "test.duckdb"
         glob_pat = glob_pattern(tmp_path)
-        conn = duckdb.connect(str(db_path))
+
+        lazy = get_connection(tmp_path / "lazy.duckdb", glob_pat)
+        try:
+            expected = _derived_relation_names(_relations_by_type(lazy))
+        finally:
+            lazy.close()
+
+        conn = duckdb.connect(str(tmp_path / "mat.duckdb"))
         try:
             materialize_views(conn, glob_pat)
-
-            rows = conn.execute("""
-                SELECT table_name, table_type FROM information_schema.tables
-            """).fetchall()
-            type_by_name = dict(rows)
-            # raw_messages becomes a BASE TABLE under materialize_views.
-            assert type_by_name.get("raw_messages") == "BASE TABLE"
-            for name in _DERIVED_RELATION_NAMES:
-                assert type_by_name.get(name) == "BASE TABLE", (
-                    f"expected materialized path to back {name} as BASE "
-                    f"TABLE, got {type_by_name.get(name)!r}"
-                )
+            by_type = _relations_by_type(conn)
         finally:
             conn.close()
+
+        # raw_messages becomes a BASE TABLE under materialize_views.
+        assert by_type.get("raw_messages") == "BASE TABLE"
+        missing = {name for name in expected if by_type.get(name) != "BASE TABLE"}
+        assert not missing, (
+            f"lazy path exposes {sorted(missing)} but materialize_views did not "
+            f"build them as BASE TABLEs"
+        )
 
 
 def test_raw_messages():
@@ -209,6 +231,120 @@ def test_tool_calls():
         #   tool_input, is_error, tool_use_result, result_at, exec_time
         assert tool_call[2] == "Bash"
         assert tool_call[3] == "toolu_test1"
+        conn.close()
+
+
+def test_session_context_loads():
+    """session_context_loads classifies attachment records by load_kind."""
+    with tempfile.TemporaryDirectory() as tmp:
+        tmp_path = Path(tmp)
+        lines = [
+            make_user_message(
+                SID,
+                "u1",
+                None,
+                "2026-03-27T10:00:00.000Z",
+                "hi",
+                # Ensures read_json_auto emits the toolUseResult column that
+                # raw_messages projects (no attachment record carries it).
+                tool_use_result={"stdout": "", "stderr": ""},
+            ),
+            make_attachment_message(
+                SID,
+                "att1",
+                "u1",
+                "2026-03-27T10:00:01.000Z",
+                {
+                    "type": "nested_memory",
+                    "path": "/repo/.claude/rules/testing.md",
+                    "displayPath": ".claude/rules/testing.md",
+                    "content": "x" * 42,
+                },
+            ),
+            make_attachment_message(
+                SID,
+                "att2",
+                "u1",
+                "2026-03-27T10:00:02.000Z",
+                {
+                    "type": "file",
+                    "filename": "/repo/README.md",
+                    "displayPath": "README.md",
+                    "content": "y" * 10,
+                },
+            ),
+            make_attachment_message(
+                SID,
+                "att3",
+                "u1",
+                "2026-03-27T10:00:03.000Z",
+                {
+                    "type": "skill_listing",
+                    "content": "z" * 100,
+                    "skillCount": 3,
+                    "isInitial": True,
+                    "names": ["a", "b", "c"],
+                },
+            ),
+            make_attachment_message(
+                SID,
+                "att4",
+                "u1",
+                "2026-03-27T10:00:04.000Z",
+                {
+                    "type": "mcp_instructions_delta",
+                    "addedNames": ["introspect"],
+                    "addedBlocks": ["some instructions"],
+                    "removedNames": [],
+                },
+            ),
+            make_attachment_message(
+                SID,
+                "att5",
+                "u1",
+                "2026-03-27T10:00:05.000Z",
+                {
+                    "type": "hook_success",
+                    "hookName": "SessionStart:startup",
+                    "content": "hook ran",
+                },
+            ),
+            # Noise subtype — must be dropped, not classified as 'other'.
+            make_attachment_message(
+                SID,
+                "att6",
+                "u1",
+                "2026-03-27T10:00:06.000Z",
+                {"type": "output_style", "content": "ignored"},
+            ),
+        ]
+        write_jsonl(tmp_path, SID, lines)
+
+        db_path = tmp_path / "test.duckdb"
+        glob_pat = glob_pattern(tmp_path)
+        conn = get_connection(db_path, glob_pat)
+
+        rows = conn.execute(
+            "SELECT load_kind, name, char_len FROM session_context_loads "
+            "ORDER BY load_kind"
+        ).fetchall()
+        by_kind = {r[0]: (r[1], r[2]) for r in rows}
+
+        assert set(by_kind) == {
+            "claude_md",
+            "file_ref",
+            "skill_listing",
+            "mcp",
+            "hook",
+        }
+        # Noise subtype dropped entirely.
+        assert "other" not in by_kind
+        # name resolves per subtype; char_len from content length.
+        assert by_kind["claude_md"] == (".claude/rules/testing.md", 42)
+        assert by_kind["file_ref"] == ("README.md", 10)
+        assert by_kind["skill_listing"][1] == 100
+        assert by_kind["mcp"][0] == "introspect"
+        assert by_kind["hook"] == ("SessionStart:startup", len("hook ran"))
         conn.close()
 
 

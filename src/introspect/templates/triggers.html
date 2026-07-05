@@ -1,0 +1,98 @@
+{% extends parent %}
+{% block title %}Triggers - Introspect{% endblock %}
+
+{% macro trig_qs(project=filter_project, page=1) -%}
+{% if project %}project={{ project }}&{% endif %}page={{ page }}
+{%- endmacro %}
+
+{% block content %}
+<h1>First-Prompt Triggers</h1>
+<p style="color:#666;margin-top:-0.5rem;">
+    What each session's opening prompt referenced and triggered — named paths,
+    harness auto-loads (nested CLAUDE.md, @-files, the skill menu), skills, and
+    commands.
+</p>
+
+{% if stats %}
+<div class="stat-grid">
+    <div class="stat-card">
+        <div class="value">{{ stats[0] }}</div>
+        <div class="label">Sessions</div>
+    </div>
+    <div class="stat-card">
+        <div class="value">{{ vague_pct }}%</div>
+        <div class="label">Vague openers (no path, no skill)</div>
+    </div>
+    <div class="stat-card">
+        <div class="value">{{ stats[2] }}</div>
+        <div class="label">Auto-loaded a CLAUDE.md/rule</div>
+    </div>
+</div>
+{% endif %}
+
+{# --- Project filter chips --- #}
+<div class="card">
+    <div class="filter-bar" style="flex-wrap:wrap;">
+        <a href="/triggers?{{ trig_qs(project='') }}"
+           hx-get="/triggers?{{ trig_qs(project='') }}"
+           hx-target="#content" hx-push-url="true"
+           class="tool-btn{% if not filter_project %} tool-btn-active{% endif %}">
+            All projects
+        </a>
+        {% for p in projects %}
+        <a href="/triggers?{{ trig_qs(project=p[0]) }}"
+           hx-get="/triggers?{{ trig_qs(project=p[0]) }}"
+           hx-target="#content" hx-push-url="true"
+           class="tool-btn{% if filter_project == p[0] %} tool-btn-active{% endif %}">
+            {{ p[0] }} <span class="tool-btn-count">{{ p[1] }}</span>
+        </a>
+        {% endfor %}
+    </div>
+</div>
+
+<div class="card">
+    <table>
+        <thead>
+            <tr>
+                <th>Session</th>
+                <th>Project</th>
+                <th>Started</th>
+                <th title="File/dir paths named in the opening prompt">Paths</th>
+                <th title="Nested CLAUDE.md / .claude/rules auto-loaded">CLAUDE.md</th>
+                <th title="@-file expansions the harness loaded">@-files</th>
+                <th title="Skill tool calls (typed or auto-triggered)">Skills</th>
+                <th title="Skill menu shown to the model">Menu</th>
+                <th>Commands</th>
+            </tr>
+        </thead>
+        <tbody>
+            {% for r in rows %}
+            <tr>
+                <td><a href="/sessions/{{ r[0] }}" hx-get="/sessions/{{ r[0] }}" hx-target="#content" hx-push-url="true"><span class="truncate" style="max-width:260px;" title="{{ clean_title(r[9] or '')|e }}">{{ (clean_title(r[9] or '') or (r[0]|string)[:12] + '...')|truncate(56) }}</span></a></td>
+                <td>{{ r[1] or '' }}</td>
+                <td style="white-space:nowrap;">{{ (r[2]|string)[:16] }}</td>
+                <td style="text-align:center;">{{ r[3] }}</td>
+                <td style="text-align:center;">{% if r[4] %}<span class="badge badge-ok">yes</span>{% else %}<span style="color:#ccc;">&mdash;</span>{% endif %}</td>
+                <td style="text-align:center;">{{ r[5] or '' }}</td>
+                <td style="text-align:center;">{{ r[6] or '' }}</td>
+                <td style="text-align:center;">{% if r[7] %}<span class="badge badge-ok">yes</span>{% else %}<span style="color:#ccc;">&mdash;</span>{% endif %}</td>
+                <td style="max-width:220px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;" title="{{ r[8] or '' }}">{{ r[8] or '' }}</td>
+            </tr>
+            {% endfor %}
+            {% if not rows %}
+            <tr><td colspan="9" style="text-align:center;color:#888;">No sessions.</td></tr>
+            {% endif %}
+        </tbody>
+    </table>
+</div>
+
+<div class="pagination">
+    {% if page > 1 %}
+    <a href="/triggers?{{ trig_qs(page=page - 1) }}" hx-get="/triggers?{{ trig_qs(page=page - 1) }}" hx-target="#content" hx-push-url="true">Prev</a>
+    {% endif %}
+    <span class="current">Page {{ page }} of {{ total_pages }}</span>
+    {% if page < total_pages %}
+    <a href="/triggers?{{ trig_qs(page=page + 1) }}" hx-get="/triggers?{{ trig_qs(page=page + 1) }}" hx-target="#content" hx-push-url="true">Next</a>
+    {% endif %}
+</div>
+{% endblock %}

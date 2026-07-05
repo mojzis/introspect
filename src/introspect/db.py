@@ -208,6 +208,7 @@ def materialize_views(
         "message_commands",
         "session_titles",
         "conversation_turns",
+        "session_context_loads",
         "session_messages_enriched",
         "assistant_message_costs",
         "file_reads",
@@ -266,6 +267,7 @@ _EMPTY_RAW_DATA_SQL = """
         NULL::VARCHAR AS gitBranch,
         NULL::JSON AS message,
         NULL::JSON AS toolUseResult,
+        NULL::JSON AS attachment,
     WHERE FALSE
 """
 
@@ -368,6 +370,16 @@ def ensure_materialized(
         conn.close()
 
 
+def _column_exists(conn: duckdb.DuckDBPyConnection, table: str, column: str) -> bool:
+    """True when ``table`` exposes ``column`` (base table or view)."""
+    row = conn.execute(
+        "SELECT 1 FROM information_schema.columns "
+        "WHERE table_name = ? AND column_name = ?",
+        [table, column],
+    ).fetchone()
+    return row is not None
+
+
 def _has_materialized_raw_messages(conn: duckdb.DuckDBPyConnection) -> bool:
     """True when ``raw_messages`` exists as a base table in ``conn``."""
     row = conn.execute(
@@ -447,6 +459,11 @@ def _create_raw_tables(
         {and_day_filter}
     """)  # noqa: S608
 
+    # ``read_json_auto`` only emits an ``attachment`` column when some record
+    # carries one; logs without attachment records (or narrow test fixtures)
+    # would otherwise leave ``session_context_loads`` unable to bind it.
+    conn.execute("ALTER TABLE raw_data ADD COLUMN IF NOT EXISTS attachment JSON")
+
 
 def _build_project_map(
     conn: duckdb.DuckDBPyConnection, *, resolve_projects: bool = True
@@ -488,6 +505,14 @@ def _create_views(conn: duckdb.DuckDBPyConnection, jsonl_glob: str) -> None:
         CREATE OR REPLACE VIEW raw_data AS
         SELECT * FROM {_read}
     """)  # noqa: S608
+
+    # Guarantee an ``attachment`` column so ``session_context_loads`` binds even
+    # when no record carries one (see the ALTER in ``_create_raw_tables``).
+    if not _column_exists(conn, "raw_data", "attachment"):
+        conn.execute(f"""
+            CREATE OR REPLACE VIEW raw_data AS
+            SELECT *, NULL::JSON AS attachment FROM {_read}
+        """)  # noqa: S608
 
     conn.execute(f"""
         CREATE OR REPLACE VIEW raw_messages AS
@@ -891,6 +916,74 @@ def _create_derived_views(
         """,
     )
 
+    # Harness-injected context loads: one row per auto-loaded context item.
+    #
+    # These live in ``type='attachment'`` records — which every view over
+    # ``raw_messages`` drops (it filters to type IN ('user','assistant')) — so
+    # this reads ``raw_data`` directly and json-extracts the ``attachment``
+    # map.  Only the subtypes that represent *context the harness fed the model*
+    # are kept (CLAUDE.md/rules auto-load, ``@``-file expansions, the skill
+    # menu, MCP instruction blocks, hook output); listing/reminder chatter
+    # (output_style, total_tokens_reminder, task_reminder, …) is dropped.
+    #
+    # Note: the *root* project CLAUDE.md and global ~/.claude/CLAUDE.md arrive
+    # inline as a ``<system-reminder>`` block in the first user message, not as
+    # an attachment, so they are not captured here; ``nested_memory`` covers
+    # nested CLAUDE.md / ``.claude/rules/*`` files loaded on directory entry.
+    _make(
+        "session_context_loads",
+        """
+        WITH att AS (
+            SELECT
+                sessionId AS session_id,
+                timestamp::TIMESTAMP AS timestamp,
+                CAST(attachment AS JSON) AS a,
+                json_extract_string(
+                    CAST(attachment AS JSON), '$.type'
+                ) AS atype
+            FROM raw_data
+            WHERE type = 'attachment'
+        )
+        SELECT
+            session_id,
+            timestamp,
+            CASE atype
+                WHEN 'nested_memory' THEN 'claude_md'
+                WHEN 'file' THEN 'file_ref'
+                WHEN 'skill_listing' THEN 'skill_listing'
+                WHEN 'mcp_instructions_delta' THEN 'mcp'
+                WHEN 'hook_success' THEN 'hook'
+                WHEN 'hook_non_blocking_error' THEN 'hook'
+            END AS load_kind,
+            CASE atype
+                WHEN 'nested_memory' THEN COALESCE(
+                    json_extract_string(a, '$.displayPath'),
+                    json_extract_string(a, '$.path')
+                )
+                WHEN 'file' THEN COALESCE(
+                    json_extract_string(a, '$.displayPath'),
+                    json_extract_string(a, '$.filename')
+                )
+                WHEN 'mcp_instructions_delta' THEN array_to_string(
+                    CAST(json_extract(a, '$.addedNames') AS VARCHAR[]), ', '
+                )
+                WHEN 'hook_success' THEN json_extract_string(a, '$.hookName')
+                WHEN 'hook_non_blocking_error'
+                    THEN json_extract_string(a, '$.hookName')
+            END AS name,
+            CASE atype
+                WHEN 'mcp_instructions_delta'
+                    THEN length(json_extract_string(a, '$.addedBlocks'))
+                ELSE length(json_extract_string(a, '$.content'))
+            END AS char_len
+        FROM att
+        WHERE atype IN (
+            'nested_memory', 'file', 'skill_listing',
+            'mcp_instructions_delta', 'hook_success', 'hook_non_blocking_error'
+        )
+        """,
+    )
+
     # File reads: one row per Read tool call with extracted file_path.
     _make(
         "file_reads",
@@ -944,6 +1037,8 @@ _DERIVED_INDEXES = (
     "CREATE INDEX idx_fwrites_session ON file_writes(session_id)",
     "CREATE INDEX idx_mcmds_session ON message_commands(session_id)",
     "CREATE INDEX idx_mcmds_command ON message_commands(command)",
+    "CREATE INDEX idx_sctxloads_session ON session_context_loads(session_id)",
+    "CREATE INDEX idx_sctxloads_kind ON session_context_loads(load_kind)",
     "CREATE INDEX idx_stitles_session ON session_titles(session_id)",
 )
 

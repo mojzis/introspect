@@ -64,6 +64,38 @@ def session_cost_tail(session_id: str) -> str:
     )
 
 
+def first_prompt_triggers(project: str = "", limit: int = 20) -> str:
+    """Seed an investigation into what opening prompts referenced and triggered.
+
+    Expands the `first_prompt_triggers` registry entry — per-session first
+    prompt, the file/dir paths it referenced (heuristic regex), the skills it
+    invoked, and the slash commands used — into a starting prompt that asks
+    the model to correlate prompt *wording* with what actually loaded, and to
+    reach into `raw_data` attachments for the harness-auto-loaded context the
+    view can't yet see.
+    """
+    template = get_template("first_prompt_triggers")
+    if template is None:  # pragma: no cover - defensive, registry can't drop this
+        return "Error: 'first_prompt_triggers' template not found in registry."
+    project_hint = f"project={project!r}" if project else "all projects"
+    return _seed_text(
+        template,
+        [
+            f"Run this over {project_hint} (limit={limit}), then look for "
+            "sessions where n_referenced_paths=0 and skills_invoked=0 — "
+            "candidates where the opening prompt gave the model no anchor.",
+            "For a session that DID reference paths or a skill, open it with "
+            "`get_session` to judge whether the right skill / CLAUDE.md "
+            "actually engaged — the payoff is the wording→outcome link.",
+            "Harness auto-loads (CLAUDE.md, @-file expansions, skill "
+            "listings) aren't in the views yet — inspect them with "
+            "run_sql over raw_data: "
+            "SELECT json_extract_string(attachment, '$.type') FROM raw_data "
+            "WHERE type = 'attachment'.",
+        ],
+    )
+
+
 def topic_to_cost(query: str, limit: int = 20) -> str:
     """Seed an investigation into the cost of sessions about a topic.
 

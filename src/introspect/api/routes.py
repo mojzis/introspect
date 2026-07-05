@@ -37,6 +37,7 @@ from introspect.api.handlers.sessions import sessions as _sessions
 from introspect.api.handlers.stats import stats as _stats
 from introspect.api.handlers.tools import tools as _tools
 from introspect.api.handlers.trajectory import DEFAULT_VIEW as _TRAJECTORY_DEFAULT_VIEW
+from introspect.api.handlers.triggers import triggers as _triggers
 
 router = APIRouter()
 
@@ -134,6 +135,15 @@ async def mcps(
     page: int = Query(1, ge=1),
 ):
     return await _mcps(request, server, command, failed, page)
+
+
+@router.get("/triggers", response_class=HTMLResponse)
+async def triggers(
+    request: Request,
+    project: str = Query("", alias="project"),
+    page: int = Query(1, ge=1),
+):
+    return await _triggers(request, project, page)
 
 
 @router.get("/bash", response_class=HTMLResponse)
