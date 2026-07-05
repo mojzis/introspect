@@ -89,13 +89,26 @@ def _write_sample_jsonl(tmp_dir: Path) -> Path:
     return write_jsonl(tmp_dir, SID, lines)
 
 
-_DERIVED_RELATION_NAMES = (
-    "logical_sessions",
-    "tool_calls",
-    "conversation_turns",
-    "session_titles",
-    "session_stats",
+# Raw/infra relations that exist independently of the derived-view layer. The
+# derived relations are everything *else* a built DB exposes — discovered from
+# the connection rather than hardcoded, so a newly added ``_make()`` can't
+# escape the lazy-vs-materialized coverage check below.
+_RAW_INFRA_NAMES = frozenset(
+    {"raw_data", "raw_messages", "project_map", "search_corpus", "materialize_meta"}
 )
+
+
+def _relations_by_type(conn: duckdb.DuckDBPyConnection) -> dict[str, str]:
+    """Map every relation in ``conn`` to its ``information_schema`` table_type."""
+    rows = conn.execute(
+        "SELECT table_name, table_type FROM information_schema.tables"
+    ).fetchall()
+    return dict(rows)
+
+
+def _derived_relation_names(by_type: dict[str, str]) -> set[str]:
+    """Derived relations = everything the build path exposes minus raw infra."""
+    return {name for name in by_type if name not in _RAW_INFRA_NAMES}
 
 
 def test_lazy_creates_views():
@@ -109,46 +122,54 @@ def test_lazy_creates_views():
         conn = get_connection(db_path, glob_pat)
 
         try:
-            rows = conn.execute("""
-                SELECT table_name, table_type FROM information_schema.tables
-            """).fetchall()
-            type_by_name = dict(rows)
+            by_type = _relations_by_type(conn)
             # raw_messages is also a VIEW in lazy mode.
-            assert type_by_name.get("raw_messages") == "VIEW"
-            for name in _DERIVED_RELATION_NAMES:
-                assert type_by_name.get(name) == "VIEW", (
-                    f"expected lazy path to back {name} as VIEW, got "
-                    f"{type_by_name.get(name)!r}"
+            assert by_type.get("raw_messages") == "VIEW"
+            derived = _derived_relation_names(by_type)
+            assert derived, "lazy path created no derived relations"
+            for name in derived:
+                assert by_type[name] == "VIEW", (
+                    f"expected lazy path to back {name} as VIEW, got {by_type[name]!r}"
                 )
         finally:
             conn.close()
 
 
 def test_materialize_creates_tables():
-    """``materialize_views`` backs the same derived names with BASE TABLEs."""
+    """Every relation the lazy path exposes must also be materialized as a BASE
+    TABLE.
+
+    Cross-checks the two build paths so a new ``_make()`` added to the derived
+    layer can't be built as a lazy VIEW yet silently omitted from
+    ``materialize_views`` — the drift that made ``/triggers`` 500 when
+    ``session_context_loads`` was queried against a materialized DB that never
+    built it.
+    """
     with tempfile.TemporaryDirectory() as tmp:
         tmp_path = Path(tmp)
         _write_sample_jsonl(tmp_path)
-
-        db_path = tmp_path / "test.duckdb"
         glob_pat = glob_pattern(tmp_path)
-        conn = duckdb.connect(str(db_path))
+
+        lazy = get_connection(tmp_path / "lazy.duckdb", glob_pat)
+        try:
+            expected = _derived_relation_names(_relations_by_type(lazy))
+        finally:
+            lazy.close()
+
+        conn = duckdb.connect(str(tmp_path / "mat.duckdb"))
         try:
             materialize_views(conn, glob_pat)
-
-            rows = conn.execute("""
-                SELECT table_name, table_type FROM information_schema.tables
-            """).fetchall()
-            type_by_name = dict(rows)
-            # raw_messages becomes a BASE TABLE under materialize_views.
-            assert type_by_name.get("raw_messages") == "BASE TABLE"
-            for name in _DERIVED_RELATION_NAMES:
-                assert type_by_name.get(name) == "BASE TABLE", (
-                    f"expected materialized path to back {name} as BASE "
-                    f"TABLE, got {type_by_name.get(name)!r}"
-                )
+            by_type = _relations_by_type(conn)
         finally:
             conn.close()
+
+        # raw_messages becomes a BASE TABLE under materialize_views.
+        assert by_type.get("raw_messages") == "BASE TABLE"
+        missing = {name for name in expected if by_type.get(name) != "BASE TABLE"}
+        assert not missing, (
+            f"lazy path exposes {sorted(missing)} but materialize_views did not "
+            f"build them as BASE TABLEs"
+        )
 
 
 def test_raw_messages():

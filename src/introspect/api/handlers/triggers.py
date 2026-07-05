@@ -78,17 +78,18 @@ async def triggers(
         params,
     ).fetchone()
 
-    # Project filter chips.
+    # Project filter chips. Counts the same population as ``base`` (sessions
+    # with a first prompt) but skips its regex + rollup joins, none of which
+    # feed a plain per-project count.
     projects = db.execute(
-        f"""
-        {_BASE_CTE}
+        """
         SELECT project, count(*) AS cnt
-        FROM base
-        WHERE project IS NOT NULL
+        FROM session_stats
+        WHERE first_prompt IS NOT NULL AND project IS NOT NULL
         GROUP BY project
         ORDER BY cnt DESC
         LIMIT 25
-    """  # noqa: S608 — _BASE_CTE is a module constant, no user input
+    """
     ).fetchall()
 
     total = stats[0] if stats else 0
