@@ -22,11 +22,21 @@ from introspect.db import (
 )
 from introspect.search import build_search_corpus, ensure_search_corpus, fts_search
 from introspect.sql_query import is_loopback_host
+from introspect.version_check import maybe_notify_update
 
 SID_TRUNCATE = 12
 
 app = typer.Typer(help="Explore Claude Code conversation logs.")
 console = Console()
+
+
+@app.callback()
+def main(ctx: typer.Context) -> None:
+    """Explore Claude Code conversation logs."""
+    # Shared entry for every command. The update nag gates itself (mcp / non-TTY
+    # / CI / opt-out all short-circuit) and defers its single stderr line to
+    # command close, so it prints after the real output rather than mid-render.
+    maybe_notify_update(ctx.invoked_subcommand, ctx.call_on_close)
 
 
 def _truncate_sid(val) -> str:

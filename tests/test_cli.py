@@ -12,6 +12,7 @@ from typing import cast
 import pytest
 from typer.testing import CliRunner
 
+from introspect import version_check as vc
 from introspect.cli import (
     CLAUDE_SYSTEM_PROMPT_SUFFIX,
     _find_available_port,
@@ -101,6 +102,87 @@ def test_cli_reuses_existing_materialized_db(monkeypatch):
             "second invocation should reuse the existing materialized DB; "
             f"banner went from {first_ts!r} to {second_ts!r}"
         )
+
+
+def _stub_behind_cache(monkeypatch, tmp, *, latest="9.9.9", current="0.0.1"):
+    """Point the version-check cache at ``tmp`` with a fresh 'we're behind' entry
+    and force the eligible-install / TTY predicates on."""
+    monkeypatch.setenv("INTROSPECT_DB_PATH", str(Path(tmp) / "introspect.duckdb"))
+    for name in (*vc._CI_ENV_VARS, vc.ENV_ENABLED, vc.ENV_INTERVAL):
+        monkeypatch.delenv(name, raising=False)
+    monkeypatch.setattr(vc, "_current_version", lambda: current)
+    monkeypatch.setattr(vc, "_is_editable_install", lambda: False)
+    monkeypatch.setattr(vc, "_stderr_is_tty", lambda: True)
+    # Far-future timestamp keeps the cache "fresh" without coupling to the clock.
+    vc._write_cache(
+        Path(tmp) / "version_check.json",
+        vc.VersionCache(checked_at=9_999_999_999.0, latest=latest),
+    )
+
+
+def test_nag_prints_to_stderr_not_stdout_when_behind(monkeypatch):
+    """An eligible command prints the one-line nag to stderr only, after output."""
+    with tempfile.TemporaryDirectory() as tmp:
+        db_path = Path(tmp) / "introspect.duckdb"
+        glob_pat = str(Path(tmp) / "claude" / "**" / "*.jsonl")
+        monkeypatch.setattr("introspect.cli.DEFAULT_DB_PATH", db_path)
+        monkeypatch.setattr("introspect.cli.DEFAULT_JSONL_GLOB", glob_pat)
+        _stub_behind_cache(monkeypatch, tmp)
+
+        result = runner.invoke(app, ["stats"])
+
+        assert result.exit_code == 0, result.output
+        assert "9.9.9 is available" in result.stderr
+        assert "uvx introspy@latest" in result.stderr
+        assert "is available" not in result.stdout
+
+
+def test_no_nag_when_up_to_date_cli(monkeypatch):
+    with tempfile.TemporaryDirectory() as tmp:
+        db_path = Path(tmp) / "introspect.duckdb"
+        glob_pat = str(Path(tmp) / "claude" / "**" / "*.jsonl")
+        monkeypatch.setattr("introspect.cli.DEFAULT_DB_PATH", db_path)
+        monkeypatch.setattr("introspect.cli.DEFAULT_JSONL_GLOB", glob_pat)
+        _stub_behind_cache(monkeypatch, tmp, latest="0.0.1", current="0.0.1")
+
+        result = runner.invoke(app, ["stats"])
+
+        assert result.exit_code == 0, result.output
+        assert "is available" not in result.stderr
+        assert "is available" not in result.stdout
+
+
+def test_opt_out_env_silences_nag_cli(monkeypatch):
+    with tempfile.TemporaryDirectory() as tmp:
+        db_path = Path(tmp) / "introspect.duckdb"
+        glob_pat = str(Path(tmp) / "claude" / "**" / "*.jsonl")
+        monkeypatch.setattr("introspect.cli.DEFAULT_DB_PATH", db_path)
+        monkeypatch.setattr("introspect.cli.DEFAULT_JSONL_GLOB", glob_pat)
+        _stub_behind_cache(monkeypatch, tmp)
+        monkeypatch.setenv("INTROSPECT_VERSION_CHECK", "off")
+
+        result = runner.invoke(app, ["stats"])
+
+        assert result.exit_code == 0, result.output
+        assert "is available" not in result.stderr
+
+
+def test_mcp_command_never_nags(monkeypatch):
+    """The ``mcp`` (stdio) command must never emit the nag, even when behind."""
+    with tempfile.TemporaryDirectory() as tmp:
+        _stub_behind_cache(monkeypatch, tmp)
+
+        class _StubServer:
+            def run(self, transport):
+                return None
+
+        monkeypatch.setattr("introspect.mcp.server.create_mcp_server", _StubServer)
+
+        result = runner.invoke(app, ["mcp"])
+
+        assert result.exit_code == 0, result.output
+        assert "is available" not in result.stderr
+        assert "is available" not in result.stdout
 
 
 def test_materialize_shows_friendly_message_when_db_locked(monkeypatch, mock_locked_db):
