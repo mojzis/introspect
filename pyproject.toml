@@ -43,6 +43,11 @@ dev = [
     "pytest-xdist>=3.8.0",
     "pytest-randomly>=4.1.0",
 ]
+docs = [
+    "mkdocs>=1.6",
+    "mkdocs-material>=9.5",
+    "mkdocs-llmstxt>=0.2",
+]
 
 [tool.ruff]
 line-length = 88
