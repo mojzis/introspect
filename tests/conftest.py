@@ -130,6 +130,35 @@ def make_assistant_message(
     }
 
 
+def make_attachment_message(
+    session_id: str,
+    uuid: str,
+    parent_uuid: str | None,
+    timestamp: str,
+    attachment: dict,
+) -> dict:
+    """Build an ``type='attachment'`` JSONL record.
+
+    These carry harness-injected context (CLAUDE.md auto-load, @-file
+    expansions, the skill menu, MCP instructions, hook output) in the
+    ``attachment`` object; ``session_context_loads`` reads them from
+    ``raw_data``.
+    """
+    return {
+        "type": "attachment",
+        "timestamp": timestamp,
+        "sessionId": session_id,
+        "uuid": uuid,
+        "parentUuid": parent_uuid,
+        "isSidechain": False,
+        "cwd": "/tmp/test",
+        "version": "2.1.0",
+        "entrypoint": "cli",
+        "gitBranch": "main",
+        "attachment": attachment,
+    }
+
+
 def write_jsonl(tmp_dir: Path, session_id: str, lines: list[dict]) -> Path:
     """Write JSONL records to a test file and return the path."""
     jsonl_path = tmp_dir / "projects" / "test-project" / f"{session_id}.jsonl"

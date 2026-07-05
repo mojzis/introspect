@@ -88,6 +88,26 @@ FILE_WRITES_SUBQUERY = """(
     FROM file_writes GROUP BY session_id
 ) fw_agg"""
 
+# Per-session count of Skill tool calls — covers both user-typed /name and
+# model-auto-triggered skills (both emit a Skill tool_use).
+SKILLS_INVOKED_ROLLUP_SQL = (
+    "SELECT session_id, count(*) AS skills_invoked"
+    " FROM session_messages_enriched"
+    " WHERE kind = 'agent_tool_call' AND tool_name = 'Skill'"
+    " GROUP BY session_id"
+)
+
+# Per-session rollup of harness-injected context loads (session_context_loads).
+# Shared by the ``first_prompt_triggers`` query template and the ``/triggers``
+# web page so the classification can't drift between them.
+CONTEXT_LOADS_ROLLUP_SQL = (
+    "SELECT session_id,"
+    " bool_or(load_kind = 'claude_md') AS auto_loaded_claude_md,"
+    " count(*) FILTER (WHERE load_kind = 'file_ref') AS n_auto_loaded_files,"
+    " bool_or(load_kind = 'skill_listing') AS skill_menu_loaded"
+    " FROM session_context_loads GROUP BY session_id"
+)
+
 
 # ---------------------------------------------------------------------------
 # Hoisted cost-expression fragments — shared by the session-cost subquery

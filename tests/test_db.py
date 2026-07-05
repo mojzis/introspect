@@ -23,6 +23,7 @@ from introspect.db import (
 from .conftest import (
     glob_pattern,
     make_assistant_message,
+    make_attachment_message,
     make_user_message,
     write_jsonl,
 )
@@ -209,6 +210,120 @@ def test_tool_calls():
         #   tool_input, is_error, tool_use_result, result_at, exec_time
         assert tool_call[2] == "Bash"
         assert tool_call[3] == "toolu_test1"
+        conn.close()
+
+
+def test_session_context_loads():
+    """session_context_loads classifies attachment records by load_kind."""
+    with tempfile.TemporaryDirectory() as tmp:
+        tmp_path = Path(tmp)
+        lines = [
+            make_user_message(
+                SID,
+                "u1",
+                None,
+                "2026-03-27T10:00:00.000Z",
+                "hi",
+                # Ensures read_json_auto emits the toolUseResult column that
+                # raw_messages projects (no attachment record carries it).
+                tool_use_result={"stdout": "", "stderr": ""},
+            ),
+            make_attachment_message(
+                SID,
+                "att1",
+                "u1",
+                "2026-03-27T10:00:01.000Z",
+                {
+                    "type": "nested_memory",
+                    "path": "/repo/.claude/rules/testing.md",
+                    "displayPath": ".claude/rules/testing.md",
+                    "content": "x" * 42,
+                },
+            ),
+            make_attachment_message(
+                SID,
+                "att2",
+                "u1",
+                "2026-03-27T10:00:02.000Z",
+                {
+                    "type": "file",
+                    "filename": "/repo/README.md",
+                    "displayPath": "README.md",
+                    "content": "y" * 10,
+                },
+            ),
+            make_attachment_message(
+                SID,
+                "att3",
+                "u1",
+                "2026-03-27T10:00:03.000Z",
+                {
+                    "type": "skill_listing",
+                    "content": "z" * 100,
+                    "skillCount": 3,
+                    "isInitial": True,
+                    "names": ["a", "b", "c"],
+                },
+            ),
+            make_attachment_message(
+                SID,
+                "att4",
+                "u1",
+                "2026-03-27T10:00:04.000Z",
+                {
+                    "type": "mcp_instructions_delta",
+                    "addedNames": ["introspect"],
+                    "addedBlocks": ["some instructions"],
+                    "removedNames": [],
+                },
+            ),
+            make_attachment_message(
+                SID,
+                "att5",
+                "u1",
+                "2026-03-27T10:00:05.000Z",
+                {
+                    "type": "hook_success",
+                    "hookName": "SessionStart:startup",
+                    "content": "hook ran",
+                },
+            ),
+            # Noise subtype — must be dropped, not classified as 'other'.
+            make_attachment_message(
+                SID,
+                "att6",
+                "u1",
+                "2026-03-27T10:00:06.000Z",
+                {"type": "output_style", "content": "ignored"},
+            ),
+        ]
+        write_jsonl(tmp_path, SID, lines)
+
+        db_path = tmp_path / "test.duckdb"
+        glob_pat = glob_pattern(tmp_path)
+        conn = get_connection(db_path, glob_pat)
+
+        rows = conn.execute(
+            "SELECT load_kind, name, char_len FROM session_context_loads "
+            "ORDER BY load_kind"
+        ).fetchall()
+        by_kind = {r[0]: (r[1], r[2]) for r in rows}
+
+        assert set(by_kind) == {
+            "claude_md",
+            "file_ref",
+            "skill_listing",
+            "mcp",
+            "hook",
+        }
+        # Noise subtype dropped entirely.
+        assert "other" not in by_kind
+        # name resolves per subtype; char_len from content length.
+        assert by_kind["claude_md"] == (".claude/rules/testing.md", 42)
+        assert by_kind["file_ref"] == ("README.md", 10)
+        assert by_kind["skill_listing"][1] == 100
+        assert by_kind["mcp"][0] == "introspect"
+        assert by_kind["hook"] == ("SessionStart:startup", len("hook ran"))
         conn.close()
 
 

@@ -38,6 +38,7 @@ from introspect.search import build_search_corpus
 from .conftest import (
     glob_pattern,
     make_assistant_message,
+    make_attachment_message,
     make_user_message,
     write_jsonl,
 )
@@ -583,3 +584,89 @@ def test_first_prompt_triggers_extracts_paths(trigger_db_path: Path) -> None:
         n_paths, paths = by_session[sid]
         assert list(paths) == expected, sid
         assert n_paths == len(expected), sid
+
+
+def test_first_prompt_triggers_auto_load_rollup() -> None:
+    """The auto_loaded_* columns roll up session_context_loads: a session that
+    auto-loaded a nested CLAUDE.md, expanded an @-file, and showed the skill
+    menu reports all three; a bare session reports the COALESCEd defaults."""
+    loaded_sid, bare_sid = "fpt-loaded", "fpt-bare"
+    with tempfile.TemporaryDirectory() as tmp:
+        tmp_path = Path(tmp)
+        write_jsonl(
+            tmp_path,
+            loaded_sid,
+            [
+                make_user_message(
+                    loaded_sid,
+                    f"{loaded_sid}-u1",
+                    None,
+                    "2026-06-01T10:00:00.000Z",
+                    "look at @src/db.py",
+                    # Anchor the toolUseResult column for the JSONL union load.
+                    tool_use_result={"stdout": "", "stderr": ""},
+                ),
+                make_attachment_message(
+                    loaded_sid,
+                    f"{loaded_sid}-att1",
+                    f"{loaded_sid}-u1",
+                    "2026-06-01T10:00:01.000Z",
+                    {
+                        "type": "nested_memory",
+                        "path": "/repo/.claude/rules/x.md",
+                        "displayPath": ".claude/rules/x.md",
+                        "content": "rule",
+                    },
+                ),
+                make_attachment_message(
+                    loaded_sid,
+                    f"{loaded_sid}-att2",
+                    f"{loaded_sid}-u1",
+                    "2026-06-01T10:00:02.000Z",
+                    {
+                        "type": "file",
+                        "filename": "/repo/src/db.py",
+                        "displayPath": "src/db.py",
+                        "content": "code",
+                    },
+                ),
+                make_attachment_message(
+                    loaded_sid,
+                    f"{loaded_sid}-att3",
+                    f"{loaded_sid}-u1",
+                    "2026-06-01T10:00:03.000Z",
+                    {"type": "skill_listing", "content": "skills", "skillCount": 2},
+                ),
+            ],
+        )
+        write_jsonl(
+            tmp_path,
+            bare_sid,
+            [
+                make_user_message(
+                    bare_sid,
+                    f"{bare_sid}-u1",
+                    None,
+                    "2026-06-01T11:00:00.000Z",
+                    "just a question",
+                )
+            ],
+        )
+        db_path = tmp_path / "rollup.duckdb"
+        conn = duckdb.connect(str(db_path))
+        materialize_views(conn, glob_pattern(tmp_path))
+        conn.close()
+
+        template = get_template("first_prompt_triggers")
+        assert template is not None
+        conn = duckdb.connect(str(db_path), read_only=True)
+        try:
+            rows = conn.execute(template.sql, {"limit": 50, "project": None}).fetchall()
+        finally:
+            conn.close()
+
+    # Columns: ..., auto_loaded_claude_md(6), n_auto_loaded_files(7),
+    # skill_menu_loaded(8).
+    by_session = {r[0]: (r[6], r[7], r[8]) for r in rows}
+    assert by_session[loaded_sid] == (True, 1, True)
+    assert by_session[bare_sid] == (False, 0, False)

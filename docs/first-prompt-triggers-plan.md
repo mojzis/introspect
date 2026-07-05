@@ -49,10 +49,45 @@ Catches `@mentions`, rooted paths (`/a/b`, `./a/b`, `~/a/b`), and tokens with a
 slash + file extension. Skips bare filenames without a slash (`fix db.py`) to
 avoid matching prose like `e.g.`. Widen it if you want bare filenames.
 
-### ⏳ To do locally — the big gap: harness auto-loads
+### ✅ Done — `session_context_loads` view (harness auto-loads)
 
-**What's missing:** the *automatic* loading signal the original ask centers on
-— CLAUDE.md auto-load, `@`-file expansions, skill listings, hooks — is **not
+The automatic-loading signal now lives in the `session_context_loads` view
+(`db.py`), reading `type='attachment'` records back out of `raw_data`. One row
+per auto-loaded context item: `session_id`, `timestamp`, `load_kind`, `name`,
+`char_len`. Classified subtypes and their sources (confirmed against real local
+sessions):
+
+| `load_kind` | attachment `type` | `name` | `char_len` |
+|---|---|---|---|
+| `claude_md` | `nested_memory` | `displayPath` (nested CLAUDE.md / `.claude/rules/*`) | `len(content)` |
+| `file_ref` | `file` | `displayPath` (`@`-file expansion) | `len(content)` |
+| `skill_listing` | `skill_listing` | — (skill menu shown) | `len(content)` |
+| `mcp` | `mcp_instructions_delta` | `addedNames` | `len(addedBlocks)` |
+| `hook` | `hook_success` / `hook_non_blocking_error` | `hookName` | `len(content)` |
+
+Chatter subtypes (`output_style`, `total_tokens_reminder`, `task_reminder`,
+`deferred_tools_delta`, `agent_listing_delta`, …) are dropped, not mapped to
+`other`. **Known limitation:** the *root* project CLAUDE.md and global
+`~/.claude/CLAUDE.md` arrive inline as a first-message `<system-reminder>`, not
+as an attachment, so they are not captured — near-universal anyway, so low
+signal. `nested_memory` covers the differentiating case (per-directory rules).
+
+`first_prompt_triggers` now LEFT JOINs a per-session rollup:
+`auto_loaded_claude_md BOOL`, `n_auto_loaded_files INT`,
+`skill_menu_loaded BOOL`. `schema-notes.md` documents the `attachment` record
+type; `mcp/server.py` INSTRUCTIONS lists the view. Tests:
+`tests/test_db.py::test_session_context_loads` and
+`tests/test_query_templates.py::test_first_prompt_triggers_auto_load_rollup`.
+
+Robustness note: `read_json_auto` only emits an `attachment` column when some
+record carries one, so `_create_raw_tables` / `_create_views` now guarantee the
+column (`ALTER TABLE ... ADD COLUMN IF NOT EXISTS` / a recreated view) — else
+the view fails to bind on attachment-free logs and narrow test fixtures.
+
+<details><summary>Original investigation notes (kept for reference)</summary>
+
+**What was missing:** the *automatic* loading signal the original ask centers on
+— CLAUDE.md auto-load, `@`-file expansions, skill listings, hooks — was **not
 in any view**. Those live in `type='attachment'` records, and every derived
 view (`raw_messages` and everything built on it) filters to
 `type IN ('user','assistant')`, dropping attachments entirely.
@@ -113,20 +148,24 @@ prompt → referenced → *actually loaded*. Consider a companion
 the view classifies each `load_kind`. Follow the fixture pattern in
 `tests/test_query_templates.py`.
 
-### ⏳ To do locally — web page `/triggers`
+</details>
 
-Per the "Adding a page" pattern in `CLAUDE.md`:
+### ✅ Done — web page `/triggers`
 
-- `api/handlers/triggers.py` — query `session_stats` + `session_context_loads`
-  rollup; reuse `_helpers.py` (`parent`, `conn`, pagination, sort allowlists).
-- Route in `api/routes.py`; template `templates/triggers.html` (extends
-  `base.html` / `partial.html` via `parent(request)` for HTMX).
-- Suggested view: a table of recent sessions (first prompt · referenced paths ·
-  auto-loaded files · skills · commands), plus an aggregate — e.g. share of
-  sessions whose opening prompt referenced no path and loaded no skill, over
-  time. If you chart it, use the `nolegend` skill (server-side `go.Figure` +
-  `nolegend.activate()`, embed JSON for `Plotly.newPlot`).
-- Tests in `tests/routes/` (use the `_patched_client()` context manager).
+- `api/handlers/triggers.py` — one `_BASE_CTE` over `session_stats` +
+  `session_context_loads` rollup + Skill-call count, reusing the shared
+  `FIRST_PROMPT_PATH_REGEX` constant (exported from `query_templates.py` so the
+  page and the template can't drift). Paginated; project-scoped.
+- Route `GET /triggers` in `api/routes.py`; template `templates/triggers.html`
+  (extends `base.html` / `partial.html` via `parent(request)`); nav link added.
+- Table: recent sessions (title · project · started · paths · CLAUDE.md ·
+  @-files · skills · menu · commands). Aggregate stat cards: total sessions,
+  **share of "vague openers"** (no path *and* no skill), and count that
+  auto-loaded a CLAUDE.md/rule.
+- Tests: `tests/routes/test_triggers_page.py` (via `_patched_client`).
+
+No chart yet — the aggregate is three stat cards. A future "vague openers over
+time" line chart would use the `nolegend` skill.
 
 ### ⏳ Later — team sharing (design deferred)
 
@@ -144,11 +183,10 @@ smallest first:
 
 ## Suggested local sequence
 
-1. Run the `attachment` dumps above on your real sessions; pin the true
-   `load_kind` sources (attachment subtypes vs. inline `<system-reminder>`).
-2. Build `session_context_loads` in `db.py` + tests; update `schema-notes.md`
-   and `mcp/server.py` INSTRUCTIONS.
-3. Extend `first_prompt_triggers` with the auto-load rollup columns.
-4. Build the `/triggers` web page + tests.
-5. Revisit team sharing.
+1. ~~Run the `attachment` dumps; pin the true `load_kind` sources.~~ ✅
+2. ~~Build `session_context_loads` in `db.py` + tests; update `schema-notes.md`
+   and `mcp/server.py` INSTRUCTIONS.~~ ✅
+3. ~~Extend `first_prompt_triggers` with the auto-load rollup columns.~~ ✅
+4. ~~Build the `/triggers` web page + tests.~~ ✅
+5. **Next:** revisit team sharing (still deferred — see options above).
 6. Run `/python-review` and `uv run poe check` before each push.

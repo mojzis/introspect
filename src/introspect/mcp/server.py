@@ -25,6 +25,8 @@ Key views:
 - conversation_turns — ordered user/assistant text per session
 - assistant_message_costs — per-message token counts and cost
 - file_reads / file_writes, message_commands — file and slash-command activity
+- session_context_loads — harness-injected context per session (one row each):
+  load_kind (claude_md | file_ref | skill_listing | mcp | hook), name, char_len
 
 Tips:
 - Costs: use session_stats.cost_usd or assistant_message_costs; don't

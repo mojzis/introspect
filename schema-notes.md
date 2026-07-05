@@ -50,6 +50,33 @@ Model responses.
 - `thinking`: `{ type: "thinking", thinking: "...", signature: "..." }`
 - `tool_use`: `{ type: "tool_use", id: "toolu_...", name: "Bash"|"Read"|"Edit"|..., input: {...} }`
 
+### 4. `attachment`
+Harness-injected context — not model/user text. Every derived view over
+`raw_messages` drops these (it filters to `type IN ('user','assistant')`), so
+they survive only in `raw_data`. The `session_context_loads` view reads them
+back and classifies the useful subtypes.
+
+**Common fields:** `uuid`, `parentUuid`, `sessionId`, `timestamp`, `cwd`, plus
+an `attachment` object (materialized as `MAP(VARCHAR, JSON)`) whose `type` key
+names the subtype.
+
+**Observed `attachment.type` subtypes** (▶ = surfaced in `session_context_loads`):
+- ▶ `nested_memory` — nested CLAUDE.md / `.claude/rules/*` loaded on directory
+  entry. Keys: `path`, `displayPath`, `content`. (The root project CLAUDE.md and
+  global `~/.claude/CLAUDE.md` arrive inline as a first-message
+  `<system-reminder>`, *not* as an attachment.)
+- ▶ `file` — `@`-file expansion. Keys: `filename`, `displayPath`, `content`.
+- ▶ `skill_listing` — the skill menu. Keys: `content`, `skillCount`, `names`,
+  `isInitial`.
+- ▶ `mcp_instructions_delta` — MCP server instruction blocks. Keys:
+  `addedNames`, `addedBlocks`, `removedNames`.
+- ▶ `hook_success` / `hook_non_blocking_error` — hook output. Keys: `hookName`,
+  `content`, `stdout`, `stderr`, `exitCode`, `command`, `durationMs`.
+- Dropped as chatter: `output_style`, `total_tokens_reminder`, `task_reminder`,
+  `deferred_tools_delta`, `agent_listing_delta`, `queued_command`,
+  `edited_text_file`, `command_permissions`, `opened_file_in_ide`,
+  `plan_mode` / `plan_mode_exit`, `date_change`, …
+
 ### Tool Input Schemas (observed)
 - **Bash**: `{ command, description }` — optional: `timeout`, `run_in_background`
 - **Read**: `{ file_path }` — optional: `offset`, `limit`, `pages`
