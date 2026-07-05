@@ -14,6 +14,7 @@ dependencies = [
     "mcp>=1.0.0",
     "plotly>=5.0",
     "nolegend>=0.1.2",
+    "packaging>=21.0",
 ]
 
 [project.scripts]
@@ -42,6 +43,11 @@ dev = [
     "biston>=0.5.0",
     "pytest-xdist>=3.8.0",
     "pytest-randomly>=4.1.0",
+]
+docs = [
+    "mkdocs>=1.6",
+    "mkdocs-material>=9.5",
+    "mkdocs-llmstxt>=0.2",
 ]
 
 [tool.ruff]

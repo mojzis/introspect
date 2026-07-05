@@ -36,6 +36,7 @@ from introspect.api.handlers.sessions import session_detail as _session_detail
 from introspect.api.handlers.sessions import sessions as _sessions
 from introspect.api.handlers.stats import stats as _stats
 from introspect.api.handlers.tools import tools as _tools
+from introspect.api.handlers.trajectory import DEFAULT_VIEW as _TRAJECTORY_DEFAULT_VIEW
 from introspect.api.handlers.triggers import triggers as _triggers
 
 router = APIRouter()
@@ -78,8 +79,9 @@ async def session_detail(
     request: Request,
     session_id: str,
     tab: str = Query("messages"),
+    view: str = Query(_TRAJECTORY_DEFAULT_VIEW),
 ):
-    return await _session_detail(request, session_id, tab)
+    return await _session_detail(request, session_id, tab, view)
 
 
 @router.get("/sessions/{session_id}/cost/bloat", response_class=HTMLResponse)

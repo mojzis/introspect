@@ -15,15 +15,27 @@ curl -LsSf https://astral.sh/uv/install.sh | sh
 **Just trying it out?** Run it directly, nothing to install:
 
 ```bash
-uvx introspy serve
+uvx introspy@latest serve
 ```
+
+Use `introspy@latest`, not a bare `uvx introspy` — `uvx` caches its environment
+indefinitely, so the bare form quietly keeps running the first version it
+downloaded. `@latest` always fetches the current release.
 
 **Using it regularly?** Install it as a tool, then call it by name:
 
 ```bash
 uv tool install introspy
 introspy serve
+
+# Installed tools stay pinned — pull new releases with:
+uv tool upgrade introspy
 ```
+
+Introspect checks PyPI once a day in the background and prints a one-line hint
+to stderr when a newer release is out. It never self-updates, sends nothing but
+a plain request for the `introspy` release metadata, and honours
+`INTROSPECT_VERSION_CHECK=off`.
 
 ## Usage
 

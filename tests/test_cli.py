@@ -12,9 +12,13 @@ from typing import cast
 import pytest
 from typer.testing import CliRunner
 
+from introspect import version_check as vc
 from introspect.cli import (
     CLAUDE_SYSTEM_PROMPT_SUFFIX,
+    _branch_db_path,
     _find_available_port,
+    _prune_stale_branch_dbs,
+    _sanitize_branch,
     _stop_server,
     app,
 )
@@ -23,6 +27,7 @@ from introspect.mcp.server import create_mcp_server
 runner = CliRunner()
 
 _UVICORN_SHOULD_NOT_RUN = "uvicorn.run should not be called in this test"
+_BRANCH_DETECTION_SHOULD_SKIP = "branch detection should be skipped"
 
 
 # Read commands that should work end-to-end against an empty DB. ``materialize``
@@ -101,6 +106,87 @@ def test_cli_reuses_existing_materialized_db(monkeypatch):
             "second invocation should reuse the existing materialized DB; "
             f"banner went from {first_ts!r} to {second_ts!r}"
         )
+
+
+def _stub_behind_cache(monkeypatch, tmp, *, latest="9.9.9", current="0.0.1"):
+    """Point the version-check cache at ``tmp`` with a fresh 'we're behind' entry
+    and force the eligible-install / TTY predicates on."""
+    monkeypatch.setenv("INTROSPECT_DB_PATH", str(Path(tmp) / "introspect.duckdb"))
+    for name in (*vc._CI_ENV_VARS, vc.ENV_ENABLED, vc.ENV_INTERVAL):
+        monkeypatch.delenv(name, raising=False)
+    monkeypatch.setattr(vc, "_current_version", lambda: current)
+    monkeypatch.setattr(vc, "_is_editable_install", lambda: False)
+    monkeypatch.setattr(vc, "_stderr_is_tty", lambda: True)
+    # Far-future timestamp keeps the cache "fresh" without coupling to the clock.
+    vc._write_cache(
+        Path(tmp) / "version_check.json",
+        vc.VersionCache(checked_at=9_999_999_999.0, latest=latest),
+    )
+
+
+def test_nag_prints_to_stderr_not_stdout_when_behind(monkeypatch):
+    """An eligible command prints the one-line nag to stderr only, after output."""
+    with tempfile.TemporaryDirectory() as tmp:
+        db_path = Path(tmp) / "introspect.duckdb"
+        glob_pat = str(Path(tmp) / "claude" / "**" / "*.jsonl")
+        monkeypatch.setattr("introspect.cli.DEFAULT_DB_PATH", db_path)
+        monkeypatch.setattr("introspect.cli.DEFAULT_JSONL_GLOB", glob_pat)
+        _stub_behind_cache(monkeypatch, tmp)
+
+        result = runner.invoke(app, ["stats"])
+
+        assert result.exit_code == 0, result.output
+        assert "9.9.9 is available" in result.stderr
+        assert "uvx introspy@latest" in result.stderr
+        assert "is available" not in result.stdout
+
+
+def test_no_nag_when_up_to_date_cli(monkeypatch):
+    with tempfile.TemporaryDirectory() as tmp:
+        db_path = Path(tmp) / "introspect.duckdb"
+        glob_pat = str(Path(tmp) / "claude" / "**" / "*.jsonl")
+        monkeypatch.setattr("introspect.cli.DEFAULT_DB_PATH", db_path)
+        monkeypatch.setattr("introspect.cli.DEFAULT_JSONL_GLOB", glob_pat)
+        _stub_behind_cache(monkeypatch, tmp, latest="0.0.1", current="0.0.1")
+
+        result = runner.invoke(app, ["stats"])
+
+        assert result.exit_code == 0, result.output
+        assert "is available" not in result.stderr
+        assert "is available" not in result.stdout
+
+
+def test_opt_out_env_silences_nag_cli(monkeypatch):
+    with tempfile.TemporaryDirectory() as tmp:
+        db_path = Path(tmp) / "introspect.duckdb"
+        glob_pat = str(Path(tmp) / "claude" / "**" / "*.jsonl")
+        monkeypatch.setattr("introspect.cli.DEFAULT_DB_PATH", db_path)
+        monkeypatch.setattr("introspect.cli.DEFAULT_JSONL_GLOB", glob_pat)
+        _stub_behind_cache(monkeypatch, tmp)
+        monkeypatch.setenv("INTROSPECT_VERSION_CHECK", "off")
+
+        result = runner.invoke(app, ["stats"])
+
+        assert result.exit_code == 0, result.output
+        assert "is available" not in result.stderr
+
+
+def test_mcp_command_never_nags(monkeypatch):
+    """The ``mcp`` (stdio) command must never emit the nag, even when behind."""
+    with tempfile.TemporaryDirectory() as tmp:
+        _stub_behind_cache(monkeypatch, tmp)
+
+        class _StubServer:
+            def run(self, transport):
+                return None
+
+        monkeypatch.setattr("introspect.mcp.server.create_mcp_server", _StubServer)
+
+        result = runner.invoke(app, ["mcp"])
+
+        assert result.exit_code == 0, result.output
+        assert "is available" not in result.stderr
+        assert "is available" not in result.stdout
 
 
 def test_materialize_shows_friendly_message_when_db_locked(monkeypatch, mock_locked_db):
@@ -186,6 +272,139 @@ def test_serve_errors_when_no_port_available(monkeypatch):
 
         assert result.exit_code == 1
         assert "none were free" in result.output
+
+
+def test_sanitize_branch_replaces_unsafe_chars():
+    assert _sanitize_branch("feat/new-thing") == "feat-new-thing"
+    assert _sanitize_branch("main") == "main"
+
+
+def test_branch_db_path_namespaces_per_branch(monkeypatch, tmp_path):
+    monkeypatch.setattr(
+        "introspect.cli.DEFAULT_DB_PATH", tmp_path / "introspect.duckdb"
+    )
+    path = _branch_db_path("feat/x")
+    assert path == tmp_path / "introspect-feat-x.duckdb"
+
+
+def test_prune_stale_branch_dbs_removes_only_dead_branches(monkeypatch, tmp_path):
+    monkeypatch.setattr(
+        "introspect.cli.DEFAULT_DB_PATH", tmp_path / "introspect.duckdb"
+    )
+    keep = tmp_path / "introspect-current.duckdb"
+    live = tmp_path / "introspect-main.duckdb"
+    dead = tmp_path / "introspect-old.duckdb"
+    shared = tmp_path / "introspect.duckdb"  # default DB, must be untouched
+    for f in (keep, live, dead, shared):
+        f.touch()
+    dead.with_name(dead.name + ".wal").touch()
+
+    # Prune only runs when launched from the introspect repo itself.
+    monkeypatch.setattr("introspect.cli._git_toplevel", lambda _cwd: tmp_path)
+
+    def _fake_run(*_a, **_k):
+        return subprocess.CompletedProcess([], 0, stdout="current\nmain\n", stderr="")
+
+    monkeypatch.setattr("subprocess.run", _fake_run)
+
+    removed = _prune_stale_branch_dbs(keep=keep)
+
+    assert removed == [dead]
+    assert keep.exists()
+    assert live.exists()
+    assert shared.exists()
+    assert not dead.exists()
+    assert not dead.with_name(dead.name + ".wal").exists()
+
+
+def test_prune_stale_branch_dbs_skips_when_not_in_introspect_repo(
+    monkeypatch, tmp_path
+):
+    """Launched from an unrelated repo, prune must not delete introspect's DBs."""
+    monkeypatch.setattr(
+        "introspect.cli.DEFAULT_DB_PATH", tmp_path / "introspect.duckdb"
+    )
+    dead = tmp_path / "introspect-old.duckdb"
+    dead.touch()
+
+    # cwd repo (first call) differs from the introspect source repo (second call).
+    tops = iter([tmp_path / "other-repo", tmp_path / "introspect-src"])
+    monkeypatch.setattr("introspect.cli._git_toplevel", lambda _cwd: next(tops))
+
+    removed = _prune_stale_branch_dbs(keep=tmp_path / "introspect-current.duckdb")
+
+    assert removed == []
+    assert dead.exists()
+
+
+def test_devserve_uses_shared_db_on_detached_head(monkeypatch, tmp_path):
+    """Detached HEAD → no branch → leave INTROSPECT_DB_PATH unset (shared default)."""
+    monkeypatch.delenv("INTROSPECT_DB_PATH", raising=False)
+    monkeypatch.setattr(
+        "introspect.cli.DEFAULT_DB_PATH", tmp_path / "introspect.duckdb"
+    )
+    monkeypatch.setattr("introspect.cli._current_git_branch", lambda: None)
+
+    captured: dict[str, object] = {}
+
+    def _fake_run(_app, **kwargs):
+        import os  # noqa: PLC0415
+
+        captured["db"] = os.environ.get("INTROSPECT_DB_PATH")
+
+    monkeypatch.setattr("uvicorn.run", _fake_run)
+
+    result = runner.invoke(app, ["devserve"])
+
+    assert result.exit_code == 0, result.output
+    assert captured["db"] is None
+
+
+def test_devserve_sets_branch_db_path(monkeypatch, tmp_path):
+    monkeypatch.delenv("INTROSPECT_DB_PATH", raising=False)
+    monkeypatch.setattr(
+        "introspect.cli.DEFAULT_DB_PATH", tmp_path / "introspect.duckdb"
+    )
+    monkeypatch.setattr("introspect.cli._current_git_branch", lambda: "feat/x")
+    monkeypatch.setattr("introspect.cli._prune_stale_branch_dbs", lambda keep: [])
+
+    captured: dict[str, object] = {}
+
+    def _fake_run(_app, **kwargs):
+        import os  # noqa: PLC0415
+
+        captured["db"] = os.environ.get("INTROSPECT_DB_PATH")
+
+    monkeypatch.setattr("uvicorn.run", _fake_run)
+
+    result = runner.invoke(app, ["devserve"])
+
+    assert result.exit_code == 0, result.output
+    assert captured["db"] == str(tmp_path / "introspect-feat-x.duckdb")
+
+
+def test_devserve_respects_explicit_db_path(monkeypatch, tmp_path):
+    explicit = str(tmp_path / "custom.duckdb")
+    monkeypatch.setenv("INTROSPECT_DB_PATH", explicit)
+
+    def _boom():
+        raise AssertionError(_BRANCH_DETECTION_SHOULD_SKIP)
+
+    monkeypatch.setattr("introspect.cli._current_git_branch", _boom)
+
+    captured: dict[str, object] = {}
+
+    def _fake_run(_app, **kwargs):
+        import os  # noqa: PLC0415
+
+        captured["db"] = os.environ.get("INTROSPECT_DB_PATH")
+
+    monkeypatch.setattr("uvicorn.run", _fake_run)
+
+    result = runner.invoke(app, ["devserve"])
+
+    assert result.exit_code == 0, result.output
+    assert captured["db"] == explicit
 
 
 def test_find_available_port_skips_taken_port():

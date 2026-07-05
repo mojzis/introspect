@@ -1,4 +1,8 @@
-# Claude Code JSONL Schema Notes
+# JSONL schema
+
+Reference notes on the shape of the Claude Code conversation logs that
+Introspect reads. These describe the raw JSONL on disk, before it is
+materialized into the DuckDB views documented in [Architecture](architecture.md).
 
 ## File Location
 - Conversations stored at `~/.claude/projects/<project-slug>/<session-uuid>.jsonl`
