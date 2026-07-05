@@ -1,0 +1,82 @@
+{% if not trajectory_ctx.has_data %}
+<div class="card">
+    <p>{% if trajectory_ctx.error %}<strong>Trajectory unavailable.</strong> {{ trajectory_ctx.error }}{% else %}No tool calls in this session — nothing to plot.{% endif %}</p>
+</div>
+{% else %}
+{% set m = trajectory_ctx.metrics %}
+{% set p = trajectory_ctx.phases %}
+{% set calls = trajectory_ctx.calls %}
+{% set detail = trajectory_ctx.view == 'detail' %}
+
+<div class="card">
+    <div style="display:flex;justify-content:space-between;align-items:baseline;flex-wrap:wrap;gap:0.5rem;">
+        <h2 style="margin:0;">Trajectory</h2>
+        <div class="tab-strip" style="display:flex;gap:0.25rem;">
+            {% for v, lbl in [('category','Category'),('detail','Detailed')] %}
+            <a href="/sessions/{{ session_id }}?tab=trajectory&view={{ v }}"
+               hx-get="/sessions/{{ session_id }}?tab=trajectory&view={{ v }}"
+               hx-target="#content" hx-push-url="true"
+               style="padding:0.2rem 0.6rem;font-size:0.85rem;text-decoration:none;border:1px solid #ccc;border-radius:4px;color:#333;{% if trajectory_ctx.view == v %}background:#333;color:#fff;border-color:#333;{% endif %}">
+                {{ lbl }}
+            </a>
+            {% endfor %}
+        </div>
+    </div>
+    <p style="color:#666;margin:0.4rem 0 0.8rem;font-size:0.9rem;">
+        Each tile is one tool call, in order. The strip is split into
+        <strong>locate</strong> (before the first edit) ·
+        <strong>implement</strong> (editing, plus any test/fix cycles) ·
+        <strong>verify</strong> (the trailing test/lint/typecheck run once
+        editing has stopped). Hover a tile for the command or file.
+    </p>
+
+    <div style="display:flex;flex-wrap:wrap;gap:0.4rem 1.5rem;margin-bottom:0.8rem;font-size:0.9rem;">
+        <div><span class="meta-label">Calls</span> {{ m.total }}</div>
+        <div><span class="meta-label">Locate len</span> {{ m.locate_len }}</div>
+        <div><span class="meta-label">First nav</span> {{ m.first_nav }}</div>
+        <div><span class="meta-label">Edits</span> {{ m.edits }}</div>
+        <div><span class="meta-label">Searches</span> {{ m.search }}</div>
+        <div><span class="meta-label">Distinct files read</span> {{ m.distinct_files }}</div>
+        <div><span class="meta-label">Max re-reads</span> {{ m.max_rereads }}</div>
+    </div>
+
+    <div style="display:flex;flex-wrap:wrap;gap:0.3rem 0.9rem;margin-bottom:1rem;font-size:0.8rem;color:#555;">
+        {% for item in trajectory_ctx.legend %}
+        <span style="display:inline-flex;align-items:center;gap:0.25rem;">
+            <span style="display:inline-block;width:0.9rem;height:0.9rem;border-radius:2px;background:{{ item.color }};"></span>
+            {{ item.label }}
+        </span>
+        {% endfor %}
+    </div>
+
+    {% macro tile(c) %}
+    {% if detail %}
+    <span title="{{ c.tip }}"
+          style="display:inline-flex;align-items:center;padding:0.1rem 0.4rem;border-radius:3px;font-size:0.72rem;color:#fff;white-space:nowrap;max-width:14rem;overflow:hidden;text-overflow:ellipsis;background:{{ c.color }};{% if c.is_error %}box-shadow:0 0 0 2px #d33;{% endif %}">
+        {{ c.detail }}
+    </span>
+    {% else %}
+    <span title="{{ c.tip }}"
+          style="display:inline-flex;align-items:center;justify-content:center;width:1.4rem;height:1.4rem;border-radius:3px;font-size:0.8rem;font-family:monospace;color:#fff;background:{{ c.color }};{% if c.is_error %}box-shadow:0 0 0 2px #d33;{% endif %}">
+        {{ c.glyph }}
+    </span>
+    {% endif %}
+    {% endmacro %}
+
+    {% set bands = [
+        ('locate', '#f4f7f4', calls[:p.locate_end]),
+        ('implement', '#f4f2f8', calls[p.locate_end:p.implement_end]),
+        ('verify', '#f2f5fa', calls[p.implement_end:]),
+    ] %}
+    <div style="display:flex;flex-direction:column;gap:0.5rem;">
+        {% for name, bg, band in bands %}{% if band %}
+        <div style="background:{{ bg }};border-radius:5px;padding:0.5rem 0.6rem;">
+            <div style="font-size:0.72rem;text-transform:uppercase;letter-spacing:0.05em;color:#999;margin-bottom:0.35rem;">{{ name }} · {{ band|length }}</div>
+            <div style="display:flex;flex-wrap:wrap;gap:0.25rem;">
+                {% for c in band %}{{ tile(c) }}{% endfor %}
+            </div>
+        </div>
+        {% endif %}{% endfor %}
+    </div>
+</div>
+{% endif %}
