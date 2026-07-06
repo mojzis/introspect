@@ -91,6 +91,14 @@ nothing is listening on the target port (log at `~/.introspect/serve.log`).
 The MCP config is passed inline to `claude`, so the server is only registered
 for that session — no changes to your global Claude Code config.
 
+Any arguments after `--` are forwarded verbatim to the `claude` CLI, so you can
+pass normal Claude Code options alongside:
+
+```bash
+introspy claude -- --model opus --resume
+introspy claude -- -p "what are the most expensive sessions"
+```
+
 Once connected, try asking Claude:
 
 > what are the most expensive sessions
