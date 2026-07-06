@@ -485,6 +485,27 @@ def test_claude_steers_session_toward_mcp_tools(monkeypatch):
     assert argv[argv.index("--allowedTools") + 1] == "mcp__introspect"
 
 
+def test_claude_forwards_extra_args(monkeypatch):
+    """Extra args after `--` are appended verbatim to the claude invocation."""
+    calls = []
+    monkeypatch.setattr("shutil.which", lambda _: "/usr/bin/claude")
+    monkeypatch.setattr(
+        socket, "create_connection", lambda *a, **k: contextlib.nullcontext()
+    )
+    monkeypatch.setattr(subprocess, "call", lambda argv: calls.append(argv) or 0)
+
+    result = runner.invoke(
+        app, ["claude", "--port", "3000", "--", "--model", "opus", "--resume"]
+    )
+
+    assert result.exit_code == 0, result.output
+    argv = calls[0]
+    assert argv[-3:] == ["--model", "opus", "--resume"]
+    # introspect's own --port is consumed, not forwarded
+    config = json.loads(argv[argv.index("--mcp-config") + 1])
+    assert config["mcpServers"]["introspect"]["url"].endswith(":3000/mcp")
+
+
 def test_claude_system_prompt_lists_every_registered_tool():
     """The hand-written tool list in the system prompt must not drift.
 

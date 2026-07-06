@@ -866,8 +866,11 @@ CLAUDE_SYSTEM_PROMPT_SUFFIX = (
 INTROSPECT_MCP_PERMISSION = "mcp__introspect"
 
 
-@app.command()
+@app.command(
+    context_settings={"allow_extra_args": True, "ignore_unknown_options": True}
+)
 def claude(
+    ctx: typer.Context,
     port: int = typer.Option(
         DEFAULT_PORT, help="Port the introspect server is listening on"
     ),
@@ -888,6 +891,11 @@ def claude(
     A server that was already running is never touched.  The MCP config is
     passed inline, so nothing is written to your Claude Code settings — the
     server is only registered for this session.
+
+    Any extra arguments are forwarded to the ``claude`` CLI as-is, e.g.
+    ``introspy claude -- --model opus --resume`` or
+    ``introspy claude -- -p "recent sessions"``. Use ``--`` to separate
+    introspect's own options from the ones meant for Claude Code.
     """
     import json  # noqa: PLC0415
     import shutil  # noqa: PLC0415
@@ -920,6 +928,7 @@ def claude(
                 CLAUDE_SYSTEM_PROMPT_SUFFIX,
                 "--allowedTools",
                 INTROSPECT_MCP_PERMISSION,
+                *ctx.args,
             ]
         )
     finally:
