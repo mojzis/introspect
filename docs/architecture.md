@@ -161,6 +161,8 @@ The `search_corpus` table is rebuilt by `build_search_corpus(conn)` from user me
 | `INTROSPECT_REFRESH_WINDOW` | `30` | Window picker token: `1`, `7`, `30`, or `month` (calendar-month-to-date) |
 | `INTROSPECT_REFRESH_INTERVAL_SECONDS` | `600` | Background refresh poll interval; `0` disables auto-refresh |
 | `INTROSPECT_RESOLVE_PROJECTS` | `1` | When `0`, skip git worktree resolution for project names |
+| `INTROSPECT_MAX_OBJECT_SIZE_MB` | largest JSONL file + 1MB, clamped to 32–512MB | Override DuckDB's `maximum_object_size` (per-line JSON buffer) during materialization |
+| `INTROSPECT_THREADS` | derived from available RAM ÷ per-thread buffer, capped at CPU count | Override the DuckDB thread count used during materialization |
 
 ## Testing
 

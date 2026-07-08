@@ -9,9 +9,14 @@ import duckdb
 import pytest
 
 from introspect.db import (
-    _MAX_TOOL_RESULT_SIZE_BYTES,
+    _MAX_OBJECT_SIZE_BYTES,
+    _MIN_OBJECT_SIZE_BYTES,
     DatabaseLockedError,
+    _available_ram,
+    _clamp_object_size,
     _filter_parseable_files,
+    _plan_load,
+    _resolve_object_size,
     connect_writable,
     ensure_materialized,
     get_connection,
@@ -583,13 +588,127 @@ def test_get_connection_raises_when_locked(mock_locked_db):
         get_connection(Path("/tmp/fake.duckdb"), "/tmp/*.jsonl")
 
 
-def test_maximum_object_size_raised_above_default():
+def test_object_size_floor_above_default():
     """Default DuckDB limit is 16MB; some Claude tool results exceed it.
 
     Regression: a 31MB tool result aborted startup with InvalidInputException.
-    Threshold guards against accidentally lowering the limit back near 16MB.
+    The floor guards against the computed object size dropping near 16MB even
+    when every file is tiny.
     """
-    assert _MAX_TOOL_RESULT_SIZE_BYTES >= 32 * 1024 * 1024
+    assert _MIN_OBJECT_SIZE_BYTES >= 32 * 1024 * 1024
+    assert _clamp_object_size(0) == _MIN_OBJECT_SIZE_BYTES
+
+
+_MB = 1024 * 1024
+_GB = 1024 * 1024 * 1024
+
+
+def test_clamp_object_size_bounds():
+    """Object size follows the largest file, clamped to [32MB, 512MB]."""
+    assert _clamp_object_size(0) == 32 * _MB  # empty set → floor
+    assert _clamp_object_size(1 * _MB) == 32 * _MB  # tiny file → floor
+    assert _clamp_object_size(40 * _MB) == 41 * _MB  # 40MB + 1MB slack
+    assert _clamp_object_size(600 * _MB) == 512 * _MB  # oversized → ceiling
+    assert _clamp_object_size(_MAX_OBJECT_SIZE_BYTES) == _MAX_OBJECT_SIZE_BYTES
+
+
+def test_resolve_object_size_env_override_wins(monkeypatch):
+    """``INTROSPECT_MAX_OBJECT_SIZE_MB`` overrides the computed value.
+
+    The override short-circuits before the filesystem is touched, so a
+    nonexistent path still resolves to the override.
+    """
+    monkeypatch.setenv("INTROSPECT_MAX_OBJECT_SIZE_MB", "64")
+    assert _resolve_object_size(["/nonexistent/huge.jsonl"]) == 64 * _MB
+
+
+def test_resolve_object_size_invalid_env_falls_back(tmp_path, monkeypatch, caplog):
+    """An invalid override logs a WARNING and falls back to the computed value."""
+    small = tmp_path / "small.jsonl"
+    small.write_bytes(b"x" * 1024)
+    monkeypatch.setenv("INTROSPECT_MAX_OBJECT_SIZE_MB", "not-a-number")
+    with caplog.at_level("WARNING", logger="introspect.db"):
+        assert _resolve_object_size([str(small)]) == _MIN_OBJECT_SIZE_BYTES
+    assert any("INTROSPECT_MAX_OBJECT_SIZE_MB" in r.message for r in caplog.records)
+
+
+def _plan_with(monkeypatch, *, ram, object_mb, cpu):
+    """Build a LoadPlan with controlled RAM, object size, and CPU count."""
+    import introspect.db as db_module  # noqa: PLC0415
+
+    monkeypatch.setattr(db_module, "_available_ram", lambda: ram)
+    monkeypatch.setattr(db_module.os, "cpu_count", lambda: cpu)
+    monkeypatch.setenv("INTROSPECT_MAX_OBJECT_SIZE_MB", str(object_mb))
+    return _plan_load([])
+
+
+def test_plan_load_full_parallelism_on_beefy_machine(monkeypatch):
+    """Ample RAM leaves DuckDB's default thread count (threads=None)."""
+    plan = _plan_with(monkeypatch, ram=64 * _GB, object_mb=40, cpu=12)
+    assert plan.threads is None
+    assert plan.memory_limit_bytes == int(64 * _GB * 0.6)
+    assert plan.tight is False
+
+
+def test_plan_load_caps_threads_under_pressure(monkeypatch):
+    """15GB RAM + 400MB object → ~9 threads (7.5GB budget / 800MB per thread)."""
+    plan = _plan_with(monkeypatch, ram=15 * _GB, object_mb=400, cpu=12)
+    assert plan.threads == 9
+    assert plan.memory_limit_bytes == int(15 * _GB * 0.6)
+    assert plan.tight is False
+
+
+def test_plan_load_floors_at_one_thread_and_warns(monkeypatch):
+    """When even one thread exceeds the budget, floor to 1 and flag as tight."""
+    plan = _plan_with(monkeypatch, ram=1 * _GB, object_mb=400, cpu=8)
+    assert plan.threads == 1
+    assert plan.tight is True
+    # memory_limit must never be set below the scan buffer we're about to
+    # allocate, or DuckDB's own cap would deterministically reject the load.
+    assert plan.memory_limit_bytes is not None
+    assert plan.memory_limit_bytes >= 2 * plan.max_object_size
+
+
+def test_plan_load_threads_env_override_wins(monkeypatch):
+    """``INTROSPECT_THREADS`` overrides the computed thread count."""
+    monkeypatch.setenv("INTROSPECT_THREADS", "3")
+    plan = _plan_with(monkeypatch, ram=64 * _GB, object_mb=40, cpu=12)
+    assert plan.threads == 3
+
+
+def test_plan_load_invalid_threads_env_falls_back(monkeypatch, caplog):
+    """An invalid ``INTROSPECT_THREADS`` logs a WARNING and is ignored."""
+    monkeypatch.setenv("INTROSPECT_THREADS", "0")
+    with caplog.at_level("WARNING", logger="introspect.db"):
+        plan = _plan_with(monkeypatch, ram=64 * _GB, object_mb=40, cpu=12)
+    assert plan.threads is None
+    assert any("INTROSPECT_THREADS" in r.message for r in caplog.records)
+
+
+def test_plan_load_without_ram_info_leaves_defaults(monkeypatch):
+    """No RAM info (psutil unavailable) → no thread/memory caps applied."""
+    import introspect.db as db_module  # noqa: PLC0415
+
+    monkeypatch.setattr(db_module, "_available_ram", lambda: None)
+    plan = _plan_load([])
+    assert plan.threads is None
+    assert plan.memory_limit_bytes is None
+    assert plan.tight is False
+
+
+def test_available_ram_falls_back_when_psutil_missing(monkeypatch):
+    """A failed ``import psutil`` makes ``_available_ram`` return None cleanly."""
+    import builtins  # noqa: PLC0415
+
+    real_import = builtins.__import__
+
+    def fake_import(name, *args, **kwargs):
+        if name == "psutil":
+            raise ImportError
+        return real_import(name, *args, **kwargs)
+
+    monkeypatch.setattr(builtins, "__import__", fake_import)
+    assert _available_ram() is None
 
 
 def test_materialize_recovers_when_bulk_read_raises(monkeypatch, caplog):
@@ -615,11 +734,11 @@ def test_materialize_recovers_when_bulk_read_raises(monkeypatch, caplog):
 
         boom_msg = "maximum_object_size exceeded"
 
-        def fail_once(conn, source, day_filter, and_day_filter):
+        def fail_once(conn, source, day_filter, and_day_filter, max_object_size):
             calls["n"] += 1
             if calls["n"] == 1:
                 raise duckdb.InvalidInputException(boom_msg)
-            return original(conn, source, day_filter, and_day_filter)
+            return original(conn, source, day_filter, and_day_filter, max_object_size)
 
         monkeypatch.setattr(db_module, "_create_raw_tables", fail_once)
 
