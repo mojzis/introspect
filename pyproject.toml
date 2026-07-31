@@ -2,7 +2,22 @@
 name = "introspy"
 version = "0.2.6"
 description = "Explore and search Claude Code conversation logs"
+readme = "README.md"
 requires-python = ">=3.11"
+authors = [{ email = "mojzisek@gmail.com" }]
+keywords = ["claude", "claude-code", "duckdb", "mcp", "logs", "analytics"]
+# No per-minor `Python :: 3.x` entries — CI runs a single interpreter, so the
+# supported range is claimed once, by `requires-python`.
+classifiers = [
+    "Development Status :: 4 - Beta",
+    "Environment :: Console",
+    "Environment :: Web Environment",
+    "Intended Audience :: Developers",
+    "Operating System :: OS Independent",
+    "Programming Language :: Python :: 3",
+    "Topic :: Software Development :: Quality Assurance",
+    "Topic :: Utilities",
+]
 dependencies = [
     "duckdb>=1.2.0",
     "typer>=0.15.0",
@@ -18,6 +33,12 @@ dependencies = [
     "nolegend>=0.1.2",
     "packaging>=21.0",
 ]
+
+[project.urls]
+Homepage = "https://github.com/mojzis/introspect"
+Documentation = "https://mojzis.github.io/introspect/"
+Repository = "https://github.com/mojzis/introspect"
+Issues = "https://github.com/mojzis/introspect/issues"
 
 [project.scripts]
 introspect = "introspect.cli:app"
