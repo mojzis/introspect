@@ -62,6 +62,21 @@ jobs:
       - run: uv sync --frozen
       - run: uv run deptry .
 
+  fresh-install:
+    name: Fresh Install (newest allowed deps)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+      - uses: astral-sh/setup-uv@v7
+      # Every other job runs `uv sync --frozen`, so nothing here notices when a
+      # dependency ships a breaking release that our version ranges still allow.
+      # `uvx introspy@latest` resolves fresh, so mirror that: newest allowed
+      # versions, then import what `introspy serve` imports.
+      - run: uv venv /tmp/fresh
+      - run: uv pip install --python /tmp/fresh/bin/python --resolution highest .
+      - run: /tmp/fresh/bin/python -c "import introspect.api.main; from introspect.mcp.server import create_mcp_server; create_mcp_server()"
+      - run: /tmp/fresh/bin/introspy --help
+
   test:
     name: Test
     runs-on: ubuntu-latest
