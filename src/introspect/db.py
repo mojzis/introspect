@@ -3,6 +3,8 @@
 import contextlib
 import glob
 import logging
+import os
+from dataclasses import dataclass
 from datetime import UTC, datetime
 from pathlib import Path
 
@@ -51,15 +53,29 @@ def _is_lock_error(exc: duckdb.IOException) -> bool:
     return any(marker in msg for marker in _LOCK_ERROR_MARKERS)
 
 
-# DuckDB's default ``maximum_object_size`` is 16MB. Some Claude Code tool
-# results (Read of large files, big diffs) exceed that and abort the entire
-# load. 512MB comfortably fits any realistic message.
-_MAX_TOOL_RESULT_SIZE_BYTES = 512 * 1024 * 1024
+# ``maximum_object_size`` is sized to the current load set rather than pinned at
+# a fixed constant. DuckDB's JSON reader allocates a per-scan-thread buffer of
+# ``maximum_object_size * 2`` before reading any data, so a large constant
+# multiplied by the thread count is what OOM-kills tight machines (e.g. a 15GB
+# WSL VM). A JSONL line can't exceed its file, so we bound the buffer by the
+# largest file (plus slack), clamped to a sane floor/ceiling.
+_BYTES_PER_MB = 1024 * 1024
+_BYTES_PER_GB = 1024 * _BYTES_PER_MB
+_MIN_OBJECT_SIZE_BYTES = 32 * _BYTES_PER_MB  # floor (also DuckDB's is 16MB)
+_MAX_OBJECT_SIZE_BYTES = 512 * _BYTES_PER_MB  # ceiling — fits any realistic message
+_OBJECT_SIZE_SLACK_BYTES = 1 * _BYTES_PER_MB  # +1MB over the largest file
+_MEMORY_LIMIT_HEADROOM = 256 * _BYTES_PER_MB  # slack above scan buffers
 
-_READ_JSON_OPTS = (
-    f"filename=true, format='newline_delimited', union_by_name=true, "
-    f"ignore_errors=true, maximum_object_size={_MAX_TOOL_RESULT_SIZE_BYTES}"
-)
+_ENV_MAX_OBJECT_SIZE_MB = "INTROSPECT_MAX_OBJECT_SIZE_MB"
+_ENV_THREADS = "INTROSPECT_THREADS"
+
+
+def _read_json_opts(max_object_size: int) -> str:
+    """Build the shared ``read_json_auto`` option string for ``max_object_size``."""
+    return (
+        f"filename=true, format='newline_delimited', union_by_name=true, "
+        f"ignore_errors=true, maximum_object_size={max_object_size}"
+    )
 
 
 def _quote_sql_string(value: str) -> str:
@@ -67,16 +83,194 @@ def _quote_sql_string(value: str) -> str:
     return "'" + value.replace("'", "''") + "'"
 
 
-def _jsonl_read_expr(source: str | list[str]) -> str:
+def _jsonl_read_expr(source: str | list[str], max_object_size: int) -> str:
     """Build a ``read_json_auto(...)`` expression.
 
     ``source`` may be a glob string (fast path) or an explicit list of file
     paths (used by the per-file fallback that excludes unparseable files).
+    ``max_object_size`` bounds DuckDB's per-line JSON buffer.
     """
+    opts = _read_json_opts(max_object_size)
     if isinstance(source, str):
-        return f"read_json_auto({_quote_sql_string(source)}, {_READ_JSON_OPTS})"
+        return f"read_json_auto({_quote_sql_string(source)}, {opts})"
     quoted = ", ".join(_quote_sql_string(p) for p in source)
-    return f"read_json_auto([{quoted}], {_READ_JSON_OPTS})"
+    return f"read_json_auto([{quoted}], {opts})"
+
+
+def _env_int(name: str, *, minimum: int) -> int | None:
+    """Read an ``INTROSPECT_*`` integer override, or None if unset/invalid.
+
+    Invalid values log a WARNING and fall back to the computed value, mirroring
+    the ``INTROSPECT_REFRESH_WINDOW`` handling in ``api/main.py``.
+    """
+    raw = os.environ.get(name)
+    if not raw:
+        return None
+    try:
+        value = int(raw)
+    except ValueError:
+        log.warning("Invalid %s=%r; ignoring and using computed value.", name, raw)
+        return None
+    if value < minimum:
+        log.warning(
+            "Invalid %s=%r (must be >= %d); ignoring and using computed value.",
+            name,
+            raw,
+            minimum,
+        )
+        return None
+    return value
+
+
+def _largest_file_size(files: list[str]) -> int:
+    """Return the size of the largest file, skipping unreadable ones."""
+    largest = 0
+    for path in files:
+        try:
+            largest = max(largest, os.path.getsize(path))  # noqa: PTH202
+        except OSError:
+            continue
+    return largest
+
+
+def _clamp_object_size(largest: int) -> int:
+    """Clamp the largest-file size (+slack) to the [floor, ceiling] object size."""
+    if largest <= 0:
+        return _MIN_OBJECT_SIZE_BYTES
+    return max(
+        _MIN_OBJECT_SIZE_BYTES,
+        min(largest + _OBJECT_SIZE_SLACK_BYTES, _MAX_OBJECT_SIZE_BYTES),
+    )
+
+
+def _object_size_for(largest: int) -> int:
+    """Resolve ``maximum_object_size`` from the largest file or the env override."""
+    override_mb = _env_int(_ENV_MAX_OBJECT_SIZE_MB, minimum=1)
+    if override_mb is not None:
+        return override_mb * _BYTES_PER_MB
+    return _clamp_object_size(largest)
+
+
+def _resolve_object_size(files: list[str]) -> int:
+    """Resolve ``maximum_object_size`` for a glob's file set (lazy-view path)."""
+    return _object_size_for(_largest_file_size(files))
+
+
+@dataclass(frozen=True)
+class LoadPlan:
+    """RAM-aware settings for a materialization load."""
+
+    max_object_size: int
+    threads: int | None  # None => leave DuckDB's default (== cpu_count)
+    memory_limit_bytes: int | None  # None => leave DuckDB's default
+    file_count: int
+    total_size: int
+    largest_size: int
+    largest_file: str | None
+    available_ram: int | None
+    tight: bool  # even threads=1 needs more buffer than the budget
+
+
+def _available_ram() -> int | None:
+    """Return available RAM in bytes, or None if psutil is unavailable.
+
+    Falls back to None (no cap — current behavior) if psutil can't be imported
+    or the query fails for any reason.
+    """
+    try:
+        import psutil  # noqa: PLC0415
+    except Exception:
+        return None
+    try:
+        return int(psutil.virtual_memory().available)
+    except Exception:
+        return None
+
+
+def _plan_load(files: list[str]) -> LoadPlan:
+    """Compute object size, thread cap, and memory limit for the load set.
+
+    Buffer budget is 50% of available RAM; each scan thread needs
+    ``2 * max_object_size``, so threads are capped to fit the budget (floor 1,
+    ceiling cpu_count). ``memory_limit`` is 60% of available RAM (DuckDB's
+    default is 80% of *total*, wrong inside a RAM-shared WSL VM), but floored at
+    the scan-buffer requirement plus headroom so our own cap can never reject
+    the buffers we're about to allocate — on a genuinely tight machine we want
+    DuckDB to try and let the OS cope, not fail deterministically. Env overrides
+    (``INTROSPECT_MAX_OBJECT_SIZE_MB`` / ``INTROSPECT_THREADS``) win.
+    """
+    total = 0
+    largest = 0
+    largest_path: str | None = None
+    for path in files:
+        try:
+            size = os.path.getsize(path)  # noqa: PTH202
+        except OSError:
+            continue
+        total += size
+        if size > largest:
+            largest, largest_path = size, path
+    object_size = _object_size_for(largest)
+
+    cpu = os.cpu_count() or 1
+    ram = _available_ram()
+    per_thread = 2 * object_size
+    threads: int | None = None
+    memory_limit: int | None = None
+    tight = False
+    if ram is not None:
+        budget = ram // 2
+        n = max(1, min(budget // per_thread, cpu))
+        threads = n if n < cpu else None  # only SET when below the default
+        tight = per_thread > budget
+
+    override_threads = _env_int(_ENV_THREADS, minimum=1)
+    if override_threads is not None:
+        threads = override_threads
+
+    if ram is not None:
+        effective_threads = threads if threads is not None else cpu
+        buffer_need = effective_threads * per_thread
+        memory_limit = max(int(ram * 0.6), buffer_need + _MEMORY_LIMIT_HEADROOM)
+
+    return LoadPlan(
+        max_object_size=object_size,
+        threads=threads,
+        memory_limit_bytes=memory_limit,
+        file_count=len(files),
+        total_size=total,
+        largest_size=largest,
+        largest_file=largest_path,
+        available_ram=ram,
+        tight=tight,
+    )
+
+
+def _fmt_bytes(n: int | None) -> str:
+    """Human-readable byte size for log lines (``None`` → ``"default"``)."""
+    if n is None:
+        return "default"
+    if n >= _BYTES_PER_GB:
+        return f"{n / _BYTES_PER_GB:.1f}GB"
+    return f"{n / _BYTES_PER_MB:.0f}MB"
+
+
+def _apply_load_settings(conn: duckdb.DuckDBPyConnection, plan: LoadPlan) -> None:
+    """Apply RAM-aware thread/memory settings to a writer connection.
+
+    Materialize-only — never call this on a read-only connection.
+    """
+    if plan.threads is not None:
+        conn.execute(f"SET threads = {plan.threads}")
+    if plan.memory_limit_bytes is not None:
+        conn.execute(f"SET memory_limit = '{plan.memory_limit_bytes}B'")
+    # Every derived view sorts explicitly by timestamp, so insertion order is
+    # never relied upon; dropping the guarantee lets DuckDB parallelize and
+    # spill the load more freely (per the DuckDB out-of-memory guide).
+    conn.execute("SET preserve_insertion_order = false")
+    temp_dir = Path.home() / ".introspect" / "tmp"
+    temp_dir.mkdir(parents=True, exist_ok=True)
+    conn.execute(f"SET temp_directory = {_quote_sql_string(str(temp_dir))}")
 
 
 def _filter_parseable_files(files: list[str]) -> list[str]:
@@ -85,9 +279,10 @@ def _filter_parseable_files(files: list[str]) -> list[str]:
     Probes each file with a COUNT(*) so any DuckDB error that aborts the
     bulk load (size limit, missing file, permission error) surfaces here.
     Per-line malformed JSON is still swallowed by ``ignore_errors=true`` in
-    ``_READ_JSON_OPTS`` — that's intentional: the goal is to keep partial
+    the read options — that's intentional: the goal is to keep partial
     files (a few corrupt lines among many good ones) rather than drop them
-    wholesale.
+    wholesale. Each probe bounds ``maximum_object_size`` by that file's own
+    size, since a line can't be larger than its file.
 
     Cost is O(files): one in-memory full scan per input, so this is the
     slow path used only after a bulk-load failure.
@@ -102,7 +297,12 @@ def _filter_parseable_files(files: list[str]) -> list[str]:
     probe = duckdb.connect(":memory:")
     try:
         for path in files:
-            sql = f"SELECT COUNT(*) FROM {_jsonl_read_expr(path)}"  # noqa: S608
+            try:
+                object_size = _clamp_object_size(os.path.getsize(path))  # noqa: PTH202
+            except OSError as exc:
+                log.warning("Skipping unreadable JSONL file %s: %s", path, exc)
+                continue
+            sql = f"SELECT COUNT(*) FROM {_jsonl_read_expr(path, object_size)}"  # noqa: S608
             try:
                 probe.execute(sql).fetchone()
             except duckdb.Error as exc:
@@ -226,12 +426,42 @@ def materialize_views(
         with contextlib.suppress(duckdb.CatalogException):
             conn.execute(f"DROP TABLE IF EXISTS {name}")
 
+    # Size the load to the machine: object size follows the largest file, and
+    # thread/memory caps keep DuckDB's per-thread JSON buffers within a RAM
+    # budget. Applied here because every materialize path funnels through this
+    # writer connection.
+    files = sorted(glob.glob(jsonl_glob, recursive=True))  # noqa: PTH207
+    plan = _plan_load(files)
+    _apply_load_settings(conn, plan)
+    log.info(
+        "materialize: %d file(s), %s total, largest %s (%s), object_size=%s, "
+        "threads=%s, memory_limit=%s",
+        plan.file_count,
+        _fmt_bytes(plan.total_size),
+        _fmt_bytes(plan.largest_size),
+        plan.largest_file or "-",
+        _fmt_bytes(plan.max_object_size),
+        plan.threads if plan.threads is not None else (os.cpu_count() or 1),
+        _fmt_bytes(plan.memory_limit_bytes),
+    )
+    if plan.tight:
+        log.warning(
+            "Low memory for JSONL load: largest file %s needs ~%s of scan buffer "
+            "but only ~%s is available; proceeding, but the OS may kill the "
+            "process. Consider excluding or trimming that file.",
+            plan.largest_file or "-",
+            _fmt_bytes(2 * plan.max_object_size),
+            _fmt_bytes(plan.available_ram),
+        )
+
     # ``read_json_auto`` raises IOException when no files match the glob, so
     # an empty Claude home (fresh install, sandboxed CI) needs explicit empty
     # stubs to keep the rest of the pipeline working without special-casing
     # every consumer.
-    if next(glob.iglob(jsonl_glob, recursive=True), None) is not None:  # noqa: PTH207
-        _load_raw_tables(conn, jsonl_glob, day_filter, and_day_filter)
+    if files:
+        _load_raw_tables(
+            conn, jsonl_glob, day_filter, and_day_filter, plan.max_object_size
+        )
     else:
         _create_empty_raw_tables(conn)
 
@@ -394,6 +624,7 @@ def _load_raw_tables(
     jsonl_glob: str,
     day_filter: str,
     and_day_filter: str,
+    max_object_size: int,
 ) -> None:
     """Create ``raw_data`` and ``raw_messages`` from the JSONL glob.
 
@@ -405,7 +636,9 @@ def _load_raw_tables(
     load.
     """
     try:
-        _create_raw_tables(conn, jsonl_glob, day_filter, and_day_filter)
+        _create_raw_tables(
+            conn, jsonl_glob, day_filter, and_day_filter, max_object_size
+        )
     except duckdb.Error as exc:
         log.warning(
             "Bulk JSONL load failed (%s); retrying per-file to skip unparseable files.",
@@ -433,7 +666,7 @@ def _load_raw_tables(
         )
         raise duckdb.IOException(msg) from bulk_exc
 
-    _create_raw_tables(conn, parseable, day_filter, and_day_filter)
+    _create_raw_tables(conn, parseable, day_filter, and_day_filter, max_object_size)
 
 
 def _create_raw_tables(
@@ -441,9 +674,10 @@ def _create_raw_tables(
     source: str | list[str],
     day_filter: str,
     and_day_filter: str,
+    max_object_size: int,
 ) -> None:
     """Issue the two CREATE TABLE statements for ``raw_data``/``raw_messages``."""
-    read_expr = _jsonl_read_expr(source)
+    read_expr = _jsonl_read_expr(source, max_object_size)
 
     conn.execute(f"""
         CREATE TABLE raw_data AS
@@ -499,7 +733,8 @@ def _build_project_map(
 
 def _create_views(conn: duckdb.DuckDBPyConnection, jsonl_glob: str) -> None:
     """Create lazy views over JSONL files."""
-    _read = _jsonl_read_expr(jsonl_glob)
+    object_size = _resolve_object_size(sorted(glob.glob(jsonl_glob, recursive=True)))  # noqa: PTH207
+    _read = _jsonl_read_expr(jsonl_glob, object_size)
 
     conn.execute(f"""
         CREATE OR REPLACE VIEW raw_data AS
