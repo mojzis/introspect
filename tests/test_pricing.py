@@ -18,6 +18,10 @@ from introspect.pricing import (
 
 # (model_name, expected Rates) — covers every family + a dated suffix variant.
 _RATE_CASES = [
+    ("claude-fable-5", Rates(10, 12.50, 20, 1.00, 50)),
+    ("claude-mythos-5", Rates(10, 12.50, 20, 1.00, 50)),
+    ("claude-opus-5", Rates(5, 6.25, 10, 0.50, 25)),
+    ("claude-opus-4-8", Rates(5, 6.25, 10, 0.50, 25)),
     ("claude-opus-4-7", Rates(5, 6.25, 10, 0.50, 25)),
     ("claude-opus-4-6", Rates(5, 6.25, 10, 0.50, 25)),
     ("claude-opus-4-5", Rates(5, 6.25, 10, 0.50, 25)),
@@ -39,6 +43,14 @@ _RATE_CASES = [
 def test_rates_for(model, expected):
     """Each model family resolves to its expected rate table."""
     assert rates_for(model) == expected
+
+
+def test_every_registered_model_resolves_to_its_own_rates():
+    """No entry is shadowed by another prefix (which would silently mis-bill)."""
+    from introspect.pricing import _PRICING  # noqa: PLC0415
+
+    for prefix, rates in _PRICING.items():
+        assert rates_for(prefix) == rates, prefix
 
 
 def test_rates_for_prefix_match_picks_longest():
@@ -131,6 +143,10 @@ _SQL_RATE_PAIRS = [
 ]
 
 _SQL_TEST_MODELS = [
+    "claude-fable-5",
+    "claude-mythos-5",
+    "claude-opus-5",
+    "claude-opus-4-8",
     "claude-opus-4-7",
     "claude-opus-4-1",
     "claude-sonnet-5",
