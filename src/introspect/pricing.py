@@ -1,6 +1,6 @@
 """Hardcoded Anthropic API pricing (USD per 1M tokens).
 
-Snapshot fetched 2026-04-21 from Anthropic's pricing page. No live fetch.
+Snapshot fetched 2026-08-13 from Anthropic's pricing page. No live fetch.
 
 The module exposes both:
 
@@ -13,6 +13,14 @@ The module exposes both:
 Cache rates derive from input * {1.25, 2.0, 0.1} for write-5m / write-1h /
 read; the named-tuple stores the absolute rates so the SQL strings can be
 generated mechanically.
+
+Rates here are standard first-party API list prices; no request-level pricing
+modifiers are applied.  Two such modifiers *are* recorded per message and could
+be modelled later: ``usage.speed == 'fast'`` (fast mode, 2x on Opus 5 / Opus
+4.8) and ``usage.inference_geo == 'us'`` (US-pinned inference, 1.1x).  Both are
+constant across the transcripts observed so far (``standard`` /
+``not_available``), so today's figures are exact; a session that used either
+would be understated by the corresponding multiplier.
 """
 
 from __future__ import annotations
@@ -39,9 +47,11 @@ class Rates(NamedTuple):
 # Each entry maps a model-name *prefix* to its rate table.  Prefix matching
 # (not equality) lets us cover dated suffixes like "claude-haiku-4-5-20251001".
 _PRICING: dict[str, Rates] = {
-    # Fable (current top tier)
+    # Fable / Mythos (current top tier — Mythos 5 shares Fable 5's rates)
     "claude-fable-5": Rates(10, 12.50, 20, 1.00, 50),
+    "claude-mythos-5": Rates(10, 12.50, 20, 1.00, 50),
     # Opus current generation
+    "claude-opus-5": Rates(5, 6.25, 10, 0.50, 25),
     "claude-opus-4-8": Rates(5, 6.25, 10, 0.50, 25),
     "claude-opus-4-7": Rates(5, 6.25, 10, 0.50, 25),
     "claude-opus-4-6": Rates(5, 6.25, 10, 0.50, 25),
@@ -51,8 +61,8 @@ _PRICING: dict[str, Rates] = {
     "claude-opus-4": Rates(15, 18.75, 30, 1.50, 75),
     "claude-opus-3": Rates(15, 18.75, 30, 1.50, 75),
     # Sonnet
-    # Sonnet 5 introductory pricing ($2/$10), active through 2026-08-31;
-    # reverts to standard $3/$15 after — update this entry then.
+    # $2/$10 launched as introductory pricing through 2026-08-31, but is now
+    # the standard price — the scheduled rise to $3/$15 was cancelled.
     "claude-sonnet-5": Rates(2, 2.50, 4, 0.20, 10),
     "claude-sonnet-4-6": Rates(3, 3.75, 6, 0.30, 15),
     "claude-sonnet-4-5": Rates(3, 3.75, 6, 0.30, 15),
