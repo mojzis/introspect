@@ -1,6 +1,6 @@
 [project]
 name = "introspy"
-version = "0.2.6"
+version = "0.2.7"
 description = "Explore and search Claude Code conversation logs"
 requires-python = ">=3.11"
 dependencies = [
