@@ -357,6 +357,41 @@ def test_js_arg_parse_failure_emits_empty_input_and_logs(tmp_path, caplog):
     assert any("parse" in rec.message.lower() for rec in caplog.records)
 
 
+def test_function_call_arg_parse_failure_emits_empty_input_and_logs(tmp_path, caplog):
+    """A malformed function_call.arguments string still emits tool_use, empty input."""
+    session_id = "sess-badfnargs"
+    lines = [
+        codex_record("session_meta", codex_session_meta(session_id)),
+        codex_record("turn_context", codex_turn_context("turn-1")),
+        codex_record(
+            "response_item",
+            {
+                "type": "function_call",
+                "id": "item-bad-fn",
+                "call_id": "call-bad-fn",
+                "name": "shell",
+                "arguments": "{not valid json",
+                "internal_chat_message_metadata_passthrough": {"turn_id": "turn-1"},
+            },
+        ),
+    ]
+    path = write_codex_rollout(tmp_path, session_id, lines)
+
+    with caplog.at_level("WARNING", logger="introspect.codex"):
+        rows = transcode_rollout(path)
+
+    tool_use_blocks = [
+        b
+        for r in rows
+        if r["type"] == "assistant"
+        for b in r["message"]["content"]
+        if b.get("type") == "tool_use"
+    ]
+    assert len(tool_use_blocks) == 1
+    assert tool_use_blocks[0]["input"] == {}
+    assert any("parse" in rec.message.lower() for rec in caplog.records)
+
+
 def test_message_id_non_null_and_unique(tmp_path):
     """Assistant message.id falls back to the synthesized uuid when absent."""
     session_id = "sess-ids"

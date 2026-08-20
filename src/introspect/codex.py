@@ -95,12 +95,19 @@ class _ParseStats:
     def __init__(self, file_path: str) -> None:
         self.file_path = file_path
         self.js_arg_parse_failures = 0
+        self.function_call_arg_parse_failures = 0
 
     def log_summary(self) -> None:
         if self.js_arg_parse_failures:
             log.warning(
                 "codex adapter: %d JS argument parse failure(s) in %s",
                 self.js_arg_parse_failures,
+                self.file_path,
+            )
+        if self.function_call_arg_parse_failures:
+            log.warning(
+                "codex adapter: %d function_call argument parse failure(s) in %s",
+                self.function_call_arg_parse_failures,
                 self.file_path,
             )
 
@@ -520,6 +527,12 @@ def _handle_function_call(
         args = json.loads(raw_args) if isinstance(raw_args, str) else (raw_args or {})
     except (json.JSONDecodeError, ValueError):
         args = {}
+        state.stats.function_call_arg_parse_failures += 1
+        log.warning(
+            "codex adapter: failed to parse function_call arguments for %s in %s",
+            name,
+            state.file_path,
+        )
     if name in _AGENT_FUNCTIONS:
         tool_name, tool_input = "Task", {"description": json.dumps(args)}
     else:
