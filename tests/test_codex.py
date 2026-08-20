@@ -21,7 +21,7 @@ def _exec_call(call_id: str, cmd: str, turn_id: str = "turn-1") -> dict:
             "call_id": call_id,
             "name": "exec",
             "input": (
-                f'const r = await tools.exec_command('
+                f"const r = await tools.exec_command("
                 f'{{"cmd":"{cmd}","workdir":"/tmp"}});'
             ),
             "internal_chat_message_metadata_passthrough": {"turn_id": turn_id},
@@ -79,8 +79,7 @@ def test_pre_0_147_sidecars(tmp_path):
                 "call_id": "call-patch",
                 "name": "exec",
                 "input": (
-                    'const r = await tools.apply_patch('
-                    '{"input":"*** Begin Patch\\n"});'
+                    'const r = await tools.apply_patch({"input":"*** Begin Patch\\n"});'
                 ),
                 "internal_chat_message_metadata_passthrough": {"turn_id": "turn-1"},
             },
@@ -493,6 +492,173 @@ def test_row_shape_matches_raw_messages_columns(tmp_path):
     assert set(rows[0]) == expected_keys
     # message payload must be JSON-serializable (Anthropic-shaped)
     json.dumps(rows[0]["message"])
+
+
+def test_provider_and_harness_read_from_session_meta(tmp_path):
+    """provider/harness come from session_meta, not a blind hardcoded constant."""
+    session_id = "sess-azure"
+    lines = [
+        codex_record(
+            "session_meta",
+            codex_session_meta(session_id, model_provider="azure"),
+        ),
+        codex_record(
+            "event_msg",
+            {"type": "user_message", "message": "hello", "text_elements": []},
+        ),
+    ]
+    path = write_codex_rollout(tmp_path, session_id, lines)
+
+    rows = transcode_rollout(path)
+
+    assert rows
+    assert all(r["provider"] == "azure" for r in rows)
+    assert all(r["harness"] == "codex" for r in rows)
+
+
+def test_read_enrichment_batch_gets_distinct_uuids(tmp_path):
+    """Multiple read enrichments from one source line don't collide on uuid/id."""
+    session_id = "sess-multiread"
+    js = (
+        "const r = await Promise.all(["
+        'tools.exec_command({"cmd":"cat a.py b.py"}),'
+        'tools.exec_command({"cmd":"cat c.py"})'
+        "]);"
+    )
+    lines = [
+        codex_record("session_meta", codex_session_meta(session_id)),
+        codex_record("turn_context", codex_turn_context("turn-1")),
+        codex_record(
+            "response_item",
+            {
+                "type": "custom_tool_call",
+                "id": "item-batch",
+                "call_id": "call-batch",
+                "name": "exec",
+                "input": js,
+                "internal_chat_message_metadata_passthrough": {"turn_id": "turn-1"},
+            },
+        ),
+    ]
+    path = write_codex_rollout(tmp_path, session_id, lines)
+
+    rows = transcode_rollout(path)
+
+    read_calls = [
+        b
+        for r in rows
+        if r["type"] == "assistant"
+        for b in r["message"]["content"]
+        if b.get("type") == "tool_use" and b.get("name") == "Read"
+    ]
+    read_paths = {b["input"]["file_path"] for b in read_calls}
+    assert read_paths == {"a.py", "b.py", "c.py"}
+
+    ids = [r["message"]["id"] for r in rows if r["type"] == "assistant"]
+    assert len(ids) == len(set(ids))
+    uuids = [r["uuid"] for r in rows]
+    assert len(uuids) == len(set(uuids))
+    tool_use_ids = [b["id"] for b in read_calls]
+    assert len(tool_use_ids) == len(set(tool_use_ids))
+
+
+def test_extract_paths_from_cmd_ignores_non_path_tokens(tmp_path):
+    """Pipe/redirect targets and non-path tokens aren't emitted as file_reads."""
+    session_id = "sess-pipe"
+    lines = [
+        codex_record("session_meta", codex_session_meta(session_id)),
+        codex_record("turn_context", codex_turn_context("turn-1")),
+        _exec_call("call-1", "cat foo.py | head -5"),
+        _exec_call("call-2", "head -20 x.txt > out"),
+    ]
+    path = write_codex_rollout(tmp_path, session_id, lines)
+
+    rows = transcode_rollout(path)
+
+    read_paths = {
+        b["input"]["file_path"]
+        for r in rows
+        if r["type"] == "assistant"
+        for b in r["message"]["content"]
+        if b.get("type") == "tool_use" and b.get("name") == "Read"
+    }
+    assert read_paths == {"foo.py", "x.txt"}
+
+
+def test_item_completed_file_change_emits_edit(tmp_path):
+    """0.147+ FileChange item_completed enrichment, alternative to patch_apply_end."""
+    session_id = "sess-filechange"
+    lines = [
+        codex_record("session_meta", codex_session_meta(session_id)),
+        codex_record("turn_context", codex_turn_context("turn-1")),
+        codex_record(
+            "event_msg",
+            {
+                "type": "item_completed",
+                "item": {
+                    "item_type": "FileChange",
+                    "call_id": "call-fc",
+                    "changes": {"src/baz.py": {"type": "update"}},
+                },
+            },
+        ),
+    ]
+    path = write_codex_rollout(tmp_path, session_id, lines)
+
+    rows = transcode_rollout(path)
+
+    edit_calls = [
+        b
+        for r in rows
+        if r["type"] == "assistant"
+        for b in r["message"]["content"]
+        if b.get("type") == "tool_use" and b.get("name") == "Edit"
+    ]
+    assert edit_calls
+    assert edit_calls[0]["input"] == {"file_path": "src/baz.py"}
+
+
+def test_apply_patch_call_site_not_double_counted(tmp_path):
+    """tools.apply_patch call site is suppressed; only the sidecar Edit row appears."""
+    session_id = "sess-nodup"
+    lines = [
+        codex_record("session_meta", codex_session_meta(session_id)),
+        codex_record("turn_context", codex_turn_context("turn-1")),
+        codex_record(
+            "response_item",
+            {
+                "type": "custom_tool_call",
+                "id": "item-patch",
+                "call_id": "call-patch",
+                "name": "exec",
+                "input": (
+                    'const r = await tools.apply_patch({"input":"*** Begin Patch\\n"});'
+                ),
+                "internal_chat_message_metadata_passthrough": {"turn_id": "turn-1"},
+            },
+        ),
+        codex_record(
+            "event_msg",
+            {
+                "type": "patch_apply_end",
+                "call_id": "call-patch",
+                "changes": {"src/foo.py": {"type": "update"}},
+            },
+        ),
+    ]
+    path = write_codex_rollout(tmp_path, session_id, lines)
+
+    rows = transcode_rollout(path)
+
+    tool_names = [
+        b["name"]
+        for r in rows
+        if r["type"] == "assistant"
+        for b in r["message"]["content"]
+        if b.get("type") == "tool_use"
+    ]
+    assert tool_names.count("apply_patch") == 0
+    assert tool_names.count("Edit") == 1
 
 
 def test_command_prefix_synthesized_from_dollar_placeholder(tmp_path):

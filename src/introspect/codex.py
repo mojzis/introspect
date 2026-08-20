@@ -47,26 +47,8 @@ from typing import Any
 
 log = logging.getLogger(__name__)
 
-PROVIDER = "openai"
-HARNESS = "codex"
-
-_RAW_MESSAGES_KEYS = (
-    "file_path",
-    "type",
-    "timestamp",
-    "session_id",
-    "uuid",
-    "parent_uuid",
-    "is_sidechain",
-    "cwd",
-    "version",
-    "entrypoint",
-    "git_branch",
-    "role",
-    "model",
-    "message",
-    "tool_use_result",
-)
+_DEFAULT_PROVIDER = "openai"
+_DEFAULT_HARNESS = "codex"
 
 # Codex function_call names that all mean "talk to a subagent" — aliased to
 # Claude's Task tool so /subagents-adjacent rollups don't crash on them.
@@ -79,37 +61,27 @@ _AGENT_FUNCTIONS = {
     "followup_task",
 }
 
-# tools.X(...) call-site name -> (Claude tool_name, arg-mapping)
+# Matches a `tools.X(` call-site and captures the tool name X; the resulting
+# name is mapped onto a Claude tool_name / tool_input pair by _alias_tool_call.
 _TOOL_ALIAS_CALL_SITE = re.compile(r"tools\.([a-zA-Z0-9_]+)\s*\(")
 
-# Shell-command heuristic for <= 0.145 rollouts (no parsed_cmd). Ordered,
-# first match wins — mirrors trajectory.py's BASH_PATTERNS shape.
+# Shell-command heuristic for <= 0.145 rollouts (no parsed_cmd).
 _SHELL_READ_CMD = re.compile(r"^\s*(sed -n|cat|head|tail)\b")
-_SHELL_SEARCH_CMD = re.compile(r"^\s*(rg|grep)\b")
-_SHELL_LIST_CMD = re.compile(r"^\s*ls\b")
+_SHELL_OPERATOR_SPLIT = re.compile(r"\||&&|;|>>|>")
+_PATH_LIKE = re.compile(r"/|\.[A-Za-z0-9]{1,10}$")
 
 
-class _ParseStats:
-    """Per-file counters, surfaced via WARNING logs, never silent."""
+def _derive_harness(originator: str, source: str) -> str:
+    """Derive a harness label from session_meta's originator/source fields.
 
-    def __init__(self, file_path: str) -> None:
-        self.file_path = file_path
-        self.js_arg_parse_failures = 0
-        self.function_call_arg_parse_failures = 0
-
-    def log_summary(self) -> None:
-        if self.js_arg_parse_failures:
-            log.warning(
-                "codex adapter: %d JS argument parse failure(s) in %s",
-                self.js_arg_parse_failures,
-                self.file_path,
-            )
-        if self.function_call_arg_parse_failures:
-            log.warning(
-                "codex adapter: %d function_call argument parse failure(s) in %s",
-                self.function_call_arg_parse_failures,
-                self.file_path,
-            )
+    Both observed values (``codex-tui`` originator, ``cli`` source) describe
+    the same "codex" harness family; take the leading segment rather than
+    hardcoding a constant so a genuinely different originator isn't mislabeled.
+    """
+    for candidate in (originator, source):
+        if candidate:
+            return candidate.split("-")[0]
+    return _DEFAULT_HARNESS
 
 
 def _balanced_brace_scan(text: str, start: int) -> str | None:
@@ -117,15 +89,30 @@ def _balanced_brace_scan(text: str, start: int) -> str | None:
 
     ``start`` points at the opening paren of a ``tools.name(...)`` call.
     Returns the raw text of the first top-level argument literal, or
-    ``None`` if braces never balance.
+    ``None`` if braces never balance. Quoted spans (honoring backslash
+    escapes) are skipped so brackets inside string literals don't affect
+    depth.
     """
     depth = 0
     i = start
     n = len(text)
     began = False
     arg_start = None
+    quote: str | None = None
     while i < n:
         ch = text[i]
+        if quote:
+            if ch == "\\":
+                i += 2
+                continue
+            if ch == quote:
+                quote = None
+            i += 1
+            continue
+        if ch in "\"'":
+            quote = ch
+            i += 1
+            continue
         if ch in "({[":
             if not began and ch == "(":
                 began = True
@@ -189,69 +176,20 @@ def _alias_tool_call(
         return "TodoWrite", args
     if name.startswith("mcp__"):
         return name, args
-    # apply_patch and any unrecognized tool: pass through with raw args.
+    # any unrecognized tool: pass through with raw args.
     return name, args
 
 
-def _classify_shell_cmd(cmd: str) -> str | None:
-    """Ported shell heuristic for <= 0.145 file-read/search/list classification."""
-    if _SHELL_READ_CMD.match(cmd):
-        return "read"
-    if _SHELL_SEARCH_CMD.match(cmd):
-        return "search"
-    if _SHELL_LIST_CMD.match(cmd):
-        return "list"
-    return None
+def _extract_paths_from_cmd(cmd: str) -> list[str]:
+    """Path-like tokens from a classified read command.
 
-
-def _extract_path_from_cmd(cmd: str) -> str | None:
-    """Best-effort last-token path extraction from a classified shell command."""
-    tokens = [t.strip("'\"") for t in cmd.split() if not t.startswith("-")]
-    return tokens[-1] if len(tokens) > 1 else None
-
-
-def _new_row(  # noqa: PLR0913 -- building the full 15-column row is inherently wide
-    *,
-    row_type: str,
-    role: str,
-    content: list[dict[str, Any]],
-    uuid: str,
-    parent_uuid: str | None,
-    timestamp: str,
-    session_id: str,
-    file_path: str,
-    is_sidechain: bool,
-    cwd: str,
-    version: str,
-    entrypoint: str,
-    git_branch: str,
-    model: str | None,
-    message_id: str | None,
-    tool_use_result: Any = None,
-) -> dict[str, Any]:
-    message: dict[str, Any] = {"role": role, "content": content}
-    if row_type == "assistant":
-        message["id"] = message_id or uuid
-        message["model"] = model
-    return {
-        "file_path": file_path,
-        "type": row_type,
-        "timestamp": timestamp,
-        "session_id": session_id,
-        "uuid": uuid,
-        "parent_uuid": parent_uuid,
-        "is_sidechain": is_sidechain,
-        "cwd": cwd,
-        "version": version,
-        "entrypoint": entrypoint,
-        "git_branch": git_branch,
-        "role": role,
-        "model": model if row_type == "assistant" else None,
-        "message": message,
-        "tool_use_result": tool_use_result,
-        "provider": PROVIDER,
-        "harness": HARNESS,
-    }
+    Splits at the first shell operator (``|``, ``>``, ``>>``, ``&&``, ``;``)
+    since anything after belongs to another command or a write target, then
+    keeps tokens that look like paths (contain ``/`` or a file extension).
+    """
+    segment = _SHELL_OPERATOR_SPLIT.split(cmd, maxsplit=1)[0]
+    tokens = [t.strip("'\"") for t in segment.split() if not t.startswith("-")]
+    return [t for t in tokens[1:] if _PATH_LIKE.search(t)]
 
 
 class _FileState:
@@ -265,22 +203,66 @@ class _FileState:
         self.entrypoint: str = ""
         self.git_branch: str = ""
         self.is_sidechain: bool = False
+        self.provider: str = _DEFAULT_PROVIDER
+        self.harness: str = _DEFAULT_HARNESS
         self.turn_model: dict[str, str] = {}
         self.last_model: str | None = None
         self.prev_uuid: str | None = None
         self.token_buffer: list[dict[str, Any]] = []
         self.last_total_tokens: int | None = None
+        self.read_ordinal: int = 0
+        self.processed_patch_call_ids: set[str] = set()
         self.rows: list[dict[str, Any]] = []
-        self.stats = _ParseStats(file_path)
 
     def next_uuid(self, line_index: int, sub_index: int = 0) -> str:
         base = f"{self.session_id}:{line_index}"
         return base if sub_index == 0 else f"{base}:{sub_index}"
 
+    def next_read_uuid(self, line_index: int) -> str:
+        """Distinct uuid for each read-enrichment row emitted from one line."""
+        self.read_ordinal += 1
+        return f"{self.next_uuid(line_index)}:read{self.read_ordinal}"
+
     def resolve_model(self, turn_id: str | None) -> str | None:
         if turn_id and turn_id in self.turn_model:
             return self.turn_model[turn_id]
         return self.last_model
+
+    def new_row(  # noqa: PLR0913 -- building the full 15-column row is inherently wide
+        self,
+        *,
+        row_type: str,
+        role: str,
+        content: list[dict[str, Any]],
+        uuid: str,
+        timestamp: str,
+        model: str | None = None,
+        message_id: str | None = None,
+        tool_use_result: Any = None,
+    ) -> dict[str, Any]:
+        message: dict[str, Any] = {"role": role, "content": content}
+        if row_type == "assistant":
+            message["id"] = message_id or uuid
+            message["model"] = model
+        return {
+            "file_path": self.file_path,
+            "type": row_type,
+            "timestamp": timestamp,
+            "session_id": self.session_id,
+            "uuid": uuid,
+            "parent_uuid": None,  # overwritten by emit()
+            "is_sidechain": self.is_sidechain,
+            "cwd": self.cwd,
+            "version": self.version,
+            "entrypoint": self.entrypoint,
+            "git_branch": self.git_branch,
+            "role": role,
+            "model": model if row_type == "assistant" else None,
+            "message": message,
+            "tool_use_result": tool_use_result,
+            "provider": self.provider,
+            "harness": self.harness,
+        }
 
     def emit(self, row: dict[str, Any]) -> None:
         row["parent_uuid"] = self.prev_uuid
@@ -314,6 +296,8 @@ def _handle_session_meta(state: _FileState, payload: dict[str, Any]) -> None:
     git = payload.get("git") or {}
     state.git_branch = git.get("branch", "")
     state.is_sidechain = payload.get("thread_source") == "subagent"
+    state.provider = payload.get("model_provider") or _DEFAULT_PROVIDER
+    state.harness = _derive_harness(state.entrypoint, payload.get("source", ""))
 
 
 def _handle_turn_context(state: _FileState, payload: dict[str, Any]) -> None:
@@ -347,25 +331,15 @@ def _handle_message_item(
     state: _FileState, item: dict[str, Any], timestamp: str, line_index: int
 ) -> None:
     role = item.get("role")
-    if role in ("user", "developer"):
-        return  # harness injection / mode boilerplate, not human input
     if role != "assistant":
-        return
+        return  # user/developer messages are harness injection / mode boilerplate
     model = state.resolve_model(_item_turn_id(item))
-    row = _new_row(
+    row = state.new_row(
         row_type="assistant",
         role="assistant",
         content=[{"type": "text", "text": _message_text(item.get("content"))}],
         uuid=state.next_uuid(line_index),
-        parent_uuid=state.prev_uuid,
         timestamp=timestamp,
-        session_id=state.session_id,
-        file_path=state.file_path,
-        is_sidechain=state.is_sidechain,
-        cwd=state.cwd,
-        version=state.version,
-        entrypoint=state.entrypoint,
-        git_branch=state.git_branch,
         model=model,
         message_id=item.get("id"),
     )
@@ -376,20 +350,12 @@ def _handle_reasoning_item(
     state: _FileState, item: dict[str, Any], timestamp: str, line_index: int
 ) -> None:
     model = state.resolve_model(_item_turn_id(item))
-    row = _new_row(
+    row = state.new_row(
         row_type="assistant",
         role="assistant",
         content=[{"type": "thinking", "thinking": ""}],
         uuid=state.next_uuid(line_index),
-        parent_uuid=state.prev_uuid,
         timestamp=timestamp,
-        session_id=state.session_id,
-        file_path=state.file_path,
-        is_sidechain=state.is_sidechain,
-        cwd=state.cwd,
-        version=state.version,
-        entrypoint=state.entrypoint,
-        git_branch=state.git_branch,
         model=model,
         message_id=item.get("id"),
     )
@@ -405,8 +371,11 @@ def _handle_custom_tool_call(
     model = state.resolve_model(_item_turn_id(item))
     blocks = []
     for idx, (name, args) in enumerate(sites):
+        if name == "apply_patch":
+            # patch_apply_end / FileChange sidecar supplies the real Edit/Write
+            # row with the actual file path; don't also emit the raw call.
+            continue
         if args is None:
-            state.stats.js_arg_parse_failures += 1
             log.warning(
                 "codex adapter: failed to parse JS args for tools.%s(...) in %s",
                 name,
@@ -423,20 +392,12 @@ def _handle_custom_tool_call(
         )
     if not blocks:
         return
-    row = _new_row(
+    row = state.new_row(
         row_type="assistant",
         role="assistant",
         content=blocks,
         uuid=state.next_uuid(line_index),
-        parent_uuid=state.prev_uuid,
         timestamp=timestamp,
-        session_id=state.session_id,
-        file_path=state.file_path,
-        is_sidechain=state.is_sidechain,
-        cwd=state.cwd,
-        version=state.version,
-        entrypoint=state.entrypoint,
-        git_branch=state.git_branch,
         model=model,
         message_id=item.get("id"),
     )
@@ -447,40 +408,30 @@ def _handle_custom_tool_call(
         if name != "exec_command" or not args:
             continue
         cmd = str(args.get("cmd", ""))
-        if _classify_shell_cmd(cmd) != "read":
+        if not _SHELL_READ_CMD.match(cmd):
             continue
-        path = _extract_path_from_cmd(cmd)
-        if not path:
-            continue
-        _emit_read_enrichment(state, path, timestamp, line_index)
+        for path in _extract_paths_from_cmd(cmd):
+            _emit_read_enrichment(state, path, timestamp, line_index)
 
 
 def _emit_read_enrichment(
     state: _FileState, path: str, timestamp: str, line_index: int
 ) -> None:
-    row = _new_row(
+    uuid = state.next_read_uuid(line_index)
+    row = state.new_row(
         row_type="assistant",
         role="assistant",
         content=[
             {
                 "type": "tool_use",
-                "id": f"{state.next_uuid(line_index)}-read",
+                "id": f"{uuid}-tool",
                 "name": "Read",
                 "input": {"file_path": path},
             }
         ],
-        uuid=state.next_uuid(line_index, sub_index=1),
-        parent_uuid=state.prev_uuid,
+        uuid=uuid,
         timestamp=timestamp,
-        session_id=state.session_id,
-        file_path=state.file_path,
-        is_sidechain=state.is_sidechain,
-        cwd=state.cwd,
-        version=state.version,
-        entrypoint=state.entrypoint,
-        git_branch=state.git_branch,
         model=state.last_model,
-        message_id=None,
     )
     state.emit(row)
 
@@ -491,7 +442,7 @@ def _handle_custom_tool_call_output(
     call_id = item.get("call_id") or ""
     output = item.get("output")
     text = _message_text(output) if isinstance(output, list) else str(output or "")
-    row = _new_row(
+    row = state.new_row(
         row_type="user",
         role="user",
         content=[
@@ -501,17 +452,7 @@ def _handle_custom_tool_call_output(
             }
         ],
         uuid=state.next_uuid(line_index),
-        parent_uuid=state.prev_uuid,
         timestamp=timestamp,
-        session_id=state.session_id,
-        file_path=state.file_path,
-        is_sidechain=state.is_sidechain,
-        cwd=state.cwd,
-        version=state.version,
-        entrypoint=state.entrypoint,
-        git_branch=state.git_branch,
-        model=None,
-        message_id=None,
         tool_use_result=text,
     )
     state.emit(row)
@@ -527,7 +468,6 @@ def _handle_function_call(
         args = json.loads(raw_args) if isinstance(raw_args, str) else (raw_args or {})
     except (json.JSONDecodeError, ValueError):
         args = {}
-        state.stats.function_call_arg_parse_failures += 1
         log.warning(
             "codex adapter: failed to parse function_call arguments for %s in %s",
             name,
@@ -538,7 +478,7 @@ def _handle_function_call(
     else:
         tool_name, tool_input = name, args
     model = state.resolve_model(_item_turn_id(item))
-    row = _new_row(
+    row = state.new_row(
         row_type="assistant",
         role="assistant",
         content=[
@@ -550,15 +490,7 @@ def _handle_function_call(
             }
         ],
         uuid=state.next_uuid(line_index),
-        parent_uuid=state.prev_uuid,
         timestamp=timestamp,
-        session_id=state.session_id,
-        file_path=state.file_path,
-        is_sidechain=state.is_sidechain,
-        cwd=state.cwd,
-        version=state.version,
-        entrypoint=state.entrypoint,
-        git_branch=state.git_branch,
         model=model,
         message_id=item.get("id"),
     )
@@ -570,22 +502,12 @@ def _handle_function_call_output(
 ) -> None:
     call_id = item.get("call_id") or ""
     output = item.get("output")
-    row = _new_row(
+    row = state.new_row(
         row_type="user",
         role="user",
         content=[{"type": "tool_result", "tool_use_id": call_id}],
         uuid=state.next_uuid(line_index),
-        parent_uuid=state.prev_uuid,
         timestamp=timestamp,
-        session_id=state.session_id,
-        file_path=state.file_path,
-        is_sidechain=state.is_sidechain,
-        cwd=state.cwd,
-        version=state.version,
-        entrypoint=state.entrypoint,
-        git_branch=state.git_branch,
-        model=None,
-        message_id=None,
         tool_use_result=output,
     )
     state.emit(row)
@@ -617,11 +539,17 @@ _PATCH_CHANGE_TOOL = {
 }
 
 
-def _handle_patch_apply_end(
-    state: _FileState, payload: dict[str, Any], timestamp: str, line_index: int
+def _emit_patch_changes(
+    state: _FileState,
+    call_id: str,
+    changes: dict[str, Any],
+    timestamp: str,
+    line_index: int,
 ) -> None:
-    call_id = payload.get("call_id", "")
-    changes = payload.get("changes") or {}
+    if call_id and call_id in state.processed_patch_call_ids:
+        return  # patch_apply_end and FileChange can describe the same patch
+    if call_id:
+        state.processed_patch_call_ids.add(call_id)
     blocks = []
     for idx, (path, change) in enumerate(changes.items()):
         change_type = (
@@ -638,24 +566,23 @@ def _handle_patch_apply_end(
         )
     if not blocks:
         return
-    row = _new_row(
+    row = state.new_row(
         row_type="assistant",
         role="assistant",
         content=blocks,
         uuid=state.next_uuid(line_index),
-        parent_uuid=state.prev_uuid,
         timestamp=timestamp,
-        session_id=state.session_id,
-        file_path=state.file_path,
-        is_sidechain=state.is_sidechain,
-        cwd=state.cwd,
-        version=state.version,
-        entrypoint=state.entrypoint,
-        git_branch=state.git_branch,
         model=state.last_model,
-        message_id=None,
     )
     state.emit(row)
+
+
+def _handle_patch_apply_end(
+    state: _FileState, payload: dict[str, Any], timestamp: str, line_index: int
+) -> None:
+    call_id = payload.get("call_id", "")
+    changes = payload.get("changes") or {}
+    _emit_patch_changes(state, call_id, changes, timestamp, line_index)
 
 
 def _handle_item_completed(
@@ -663,14 +590,18 @@ def _handle_item_completed(
 ) -> None:
     """0.147+ enrichment only: extract typed file-read entries, never duplicate."""
     item = payload.get("item") or {}
-    if item.get("item_type") != "CommandExecution":
-        return
-    for entry in item.get("parsed_cmd") or []:
-        if not isinstance(entry, dict) or entry.get("type") != "read":
-            continue
-        path = entry.get("path")
-        if path:
-            _emit_read_enrichment(state, path, timestamp, line_index)
+    item_type = item.get("item_type")
+    if item_type == "CommandExecution":
+        for entry in item.get("parsed_cmd") or []:
+            if not isinstance(entry, dict) or entry.get("type") != "read":
+                continue
+            path = entry.get("path")
+            if path:
+                _emit_read_enrichment(state, path, timestamp, line_index)
+    elif item_type == "FileChange":
+        call_id = item.get("call_id") or item.get("id") or ""
+        changes = item.get("changes") or {}
+        _emit_patch_changes(state, call_id, changes, timestamp, line_index)
 
 
 def _handle_user_message(
@@ -685,22 +616,12 @@ def _handle_user_message(
             break
     if command:
         text = f"<command-name>{command}</command-name>\n{text}"
-    row = _new_row(
+    row = state.new_row(
         row_type="user",
         role="user",
         content=[{"type": "text", "text": text}],
         uuid=state.next_uuid(line_index),
-        parent_uuid=state.prev_uuid,
         timestamp=timestamp,
-        session_id=state.session_id,
-        file_path=state.file_path,
-        is_sidechain=state.is_sidechain,
-        cwd=state.cwd,
-        version=state.version,
-        entrypoint=state.entrypoint,
-        git_branch=state.git_branch,
-        model=None,
-        message_id=None,
     )
     state.emit(row)
 
@@ -768,5 +689,4 @@ def transcode_rollout(path: str | Path) -> list[dict[str, Any]]:
                 _handle_response_item(state, payload, timestamp, line_index)
             elif record_type == "event_msg":
                 _handle_event_msg(state, payload, timestamp, line_index)
-    state.stats.log_summary()
     return state.rows
