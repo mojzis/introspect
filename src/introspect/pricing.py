@@ -1,6 +1,8 @@
-"""Hardcoded Anthropic API pricing (USD per 1M tokens).
+"""Hardcoded multi-provider API pricing (USD per 1M tokens).
 
-Snapshot fetched 2026-08-13 from Anthropic's pricing page. No live fetch.
+Anthropic snapshot fetched 2026-08-13 from Anthropic's pricing page. OpenAI
+(Codex/`gpt-5.6-*`) snapshot confirmed 2026-08-20 against OpenAI's own pricing
+page. No live fetch for either provider.
 
 The module exposes both:
 
@@ -10,17 +12,26 @@ The module exposes both:
   ``PRICING_OUTPUT_RATE_SQL``) for use in the sessions-list cost subquery,
   where DuckDB needs per-row pricing so mixed-model sessions sort correctly.
 
-Cache rates derive from input * {1.25, 2.0, 0.1} for write-5m / write-1h /
-read; the named-tuple stores the absolute rates so the SQL strings can be
-generated mechanically.
+Cache-write rates derive from input * {1.25, 2.0} for write-5m / write-1h;
+the named-tuple stores the absolute rates so the SQL strings can be
+generated mechanically. Cache-read rates are the provider's published cached
+rate (not derived).
 
 Rates here are standard first-party API list prices; no request-level pricing
-modifiers are applied.  Two such modifiers *are* recorded per message and could
-be modelled later: ``usage.speed == 'fast'`` (fast mode, 2x on Opus 5 / Opus
-4.8) and ``usage.inference_geo == 'us'`` (US-pinned inference, 1.1x).  Both are
-constant across the transcripts observed so far (``standard`` /
+modifiers are applied. Two such modifiers *are* recorded per Anthropic message
+and could be modelled later: ``usage.speed == 'fast'`` (fast mode, 2x on Opus
+5 / Opus 4.8) and ``usage.inference_geo == 'us'`` (US-pinned inference, 1.1x).
+Both are constant across the transcripts observed so far (``standard`` /
 ``not_available``), so today's figures are exact; a session that used either
-would be understated by the corresponding multiplier.
+would be understated by the corresponding multiplier. These modifiers don't
+apply to OpenAI/Codex.
+
+OpenAI also publishes a long-context tier (2x input) above a token threshold,
+but Codex session logs don't record which tier a call landed in, so it can't
+be distinguished here — every `gpt-5.6-*` call is billed at the standard rate.
+Codex cache-write tokens are always reported as zero, so the cache-write
+entries for `gpt-5.6-*` are inert but present so ``_build_case_sql`` emits
+complete branches.
 """
 
 from __future__ import annotations
@@ -71,6 +82,10 @@ _PRICING: dict[str, Rates] = {
     # Haiku
     "claude-haiku-4-5": Rates(1, 1.25, 2, 0.10, 5),
     "claude-haiku-3-5": Rates(0.80, 1, 1.60, 0.08, 4),
+    # OpenAI / Codex
+    "gpt-5.6-sol": Rates(5.00, 6.25, 10.00, 0.50, 30.00),
+    "gpt-5.6-terra": Rates(2.00, 2.50, 4.00, 0.20, 12.00),
+    "gpt-5.6-luna": Rates(0.20, 0.25, 0.40, 0.02, 1.20),
 }
 
 _ZERO_RATES = Rates(0, 0, 0, 0, 0)

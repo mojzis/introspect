@@ -32,6 +32,9 @@ _RATE_CASES = [
     ("claude-sonnet-3-7", Rates(3, 3.75, 6, 0.30, 15)),
     ("claude-haiku-4-5-20251001", Rates(1, 1.25, 2, 0.10, 5)),
     ("claude-haiku-3-5", Rates(0.80, 1, 1.60, 0.08, 4)),
+    ("gpt-5.6-sol", Rates(5.00, 6.25, 10.00, 0.50, 30.00)),
+    ("gpt-5.6-terra", Rates(2.00, 2.50, 4.00, 0.20, 12.00)),
+    ("gpt-5.6-luna", Rates(0.20, 0.25, 0.40, 0.02, 1.20)),
     ("<synthetic>", Rates(0, 0, 0, 0, 0)),
     ("totally-made-up-model", Rates(0, 0, 0, 0, 0)),
     (None, Rates(0, 0, 0, 0, 0)),
@@ -89,6 +92,18 @@ def test_compute_cost_usd_haiku():
     )
     # 2 * 1.0 input + 0.5 * 5.0 output
     assert cost == pytest.approx(2 + 2.5)
+
+
+def test_compute_cost_usd_codex():
+    """Per-1M math works for a Codex/OpenAI model."""
+    cost = compute_cost_usd(
+        model="gpt-5.6-terra",
+        input_tokens=2_000_000,
+        output_tokens=500_000,
+        cache_read_tokens=1_000_000,
+    )
+    # 2 * 2.0 input + 0.5 * 12.0 output + 1 * 0.2 cache_read
+    assert cost == pytest.approx(4 + 6 + 0.2)
 
 
 def test_compute_cost_usd_synthetic_is_zero():
@@ -153,6 +168,9 @@ _SQL_TEST_MODELS = [
     "claude-sonnet-4-6",
     "claude-haiku-4-5-20251001",
     "claude-haiku-3-5",
+    "gpt-5.6-sol",
+    "gpt-5.6-terra",
+    "gpt-5.6-luna",
     "<synthetic>",
     "unknown-model",
 ]
