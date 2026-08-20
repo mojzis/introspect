@@ -32,6 +32,9 @@ from .conftest import (
     write_codex_rollout,
     write_jsonl,
 )
+from .conftest import (
+    write_codex_session as _write_codex_session,
+)
 
 SID = "test-session-001"
 
@@ -794,19 +797,6 @@ def test_empty_stub_raw_messages_columns_match_real_materialization():
         )
 
 
-def _write_codex_session(tmp_dir: Path, session_id: str) -> Path:
-    """Write a minimal single-turn Codex rollout fixture."""
-    lines = [
-        codex_record("session_meta", codex_session_meta(session_id)),
-        codex_record("turn_context", codex_turn_context("turn-1")),
-        codex_record(
-            "event_msg",
-            {"type": "user_message", "message": "please fix", "text_elements": []},
-        ),
-    ]
-    return write_codex_rollout(tmp_dir, session_id, lines)
-
-
 def test_materialize_views_unions_claude_and_codex():
     """``raw_messages``/``session_stats`` union both sources with correct
     ``provider``/``harness`` tagging when ``codex_glob`` is given."""
@@ -839,6 +829,36 @@ def test_materialize_views_unions_claude_and_codex():
             }
             assert session_stats[SID] == ("anthropic", "claude-code")
             assert session_stats["codex-sess-001"] == ("openai", "codex")
+        finally:
+            conn.close()
+
+
+def test_materialize_views_unions_claude_and_codex_with_day_filter():
+    """The day-filtered Codex select (``days > 0``, the production default via
+    ``INTROSPECT_REFRESH_WINDOW``) still unions correctly. The Claude fixture's
+    timestamp is old (outside the window) and gets filtered on both sides,
+    so only the recent Codex session should survive."""
+    with tempfile.TemporaryDirectory() as tmp:
+        tmp_path = Path(tmp)
+        _write_sample_jsonl(tmp_path)
+        _write_codex_session(tmp_path, "codex-sess-001")
+
+        db_path = tmp_path / "test.duckdb"
+        conn = duckdb.connect(str(db_path))
+        try:
+            materialize_views(
+                conn,
+                glob_pattern(tmp_path),
+                days=30,
+                codex_glob=codex_glob_pattern(tmp_path),
+            )
+
+            providers = dict(
+                conn.execute(
+                    "SELECT provider, harness FROM raw_messages GROUP BY 1, 2"
+                ).fetchall()
+            )
+            assert providers == {"openai": "codex"}
         finally:
             conn.close()
 
@@ -948,6 +968,49 @@ def test_materialize_views_skips_unparseable_codex_rollout(caplog):
                 for r in conn.execute("SELECT session_id FROM session_stats").fetchall()
             }
             assert "codex-good-sess" in session_ids
+        finally:
+            conn.close()
+
+
+def test_materialize_views_skips_codex_rollout_with_bad_timestamp(caplog):
+    """A rollout record with an unparseable (empty) ``timestamp`` must not
+    abort the whole DB build — it's caught and skipped like any other
+    unparseable Codex file, leaving Claude data and other Codex files intact."""
+    with tempfile.TemporaryDirectory() as tmp:
+        tmp_path = Path(tmp)
+        _write_sample_jsonl(tmp_path)
+        _write_codex_session(tmp_path, "codex-good-sess")
+
+        bad_lines = [
+            codex_record("session_meta", codex_session_meta("codex-bad-sess")),
+            codex_record("turn_context", codex_turn_context("turn-1")),
+            codex_record(
+                "event_msg",
+                {"type": "user_message", "message": "please fix", "text_elements": []},
+                timestamp="",
+            ),
+        ]
+        write_codex_rollout(tmp_path, "codex-bad-sess", bad_lines)
+
+        db_path = tmp_path / "test.duckdb"
+        conn = duckdb.connect(str(db_path))
+        try:
+            with caplog.at_level("WARNING", logger="introspect.db"):
+                materialize_views(
+                    conn,
+                    glob_pattern(tmp_path),
+                    codex_glob=codex_glob_pattern(tmp_path),
+                )
+
+            assert "unparseable" in caplog.text.lower()
+
+            session_ids = {
+                r[0]
+                for r in conn.execute("SELECT session_id FROM session_stats").fetchall()
+            }
+            assert SID in session_ids
+            assert "codex-good-sess" in session_ids
+            assert "codex-bad-sess" not in session_ids
         finally:
             conn.close()
 

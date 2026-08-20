@@ -247,13 +247,13 @@ def _create_codex_raw_messages_table(
     for path in sorted(glob.glob(codex_glob, recursive=True)):  # noqa: PTH207
         try:
             rows = _transcode_codex_file(path)
+            if rows:
+                conn.execute(insert_sql, [rows])
         except Exception:
             log.warning(
                 "Skipping unparseable Codex rollout file %s", path, exc_info=True
             )
             continue
-        if rows:
-            conn.execute(insert_sql, [rows])
 
 
 # Columns DuckDB sometimes infers as native UUID (when every sampled value
@@ -467,12 +467,7 @@ def _create_empty_raw_tables(conn: duckdb.DuckDBPyConnection) -> None:
     an existing Codex history still surfaces Codex sessions.
     """
     conn.execute(_EMPTY_RAW_DATA_SQL)
-    conn.execute(f"""
-        CREATE TABLE raw_messages AS
-        {_EMPTY_RAW_MESSAGES_SELECT}
-        UNION ALL BY NAME
-        SELECT * FROM codex_raw_messages
-    """)  # noqa: S608
+    conn.execute(_create_raw_messages_union(conn, _EMPTY_RAW_MESSAGES_SELECT))
 
 
 def _record_materialized_at(conn: duckdb.DuckDBPyConnection) -> None:

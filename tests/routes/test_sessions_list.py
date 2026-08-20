@@ -5,29 +5,14 @@ from pathlib import Path
 
 import pytest
 
-from ..conftest import (
-    codex_glob_pattern,
-    codex_record,
-    codex_session_meta,
-    codex_turn_context,
-    write_codex_rollout,
-)
+from ..conftest import codex_glob_pattern, write_codex_session
 from .conftest import SID, _patched_client
 
 CODEX_SID = "codex-sess-provider-001"
 
 
 def _write_codex_session(tmp_dir: Path, session_id: str = CODEX_SID) -> Path:
-    """Write a minimal single-turn Codex rollout fixture."""
-    lines = [
-        codex_record("session_meta", codex_session_meta(session_id)),
-        codex_record("turn_context", codex_turn_context("turn-1")),
-        codex_record(
-            "event_msg",
-            {"type": "user_message", "message": "please fix", "text_elements": []},
-        ),
-    ]
-    return write_codex_rollout(tmp_dir, session_id, lines)
+    return write_codex_session(tmp_dir, session_id)
 
 
 def test_sessions_returns_200():

@@ -2,7 +2,9 @@
 
 import json
 
-from introspect.codex import transcode_rollout
+import pytest
+
+from introspect.codex import _alias_tool_call, transcode_rollout
 
 from .conftest import (
     codex_record,
@@ -10,6 +12,18 @@ from .conftest import (
     codex_turn_context,
     write_codex_rollout,
 )
+
+
+def _tool_uses(rows: list[dict], name: str | None = None) -> list[dict]:
+    """``tool_use`` content blocks across all assistant rows, optionally
+    filtered to one tool ``name``."""
+    return [
+        b
+        for r in rows
+        if r["type"] == "assistant"
+        for b in r["message"]["content"]
+        if b.get("type") == "tool_use" and (name is None or b.get("name") == name)
+    ]
 
 
 def _exec_call(call_id: str, cmd: str, turn_id: str = "turn-1") -> dict:
@@ -129,34 +143,16 @@ def test_pre_0_147_sidecars(tmp_path):
     assert all(set(r) >= {"provider", "harness", "message"} for r in rows)
     assert all(r["provider"] == "openai" and r["harness"] == "codex" for r in rows)
 
-    bash_calls = [
-        b
-        for r in rows
-        if r["type"] == "assistant"
-        for b in r["message"]["content"]
-        if b.get("type") == "tool_use" and b.get("name") == "Bash"
-    ]
+    bash_calls = _tool_uses(rows, "Bash")
     assert bash_calls
     assert bash_calls[0]["input"] == {"command": "cat src/foo.py"}
 
     # heuristic file-read enrichment for `cat` on <= 0.145
-    read_calls = [
-        b
-        for r in rows
-        if r["type"] == "assistant"
-        for b in r["message"]["content"]
-        if b.get("type") == "tool_use" and b.get("name") == "Read"
-    ]
+    read_calls = _tool_uses(rows, "Read")
     assert any(b["input"].get("file_path") == "src/foo.py" for b in read_calls)
 
     # apply_patch sidecar -> Edit alias with real file path
-    edit_calls = [
-        b
-        for r in rows
-        if r["type"] == "assistant"
-        for b in r["message"]["content"]
-        if b.get("type") == "tool_use" and b.get("name") == "Edit"
-    ]
+    edit_calls = _tool_uses(rows, "Edit")
     assert edit_calls
     assert edit_calls[0]["input"] == {"file_path": "src/foo.py"}
 
@@ -209,13 +205,7 @@ def test_0_147_item_completed_enrichment(tmp_path):
 
     rows = transcode_rollout(path)
 
-    read_calls = [
-        b
-        for r in rows
-        if r["type"] == "assistant"
-        for b in r["message"]["content"]
-        if b.get("type") == "tool_use" and b.get("name") == "Read"
-    ]
+    read_calls = _tool_uses(rows, "Read")
     assert any(b["input"].get("file_path") == "src/bar.py" for b in read_calls)
 
 
@@ -248,14 +238,7 @@ def test_promise_all_multi_command_batch(tmp_path):
 
     rows = transcode_rollout(path)
 
-    tool_use_blocks = [
-        b
-        for r in rows
-        if r["type"] == "assistant"
-        for b in r["message"]["content"]
-        if b.get("type") == "tool_use"
-    ]
-    bash_blocks = [b for b in tool_use_blocks if b["name"] == "Bash"]
+    bash_blocks = _tool_uses(rows, "Bash")
     assert len(bash_blocks) == 2
     assert bash_blocks[0]["id"] == "call-batch#0"
     assert bash_blocks[1]["id"] == "call-batch#1"
@@ -343,13 +326,7 @@ def test_js_arg_parse_failure_emits_empty_input_and_logs(tmp_path, caplog):
     with caplog.at_level("WARNING", logger="introspect.codex"):
         rows = transcode_rollout(path)
 
-    tool_use_blocks = [
-        b
-        for r in rows
-        if r["type"] == "assistant"
-        for b in r["message"]["content"]
-        if b.get("type") == "tool_use"
-    ]
+    tool_use_blocks = _tool_uses(rows)
     assert len(tool_use_blocks) == 1
     assert tool_use_blocks[0]["name"] == "Bash"
     assert tool_use_blocks[0]["input"] == {"command": ""}
@@ -379,13 +356,7 @@ def test_function_call_arg_parse_failure_emits_empty_input_and_logs(tmp_path, ca
     with caplog.at_level("WARNING", logger="introspect.codex"):
         rows = transcode_rollout(path)
 
-    tool_use_blocks = [
-        b
-        for r in rows
-        if r["type"] == "assistant"
-        for b in r["message"]["content"]
-        if b.get("type") == "tool_use"
-    ]
+    tool_use_blocks = _tool_uses(rows)
     assert len(tool_use_blocks) == 1
     assert tool_use_blocks[0]["input"] == {}
     assert any("parse" in rec.message.lower() for rec in caplog.records)
@@ -544,13 +515,7 @@ def test_read_enrichment_batch_gets_distinct_uuids(tmp_path):
 
     rows = transcode_rollout(path)
 
-    read_calls = [
-        b
-        for r in rows
-        if r["type"] == "assistant"
-        for b in r["message"]["content"]
-        if b.get("type") == "tool_use" and b.get("name") == "Read"
-    ]
+    read_calls = _tool_uses(rows, "Read")
     read_paths = {b["input"]["file_path"] for b in read_calls}
     assert read_paths == {"a.py", "b.py", "c.py"}
 
@@ -575,13 +540,7 @@ def test_extract_paths_from_cmd_ignores_non_path_tokens(tmp_path):
 
     rows = transcode_rollout(path)
 
-    read_paths = {
-        b["input"]["file_path"]
-        for r in rows
-        if r["type"] == "assistant"
-        for b in r["message"]["content"]
-        if b.get("type") == "tool_use" and b.get("name") == "Read"
-    }
+    read_paths = {b["input"]["file_path"] for b in _tool_uses(rows, "Read")}
     assert read_paths == {"foo.py", "x.txt"}
 
 
@@ -607,13 +566,7 @@ def test_item_completed_file_change_emits_edit(tmp_path):
 
     rows = transcode_rollout(path)
 
-    edit_calls = [
-        b
-        for r in rows
-        if r["type"] == "assistant"
-        for b in r["message"]["content"]
-        if b.get("type") == "tool_use" and b.get("name") == "Edit"
-    ]
+    edit_calls = _tool_uses(rows, "Edit")
     assert edit_calls
     assert edit_calls[0]["input"] == {"file_path": "src/baz.py"}
 
@@ -650,13 +603,7 @@ def test_apply_patch_call_site_not_double_counted(tmp_path):
 
     rows = transcode_rollout(path)
 
-    tool_names = [
-        b["name"]
-        for r in rows
-        if r["type"] == "assistant"
-        for b in r["message"]["content"]
-        if b.get("type") == "tool_use"
-    ]
+    tool_names = [b["name"] for b in _tool_uses(rows)]
     assert tool_names.count("apply_patch") == 0
     assert tool_names.count("Edit") == 1
 
@@ -681,3 +628,142 @@ def test_command_prefix_synthesized_from_dollar_placeholder(tmp_path):
     assert len(rows) == 1
     text = rows[0]["message"]["content"][0]["text"]
     assert text.startswith("<command-name>/jira-create</command-name>")
+
+
+@pytest.mark.parametrize(
+    ("name", "args", "expected_tool_name", "expected_tool_input"),
+    [
+        ("exec_command", {"cmd": "ls -la"}, "Bash", {"command": "ls -la"}),
+        ("web__run", {"query": "duckdb json"}, "WebSearch", {"query": "duckdb json"}),
+        ("web__run", {"q": "duckdb json"}, "WebSearch", {"query": "duckdb json"}),
+        (
+            "view_image",
+            {"path": "diagram.png"},
+            "Read",
+            {"file_path": "diagram.png"},
+        ),
+        (
+            "view_image",
+            {"image_path": "diagram.png"},
+            "Read",
+            {"file_path": "diagram.png"},
+        ),
+        (
+            "update_plan",
+            {"plan": [{"step": "1", "status": "in_progress"}]},
+            "TodoWrite",
+            {"plan": [{"step": "1", "status": "in_progress"}]},
+        ),
+        (
+            "mcp__github__search",
+            {"q": "bug"},
+            "mcp__github__search",
+            {"q": "bug"},
+        ),
+        ("wait", {"seconds": 5}, "wait", {"seconds": 5}),
+    ],
+)
+def test_alias_tool_call(name, args, expected_tool_name, expected_tool_input):
+    """Every Codex ``tools.X`` call site maps to the documented Claude
+    tool_name/tool_input pair; unrecognized names (e.g. ``wait``, observed in
+    the corpus) fall through unchanged rather than crashing."""
+    tool_name, tool_input = _alias_tool_call(name, args)
+    assert (tool_name, tool_input) == (expected_tool_name, expected_tool_input)
+
+
+def test_reasoning_and_function_call_pair(tmp_path):
+    """A ``reasoning`` item plus a ``function_call``/``function_call_output``
+    pair both round-trip: reasoning becomes a thinking block, the agent
+    function call is aliased to Task, and its output attaches as a tool_result."""
+    session_id = "sess-reasoning"
+    lines = [
+        codex_record("session_meta", codex_session_meta(session_id)),
+        codex_record("turn_context", codex_turn_context("turn-1")),
+        codex_record(
+            "response_item",
+            {
+                "type": "reasoning",
+                "id": "item-reasoning",
+                "internal_chat_message_metadata_passthrough": {"turn_id": "turn-1"},
+            },
+        ),
+        codex_record(
+            "response_item",
+            {
+                "type": "function_call",
+                "id": "item-fn",
+                "call_id": "call-fn",
+                "name": "spawn_agent",
+                "arguments": json.dumps({"task": "review the diff"}),
+                "internal_chat_message_metadata_passthrough": {"turn_id": "turn-1"},
+            },
+        ),
+        codex_record(
+            "response_item",
+            {
+                "type": "function_call_output",
+                "call_id": "call-fn",
+                "output": "agent finished",
+            },
+        ),
+    ]
+    path = write_codex_rollout(tmp_path, session_id, lines)
+
+    rows = transcode_rollout(path)
+
+    thinking_blocks = [
+        b
+        for r in rows
+        if r["type"] == "assistant"
+        for b in r["message"]["content"]
+        if b.get("type") == "thinking"
+    ]
+    assert thinking_blocks
+
+    task_calls = _tool_uses(rows, "Task")
+    assert len(task_calls) == 1
+    assert task_calls[0]["id"] == "call-fn"
+
+    tool_results = [
+        b
+        for r in rows
+        if r["type"] == "user"
+        for b in r["message"]["content"]
+        if b.get("type") == "tool_result"
+    ]
+    assert any(b["tool_use_id"] == "call-fn" for b in tool_results)
+
+
+def test_patch_apply_end_and_file_change_same_call_id_not_double_counted(tmp_path):
+    """``patch_apply_end`` and ``item_completed.FileChange`` describing the
+    same ``call_id`` must dedupe to exactly one Edit block, not two."""
+    session_id = "sess-patch-dedup"
+    lines = [
+        codex_record("session_meta", codex_session_meta(session_id)),
+        codex_record("turn_context", codex_turn_context("turn-1")),
+        codex_record(
+            "event_msg",
+            {
+                "type": "patch_apply_end",
+                "call_id": "call-shared",
+                "changes": {"src/foo.py": {"type": "update"}},
+            },
+        ),
+        codex_record(
+            "event_msg",
+            {
+                "type": "item_completed",
+                "item": {
+                    "item_type": "FileChange",
+                    "call_id": "call-shared",
+                    "changes": {"src/foo.py": {"type": "update"}},
+                },
+            },
+        ),
+    ]
+    path = write_codex_rollout(tmp_path, session_id, lines)
+
+    rows = transcode_rollout(path)
+
+    edit_calls = _tool_uses(rows, "Edit")
+    assert len(edit_calls) == 1
