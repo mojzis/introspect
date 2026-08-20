@@ -263,7 +263,6 @@ class _FileState:
         self.prev_uuid: str | None = None
         self.token_buffer: list[dict[str, Any]] = []
         self.last_total_tokens: int | None = None
-        self.pending_call_ids: dict[str, str] = {}  # call_id -> synthesized uuid base
         self.rows: list[dict[str, Any]] = []
         self.stats = _ParseStats(file_path)
 
@@ -435,7 +434,6 @@ def _handle_custom_tool_call(
         message_id=item.get("id"),
     )
     state.emit(row)
-    state.pending_call_ids[call_id] = row["uuid"]
 
     # <= 0.145 file-read classification: heuristic over the exec_command's cmd.
     for name, args in sites:
