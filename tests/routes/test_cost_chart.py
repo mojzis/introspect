@@ -107,6 +107,7 @@ def test_session_cost_chart_marker_in_customdata():
                 {
                     "INTROSPECT_DB_PATH": str(db_path),
                     "INTROSPECT_JSONL_GLOB": glob_pattern(tmp),
+                    "INTROSPECT_CODEX_GLOB": str(tmp / "codex" / "**" / "*.jsonl"),
                     "INTROSPECT_DAYS": "0",
                 },
             ),
@@ -226,6 +227,7 @@ def test_session_cost_tab_shows_invocations_view_with_subagent_type():
                 {
                     "INTROSPECT_DB_PATH": str(db_path),
                     "INTROSPECT_JSONL_GLOB": glob_pattern(tmp),
+                    "INTROSPECT_CODEX_GLOB": str(tmp / "codex" / "**" / "*.jsonl"),
                     "INTROSPECT_DAYS": "0",
                 },
             ),
@@ -314,6 +316,7 @@ def test_inflection_detection_empty_on_short_session():
                 {
                     "INTROSPECT_DB_PATH": str(db_path),
                     "INTROSPECT_JSONL_GLOB": glob_pattern(tmp),
+                    "INTROSPECT_CODEX_GLOB": str(tmp / "codex" / "**" / "*.jsonl"),
                     "INTROSPECT_DAYS": "0",
                 },
             ),

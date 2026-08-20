@@ -16,6 +16,7 @@ from fastapi.staticfiles import StaticFiles
 
 from introspect.api.routes import router
 from introspect.db import (
+    DEFAULT_CODEX_GLOB,
     DEFAULT_DB_PATH,
     DEFAULT_JSONL_GLOB,
     connect_writable,
@@ -58,6 +59,7 @@ async def lifespan(app: FastAPI):
     """Materialize views on startup, then start MCP session manager."""
     db_path = Path(os.environ.get("INTROSPECT_DB_PATH", str(DEFAULT_DB_PATH)))
     jsonl_glob = os.environ.get("INTROSPECT_JSONL_GLOB", DEFAULT_JSONL_GLOB)
+    codex_glob = os.environ.get("INTROSPECT_CODEX_GLOB", DEFAULT_CODEX_GLOB)
     interval = float(os.environ.get("INTROSPECT_REFRESH_INTERVAL_SECONDS", "600"))
     refresh_window = os.environ.get("INTROSPECT_REFRESH_WINDOW", DEFAULT_WINDOW)
     if refresh_window not in VALID_WINDOWS:
@@ -77,7 +79,13 @@ async def lifespan(app: FastAPI):
     conn = connect_writable(db_path)
     resolve_projects = os.environ.get("INTROSPECT_RESOLVE_PROJECTS", "1") != "0"
     try:
-        materialize_views(conn, jsonl_glob, days, resolve_projects=resolve_projects)
+        materialize_views(
+            conn,
+            jsonl_glob,
+            days,
+            resolve_projects=resolve_projects,
+            codex_glob=codex_glob,
+        )
         build_search_corpus(conn)
     finally:
         conn.close()
@@ -109,6 +117,7 @@ async def lifespan(app: FastAPI):
                 resolve_projects,
                 interval,
                 trigger=app.state.refresh_trigger,
+                codex_glob=codex_glob,
             )
         )
 

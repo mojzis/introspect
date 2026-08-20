@@ -12,6 +12,7 @@ from rich.console import Console
 from rich.table import Table
 
 from introspect.db import (
+    DEFAULT_CODEX_GLOB,
     DEFAULT_DB_PATH,
     DEFAULT_JSONL_GLOB,
     DatabaseLockedError,
@@ -86,12 +87,14 @@ def _db(
     if jsonl_glob is None:
         jsonl_glob = DEFAULT_JSONL_GLOB
     try:
-        materialized_at = ensure_materialized(db_path, jsonl_glob)
+        materialized_at = ensure_materialized(
+            db_path, jsonl_glob, codex_glob=DEFAULT_CODEX_GLOB
+        )
     except DatabaseLockedError as e:
         _print_lock_error(e.db_path)
         raise typer.Exit(code=1) from None
     _print_materialized_banner(materialized_at)
-    return get_read_connection(db_path, jsonl_glob)
+    return get_read_connection(db_path, jsonl_glob, DEFAULT_CODEX_GLOB)
 
 
 def _print_materialized_banner(materialized_at: datetime | None) -> None:
@@ -421,6 +424,7 @@ def materialize(
     """Materialize data into DuckDB for fast CLI and MCP queries."""
     db_path = DEFAULT_DB_PATH
     jsonl_glob = DEFAULT_JSONL_GLOB
+    codex_glob = DEFAULT_CODEX_GLOB
     db_path.parent.mkdir(parents=True, exist_ok=True)
     try:
         conn = connect_writable(db_path)
@@ -433,7 +437,11 @@ def materialize(
         else:
             console.print("[dim]Materializing all data (no day limit)...[/dim]")
         materialize_views(
-            conn, jsonl_glob, days, resolve_projects=not no_resolve_projects
+            conn,
+            jsonl_glob,
+            days,
+            resolve_projects=not no_resolve_projects,
+            codex_glob=codex_glob,
         )
         build_search_corpus(conn)
         row = conn.execute("SELECT COUNT(*) FROM raw_messages").fetchone()
@@ -948,8 +956,9 @@ def refresh():
     """Rebuild the search corpus table and FTS index."""
     db_path = DEFAULT_DB_PATH
     jsonl_glob = DEFAULT_JSONL_GLOB
+    codex_glob = DEFAULT_CODEX_GLOB
     try:
-        ensure_materialized(db_path, jsonl_glob)
+        ensure_materialized(db_path, jsonl_glob, codex_glob=codex_glob)
         conn = connect_writable(db_path)
     except DatabaseLockedError as e:
         _print_lock_error(e.db_path)

@@ -142,6 +142,7 @@ def test_lifespan_rejects_invalid_refresh_window_env(caplog):
                 {
                     "INTROSPECT_DB_PATH": str(db_path),
                     "INTROSPECT_JSONL_GLOB": glob_pattern(tmp),
+                    "INTROSPECT_CODEX_GLOB": str(tmp / "codex" / "**" / "*.jsonl"),
                     "INTROSPECT_REFRESH_WINDOW": "garbage",
                     "INTROSPECT_REFRESH_INTERVAL_SECONDS": "0",
                 },

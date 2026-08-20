@@ -131,13 +131,16 @@ async def wait_for_refresh(
     return RefreshResult(RefreshOutcome.UNCHANGED, last_after)
 
 
-def newest_mtime(jsonl_glob: str) -> float:
-    """Return the newest mtime among files matching ``jsonl_glob``.
+def newest_mtime(jsonl_glob: str, codex_glob: str | None = None) -> float:
+    """Return the newest mtime among files matching ``jsonl_glob`` (and,
+    when given, ``codex_glob``), so the caller can watch both trees.
 
     Returns ``0.0`` if nothing matches. Defensively skips files that disappear
     between ``glob`` and ``os.path.getmtime``.
     """
     paths = glob.glob(jsonl_glob, recursive=True)  # noqa: PTH207
+    if codex_glob is not None:
+        paths += glob.glob(codex_glob, recursive=True)  # noqa: PTH207
     latest = 0.0
     for p in paths:
         try:
@@ -153,13 +156,20 @@ def _rebuild_sidecar(
     jsonl_glob: str,
     days: int,
     resolve_projects: bool,
+    codex_glob: str | None = None,
 ) -> None:
     """Rebuild the materialized DB into a fresh sidecar file."""
     with contextlib.suppress(FileNotFoundError):
         sidecar.unlink()
     conn = duckdb.connect(str(sidecar))
     try:
-        materialize_views(conn, jsonl_glob, days, resolve_projects=resolve_projects)
+        materialize_views(
+            conn,
+            jsonl_glob,
+            days,
+            resolve_projects=resolve_projects,
+            codex_glob=codex_glob,
+        )
         build_search_corpus(conn)
     finally:
         conn.close()
@@ -208,6 +218,7 @@ async def refresh_loop(  # noqa: PLR0913
     resolve_projects: bool,
     interval_seconds: float,
     trigger: asyncio.Event,
+    codex_glob: str | None = None,
 ) -> None:
     """Poll JSONL mtime and rebuild the materialized DB when files change.
 
@@ -219,15 +230,18 @@ async def refresh_loop(  # noqa: PLR0913
     The ``days`` parameter is the initial default; each rebuild re-reads
     ``app.state.refresh_window`` so the picker's choice is honoured by both
     manual refreshes and idle ticks.
+
+    ``codex_glob``, when given, is watched alongside ``jsonl_glob`` so new
+    Codex sessions trigger a rebuild too.
     """
     sidecar = db_path.with_name(db_path.name + ".next")
-    last_mtime = newest_mtime(jsonl_glob)
+    last_mtime = newest_mtime(jsonl_glob, codex_glob)
     while True:
         try:
             with contextlib.suppress(TimeoutError):
                 await asyncio.wait_for(trigger.wait(), timeout=interval_seconds)
             trigger.clear()
-            current = newest_mtime(jsonl_glob)
+            current = newest_mtime(jsonl_glob, codex_glob)
             current_days = _compute_days(app.state, days)
             # Skip when nothing changed AND the window matches the last build.
             # A manual wake with a new window forces a rebuild even on an
@@ -254,6 +268,7 @@ async def refresh_loop(  # noqa: PLR0913
                     jsonl_glob,
                     current_days,
                     resolve_projects,
+                    codex_glob,
                 )
                 await asyncio.to_thread(_swap_in, db_path, sidecar)
                 # Record the post-swap window first so a freak exception on

@@ -58,6 +58,7 @@ def test_session_cost_dedup():
                 {
                     "INTROSPECT_DB_PATH": str(db_path),
                     "INTROSPECT_JSONL_GLOB": glob_pattern(tmp),
+                    "INTROSPECT_CODEX_GLOB": str(tmp / "codex" / "**" / "*.jsonl"),
                     "INTROSPECT_DAYS": "0",
                 },
             ),
@@ -148,6 +149,7 @@ def test_session_cost_bloat_attribution():
                 {
                     "INTROSPECT_DB_PATH": str(db_path),
                     "INTROSPECT_JSONL_GLOB": glob_pattern(tmp),
+                    "INTROSPECT_CODEX_GLOB": str(tmp / "codex" / "**" / "*.jsonl"),
                     "INTROSPECT_DAYS": "0",
                 },
             ),
@@ -180,6 +182,7 @@ def test_session_cost_subagent_attribution():
                 {
                     "INTROSPECT_DB_PATH": str(db_path),
                     "INTROSPECT_JSONL_GLOB": glob_pattern(tmp),
+                    "INTROSPECT_CODEX_GLOB": str(tmp / "codex" / "**" / "*.jsonl"),
                     "INTROSPECT_DAYS": "0",
                 },
             ),
@@ -318,6 +321,7 @@ def test_session_cost_chart_serializes_uuid_columns():
                 {
                     "INTROSPECT_DB_PATH": str(db_path),
                     "INTROSPECT_JSONL_GLOB": glob_pattern(tmp),
+                    "INTROSPECT_CODEX_GLOB": str(tmp / "codex" / "**" / "*.jsonl"),
                     "INTROSPECT_DAYS": "0",
                 },
             ),

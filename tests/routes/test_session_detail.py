@@ -42,6 +42,7 @@ def _cache_loss_client(tmp_path: Path, *, gap_minutes: int = 6):
             {
                 "INTROSPECT_DB_PATH": str(db_path),
                 "INTROSPECT_JSONL_GLOB": glob_pattern(tmp_path),
+                "INTROSPECT_CODEX_GLOB": str(tmp_path / "codex" / "**" / "*.jsonl"),
                 "INTROSPECT_DAYS": "0",
             },
         ),
@@ -125,6 +126,7 @@ def _tweak_client(tmp_path: Path):
             {
                 "INTROSPECT_DB_PATH": str(db_path),
                 "INTROSPECT_JSONL_GLOB": glob_pattern(tmp_path),
+                "INTROSPECT_CODEX_GLOB": str(tmp_path / "codex" / "**" / "*.jsonl"),
                 "INTROSPECT_DAYS": "0",
             },
         ),

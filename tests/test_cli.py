@@ -59,6 +59,12 @@ def test_cli_command_works_on_empty_db(monkeypatch, command):
         # Glob points at a non-existent directory; nothing matches.
         monkeypatch.setattr("introspect.cli.DEFAULT_DB_PATH", db_path)
         monkeypatch.setattr("introspect.cli.DEFAULT_JSONL_GLOB", glob_pat)
+        # Point Codex at a non-existent dir too, so tests don't load real
+        # ~/.codex/sessions data from the machine running them.
+        monkeypatch.setattr(
+            "introspect.cli.DEFAULT_CODEX_GLOB",
+            str(Path(tmp) / "codex" / "**" / "*.jsonl"),
+        )
 
         result = runner.invoke(app, list(command))
 
@@ -93,6 +99,12 @@ def test_cli_reuses_existing_materialized_db(monkeypatch):
         glob_pat = str(Path(tmp) / "claude" / "**" / "*.jsonl")
         monkeypatch.setattr("introspect.cli.DEFAULT_DB_PATH", db_path)
         monkeypatch.setattr("introspect.cli.DEFAULT_JSONL_GLOB", glob_pat)
+        # Point Codex at a non-existent dir too, so tests don't load real
+        # ~/.codex/sessions data from the machine running them.
+        monkeypatch.setattr(
+            "introspect.cli.DEFAULT_CODEX_GLOB",
+            str(Path(tmp) / "codex" / "**" / "*.jsonl"),
+        )
 
         first = runner.invoke(app, ["sessions"])
         assert first.exit_code == 0, first.output
@@ -131,6 +143,12 @@ def test_nag_prints_to_stderr_not_stdout_when_behind(monkeypatch):
         glob_pat = str(Path(tmp) / "claude" / "**" / "*.jsonl")
         monkeypatch.setattr("introspect.cli.DEFAULT_DB_PATH", db_path)
         monkeypatch.setattr("introspect.cli.DEFAULT_JSONL_GLOB", glob_pat)
+        # Point Codex at a non-existent dir too, so tests don't load real
+        # ~/.codex/sessions data from the machine running them.
+        monkeypatch.setattr(
+            "introspect.cli.DEFAULT_CODEX_GLOB",
+            str(Path(tmp) / "codex" / "**" / "*.jsonl"),
+        )
         _stub_behind_cache(monkeypatch, tmp)
 
         result = runner.invoke(app, ["stats"])
@@ -147,6 +165,12 @@ def test_no_nag_when_up_to_date_cli(monkeypatch):
         glob_pat = str(Path(tmp) / "claude" / "**" / "*.jsonl")
         monkeypatch.setattr("introspect.cli.DEFAULT_DB_PATH", db_path)
         monkeypatch.setattr("introspect.cli.DEFAULT_JSONL_GLOB", glob_pat)
+        # Point Codex at a non-existent dir too, so tests don't load real
+        # ~/.codex/sessions data from the machine running them.
+        monkeypatch.setattr(
+            "introspect.cli.DEFAULT_CODEX_GLOB",
+            str(Path(tmp) / "codex" / "**" / "*.jsonl"),
+        )
         _stub_behind_cache(monkeypatch, tmp, latest="0.0.1", current="0.0.1")
 
         result = runner.invoke(app, ["stats"])
@@ -162,6 +186,12 @@ def test_opt_out_env_silences_nag_cli(monkeypatch):
         glob_pat = str(Path(tmp) / "claude" / "**" / "*.jsonl")
         monkeypatch.setattr("introspect.cli.DEFAULT_DB_PATH", db_path)
         monkeypatch.setattr("introspect.cli.DEFAULT_JSONL_GLOB", glob_pat)
+        # Point Codex at a non-existent dir too, so tests don't load real
+        # ~/.codex/sessions data from the machine running them.
+        monkeypatch.setattr(
+            "introspect.cli.DEFAULT_CODEX_GLOB",
+            str(Path(tmp) / "codex" / "**" / "*.jsonl"),
+        )
         _stub_behind_cache(monkeypatch, tmp)
         monkeypatch.setenv("INTROSPECT_VERSION_CHECK", "off")
 

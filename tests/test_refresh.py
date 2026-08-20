@@ -18,9 +18,11 @@ from introspect.db import materialize_views
 from introspect.refresh import newest_mtime, refresh_loop
 from introspect.search import build_search_corpus
 from tests.conftest import (
+    codex_glob_pattern,
     glob_pattern,
     make_assistant_message,
     make_user_message,
+    write_codex_rollout,
     write_jsonl,
 )
 
@@ -87,6 +89,26 @@ def test_newest_mtime_tracks_updates(tmp_path: Path) -> None:
     os.utime(jsonl, (new_ts, new_ts))
     m2 = newest_mtime(pattern)
     assert m2 > m1
+
+
+def test_newest_mtime_watches_codex_glob_too(tmp_path: Path) -> None:
+    """A Codex-only mtime bump must be picked up when ``codex_glob`` is given."""
+    write_jsonl(tmp_path, "sess-1", [])
+    jsonl_glob = glob_pattern(tmp_path)
+    codex_glob = codex_glob_pattern(tmp_path)
+
+    # No Codex files yet — watching both globs matches the Claude-only mtime.
+    baseline = newest_mtime(jsonl_glob, codex_glob)
+    assert baseline == newest_mtime(jsonl_glob)
+
+    time.sleep(0.01)
+    codex_path = write_codex_rollout(tmp_path, "codex-1", [])
+    new_ts = baseline + 1.0
+    os.utime(codex_path, (new_ts, new_ts))
+
+    assert newest_mtime(jsonl_glob, codex_glob) > baseline
+    # Without codex_glob, the new Codex file is invisible.
+    assert newest_mtime(jsonl_glob) == baseline
 
 
 def test_refresh_short_circuits_when_unchanged(
@@ -201,7 +223,7 @@ def test_refresh_survives_rebuild_error(
     # Make newest_mtime strictly increasing so the loop sees "changed" on each tick.
     counter = {"n": 0}
 
-    def fake_newest_mtime(_glob: str) -> float:
+    def fake_newest_mtime(_glob: str, _codex_glob: str | None = None) -> float:
         counter["n"] += 1
         return float(counter["n"])
 
@@ -378,7 +400,7 @@ def test_refresh_clears_in_progress_on_error(
     # Force every tick to look like a change.
     counter = {"n": 0}
 
-    def fake_newest_mtime(_glob: str) -> float:
+    def fake_newest_mtime(_glob: str, _codex_glob: str | None = None) -> float:
         counter["n"] += 1
         return float(counter["n"])
 
