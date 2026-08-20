@@ -139,36 +139,48 @@ _RAW_MESSAGES_COLUMNS = """
 """
 
 
+# Single ordered source of truth for the ``raw_messages`` column set, keyed
+# by name: (Codex struct type, final ``raw_messages`` SQL type). Everything
+# below that needs the column list — the Codex struct binding, the
+# ``$1``-bound select, and the empty-stub select — is generated from this so
+# a future column addition lands in one place. Union with the Claude side
+# (``_RAW_MESSAGES_COLUMNS`` above) happens ``BY NAME``, so its order need
+# not match this one — only the names.
+_RAW_MESSAGE_COLUMNS: tuple[tuple[str, str, str], ...] = (
+    ("file_path", "VARCHAR", "VARCHAR"),
+    ("type", "VARCHAR", "VARCHAR"),
+    ("timestamp", "VARCHAR", "TIMESTAMP"),
+    ("session_id", "VARCHAR", "VARCHAR"),
+    ("uuid", "VARCHAR", "VARCHAR"),
+    ("parent_uuid", "VARCHAR", "VARCHAR"),
+    ("is_sidechain", "BOOLEAN", "BOOLEAN"),
+    ("cwd", "VARCHAR", "VARCHAR"),
+    ("version", "VARCHAR", "VARCHAR"),
+    ("entrypoint", "VARCHAR", "VARCHAR"),
+    ("git_branch", "VARCHAR", "VARCHAR"),
+    ("role", "VARCHAR", "VARCHAR"),
+    ("model", "VARCHAR", "VARCHAR"),
+    ("message", "VARCHAR", "JSON"),
+    ("tool_use_result", "VARCHAR", "JSON"),
+    ("provider", "VARCHAR", "VARCHAR"),
+    ("harness", "VARCHAR", "VARCHAR"),
+)
+
+_RAW_MESSAGES_COLUMN_NAMES = tuple(name for name, _, _ in _RAW_MESSAGE_COLUMNS)
+
 # Struct type for binding Python-side Codex rows (see ``codex.transcode_rollout``)
-# as a DuckDB relation via ``unnest($1::..., recursive := true)``. Column order
-# matches ``_RAW_MESSAGES_COLUMNS`` plus ``provider``/``harness``.
-_CODEX_ROW_STRUCT = """STRUCT(
-    file_path VARCHAR,
-    type VARCHAR,
-    timestamp VARCHAR,
-    session_id VARCHAR,
-    uuid VARCHAR,
-    parent_uuid VARCHAR,
-    is_sidechain BOOLEAN,
-    cwd VARCHAR,
-    version VARCHAR,
-    entrypoint VARCHAR,
-    git_branch VARCHAR,
-    role VARCHAR,
-    model VARCHAR,
-    message VARCHAR,
-    tool_use_result VARCHAR,
-    provider VARCHAR,
-    harness VARCHAR
-)[]"""
+# as a DuckDB relation via ``unnest($1::..., recursive := true)``.
+_CODEX_ROW_STRUCT = (
+    "STRUCT(\n    "
+    + ",\n    ".join(
+        f"{name} {struct_type}" for name, struct_type, _ in _RAW_MESSAGE_COLUMNS
+    )
+    + "\n)[]"
+)
 
 
-def _load_codex_rows(codex_glob: str) -> list[dict[str, Any]]:
-    """Transcode every Codex rollout file matching ``codex_glob``.
-
-    A missing ``~/.codex/sessions`` tree or a glob matching nothing yields an
-    empty list — never raises. A single unparseable file is skipped (logged
-    at WARNING) rather than failing the whole load.
+def _transcode_codex_file(path: str) -> list[dict[str, Any]]:
+    """Transcode one Codex rollout file into ``raw_messages``-shaped rows.
 
     ``message``/``tool_use_result`` are JSON-encoded here (rather than left
     as native Python objects) because ``tool_use_result`` can be a bare
@@ -178,61 +190,71 @@ def _load_codex_rows(codex_glob: str) -> list[dict[str, Any]]:
     for the ``::JSON`` cast in ``_codex_select_sql``. ``None`` stays ``None``
     so ``tool_use_result IS NULL`` still behaves like the Claude side.
     """
-    rows: list[dict[str, Any]] = []
-    for path in sorted(glob.glob(codex_glob, recursive=True)):  # noqa: PTH207
-        try:
-            file_rows = transcode_rollout(path)
-        except Exception:
-            log.warning(
-                "Skipping unparseable Codex rollout file %s", path, exc_info=True
-            )
-            continue
-        for row in file_rows:
-            row = dict(row)  # noqa: PLW2901
-            row["message"] = json.dumps(row["message"])
-            tool_use_result = row.get("tool_use_result")
-            row["tool_use_result"] = (
-                None if tool_use_result is None else json.dumps(tool_use_result)
-            )
-            rows.append(row)
+    rows = transcode_rollout(path)
+    for row in rows:
+        row["message"] = json.dumps(row["message"])
+        tool_use_result = row["tool_use_result"]
+        row["tool_use_result"] = (
+            None if tool_use_result is None else json.dumps(tool_use_result)
+        )
     return rows
 
 
 def _codex_select_sql(day_filter: str = "") -> str:
     """SELECT producing ``raw_messages``-shaped rows from a ``$1``-bound Codex
-    row list. Caller must pass ``[codex_rows]`` as the ``execute`` params."""
+    row list. Caller must pass ``[rows]`` as the ``execute`` params."""
+    cols = ",\n            ".join(
+        f"{name}::{final_type} AS {name}"
+        for name, _, final_type in _RAW_MESSAGE_COLUMNS
+    )
     return f"""
         SELECT
-            file_path, type, timestamp::TIMESTAMP AS timestamp, session_id,
-            uuid, parent_uuid, is_sidechain, cwd, version, entrypoint,
-            git_branch, role, model, message::JSON AS message,
-            tool_use_result::JSON AS tool_use_result, provider, harness
+            {cols}
         FROM (SELECT unnest($1::{_CODEX_ROW_STRUCT}, recursive := true))
         {day_filter}
     """  # noqa: S608
 
 
-# Column order produced by both ``_RAW_MESSAGES_COLUMNS`` and
-# ``_codex_select_sql`` — used to align the two sides of a ``UNION ALL``.
-_RAW_MESSAGES_COLUMN_NAMES = (
-    "file_path",
-    "type",
-    "timestamp",
-    "session_id",
-    "uuid",
-    "parent_uuid",
-    "is_sidechain",
-    "cwd",
-    "version",
-    "entrypoint",
-    "git_branch",
-    "role",
-    "model",
-    "message",
-    "tool_use_result",
-    "provider",
-    "harness",
+# Empty-stub select matching the ``raw_messages`` schema, generated from the
+# same column table so it can never drift from ``_codex_select_sql``'s output
+# types. Used both as the empty Claude-side stub and as ``codex_raw_messages``'s
+# starting schema before any rollout file is inserted.
+_EMPTY_RAW_MESSAGES_SELECT = (
+    "SELECT\n        "
+    + ",\n        ".join(
+        f"NULL::{final_type} AS {name}" for name, _, final_type in _RAW_MESSAGE_COLUMNS
+    )
+    + "\n    WHERE FALSE"
 )
+
+
+def _create_codex_raw_messages_table(
+    conn: duckdb.DuckDBPyConnection,
+    codex_glob: str | None,
+    day_filter: str = "",
+) -> None:
+    """Materialize ``codex_raw_messages`` once, streaming one rollout file at
+    a time so peak memory is one file's rows rather than the whole corpus.
+
+    Empty (zero rows) when ``codex_glob`` is ``None`` (Codex not requested)
+    or matches nothing (missing ``~/.codex/sessions``) — the ``UNION ALL BY
+    NAME`` against it elsewhere is then a silent no-op.
+    """
+    conn.execute(f"CREATE TABLE codex_raw_messages AS {_EMPTY_RAW_MESSAGES_SELECT}")
+    if codex_glob is None:
+        return
+    insert_sql = f"INSERT INTO codex_raw_messages {_codex_select_sql(day_filter)}"
+    for path in sorted(glob.glob(codex_glob, recursive=True)):  # noqa: PTH207
+        try:
+            rows = _transcode_codex_file(path)
+        except Exception:
+            log.warning(
+                "Skipping unparseable Codex rollout file %s", path, exc_info=True
+            )
+            continue
+        if rows:
+            conn.execute(insert_sql, [rows])
+
 
 # Columns DuckDB sometimes infers as native UUID (when every sampled value
 # happens to look like one) rather than VARCHAR. Codex ids are never
@@ -244,12 +266,44 @@ _UUID_PRONE_COLUMNS = frozenset({"session_id", "uuid", "parent_uuid"})
 
 def _claude_select_for_union(claude_select: str) -> str:
     """Wrap a Claude ``raw_messages`` SELECT so id-like columns are always
-    VARCHAR, matching the Codex side for a positional ``UNION ALL``."""
+    VARCHAR, matching the Codex side's types for ``UNION ALL BY NAME``."""
     cols = ", ".join(
         f"{name}::VARCHAR AS {name}" if name in _UUID_PRONE_COLUMNS else name
         for name in _RAW_MESSAGES_COLUMN_NAMES
     )
     return f"SELECT {cols} FROM ({claude_select})"  # noqa: S608
+
+
+def _has_codex_rows(conn: duckdb.DuckDBPyConnection) -> bool:
+    """True when ``codex_raw_messages`` (already materialized) has any rows."""
+    row = conn.execute("SELECT EXISTS(SELECT 1 FROM codex_raw_messages)").fetchone()
+    return bool(row and row[0])
+
+
+def _create_raw_messages_union(
+    conn: duckdb.DuckDBPyConnection, claude_select: str, *, relation: str = "TABLE"
+) -> str:
+    """Build the ``CREATE TABLE|VIEW raw_messages AS ... UNION ALL BY NAME
+    SELECT * FROM codex_raw_messages`` statement.
+
+    Only pays the id-columns-to-VARCHAR cast (``_claude_select_for_union``)
+    when ``codex_raw_messages`` actually has rows to union — an empty
+    Codex table (the common case) leaves the Claude side's native column
+    types (e.g. DuckDB's UUID inference) untouched, which downstream code
+    (``assistant_message_costs`` consumers) relies on.
+    """
+    select = (
+        _claude_select_for_union(claude_select)
+        if _has_codex_rows(conn)
+        else claude_select
+    )
+    verb = "CREATE TABLE" if relation == "TABLE" else "CREATE OR REPLACE VIEW"
+    return f"""
+        {verb} raw_messages AS
+        {select}
+        UNION ALL BY NAME
+        SELECT * FROM codex_raw_messages
+    """  # noqa: S608
 
 
 def get_read_connection(
@@ -353,20 +407,19 @@ def materialize_views(
         with contextlib.suppress(duckdb.CatalogException):
             conn.execute(f"DROP TABLE IF EXISTS {name}")
 
-    # ``codex_glob is None`` means Codex wasn't requested at all — keep the
-    # raw_messages SQL identical to before this parameter existed. A glob
-    # that simply matches nothing (missing ~/.codex/sessions) yields an
-    # empty row list, which is a silent no-op once unioned in.
-    codex_rows = _load_codex_rows(codex_glob) if codex_glob is not None else None
+    # Materialized once here regardless of ``codex_glob`` — empty (zero rows)
+    # when Codex wasn't requested or its glob matches nothing, so every
+    # ``raw_messages`` construction below can union it in unconditionally.
+    _create_codex_raw_messages_table(conn, codex_glob, day_filter)
 
     # ``read_json_auto`` raises IOException when no files match the glob, so
     # an empty Claude home (fresh install, sandboxed CI) needs explicit empty
     # stubs to keep the rest of the pipeline working without special-casing
     # every consumer.
     if next(glob.iglob(jsonl_glob, recursive=True), None) is not None:  # noqa: PTH207
-        _load_raw_tables(conn, jsonl_glob, day_filter, and_day_filter, codex_rows)
+        _load_raw_tables(conn, jsonl_glob, day_filter, and_day_filter)
     else:
-        _create_empty_raw_tables(conn, day_filter, codex_rows)
+        _create_empty_raw_tables(conn)
 
     # Add indexes for common query patterns
     conn.execute("CREATE INDEX idx_rm_session ON raw_messages(session_id)")
@@ -404,56 +457,22 @@ _EMPTY_RAW_DATA_SQL = """
     WHERE FALSE
 """
 
-_EMPTY_RAW_MESSAGES_SELECT = """
-    SELECT
-        NULL::VARCHAR AS file_path,
-        NULL::VARCHAR AS type,
-        NULL::TIMESTAMP AS timestamp,
-        NULL::VARCHAR AS session_id,
-        NULL::VARCHAR AS uuid,
-        NULL::VARCHAR AS parent_uuid,
-        NULL::BOOLEAN AS is_sidechain,
-        NULL::VARCHAR AS cwd,
-        NULL::VARCHAR AS version,
-        NULL::VARCHAR AS entrypoint,
-        NULL::VARCHAR AS git_branch,
-        NULL::VARCHAR AS role,
-        NULL::VARCHAR AS model,
-        NULL::JSON AS message,
-        NULL::JSON AS tool_use_result,
-        NULL::VARCHAR AS provider,
-        NULL::VARCHAR AS harness,
-    WHERE FALSE
-"""
 
-_EMPTY_RAW_MESSAGES_SQL = f"CREATE TABLE raw_messages AS {_EMPTY_RAW_MESSAGES_SELECT}"
-
-
-def _create_empty_raw_tables(
-    conn: duckdb.DuckDBPyConnection,
-    day_filter: str = "",
-    codex_rows: list[dict[str, Any]] | None = None,
-) -> None:
+def _create_empty_raw_tables(conn: duckdb.DuckDBPyConnection) -> None:
     """Create empty ``raw_data`` and ``raw_messages`` tables matching the
     schemas produced by ``read_json_auto`` over real Claude Code logs.
 
-    When ``codex_rows`` is not ``None`` (Codex was requested), Codex data is
-    unioned in even though the Claude side is empty — so a fresh Claude
-    install with an existing Codex history still surfaces Codex sessions.
+    Codex data (if any — see ``_create_codex_raw_messages_table``) is unioned
+    in even though the Claude side is empty, so a fresh Claude install with
+    an existing Codex history still surfaces Codex sessions.
     """
     conn.execute(_EMPTY_RAW_DATA_SQL)
-    if codex_rows is None:
-        conn.execute(_EMPTY_RAW_MESSAGES_SQL)
-    else:
-        conn.execute(
-            f"""
-            CREATE TABLE raw_messages AS
-            {_EMPTY_RAW_MESSAGES_SELECT}
-            UNION ALL
-            {_codex_select_sql(day_filter)}
-            """,
-            [codex_rows],
-        )
+    conn.execute(f"""
+        CREATE TABLE raw_messages AS
+        {_EMPTY_RAW_MESSAGES_SELECT}
+        UNION ALL BY NAME
+        SELECT * FROM codex_raw_messages
+    """)  # noqa: S608
 
 
 def _record_materialized_at(conn: duckdb.DuckDBPyConnection) -> None:
@@ -557,7 +576,6 @@ def _load_raw_tables(
     jsonl_glob: str,
     day_filter: str,
     and_day_filter: str,
-    codex_rows: list[dict[str, Any]] | None = None,
 ) -> None:
     """Create ``raw_data`` and ``raw_messages`` from the JSONL glob.
 
@@ -569,7 +587,7 @@ def _load_raw_tables(
     load.
     """
     try:
-        _create_raw_tables(conn, jsonl_glob, day_filter, and_day_filter, codex_rows)
+        _create_raw_tables(conn, jsonl_glob, day_filter, and_day_filter)
     except duckdb.Error as exc:
         log.warning(
             "Bulk JSONL load failed (%s); retrying per-file to skip unparseable files.",
@@ -597,7 +615,7 @@ def _load_raw_tables(
         )
         raise duckdb.IOException(msg) from bulk_exc
 
-    _create_raw_tables(conn, parseable, day_filter, and_day_filter, codex_rows)
+    _create_raw_tables(conn, parseable, day_filter, and_day_filter)
 
 
 def _create_raw_tables(
@@ -605,7 +623,6 @@ def _create_raw_tables(
     source: str | list[str],
     day_filter: str,
     and_day_filter: str,
-    codex_rows: list[dict[str, Any]] | None = None,
 ) -> None:
     """Issue the two CREATE TABLE statements for ``raw_data``/``raw_messages``."""
     read_expr = _jsonl_read_expr(source)
@@ -623,18 +640,7 @@ def _create_raw_tables(
         {and_day_filter}
     """  # noqa: S608
 
-    if codex_rows is None:
-        conn.execute(f"CREATE TABLE raw_messages AS {claude_select}")
-    else:
-        conn.execute(
-            f"""
-            CREATE TABLE raw_messages AS
-            {_claude_select_for_union(claude_select)}
-            UNION ALL
-            {_codex_select_sql(day_filter)}
-            """,
-            [codex_rows],
-        )
+    conn.execute(_create_raw_messages_union(conn, claude_select))
 
     # ``read_json_auto`` only emits an ``attachment`` column when some record
     # carries one; logs without attachment records (or narrow test fixtures)
@@ -701,24 +707,13 @@ def _create_views(
         WHERE type IN ('user', 'assistant')
     """  # noqa: S608
 
-    if codex_glob is None:
-        conn.execute(f"CREATE OR REPLACE VIEW raw_messages AS {claude_select}")
-    else:
-        # Views can't bind prepared parameters, so Codex rows are first
-        # materialized into a real table (parsed once, here), and the lazy
-        # view unions the always-fresh Claude select with that snapshot.
-        codex_rows = _load_codex_rows(codex_glob)
-        conn.execute("DROP TABLE IF EXISTS codex_raw_messages")
-        conn.execute(
-            f"CREATE TABLE codex_raw_messages AS {_codex_select_sql()}",
-            [codex_rows],
-        )
-        conn.execute(f"""
-            CREATE OR REPLACE VIEW raw_messages AS
-            {_claude_select_for_union(claude_select)}
-            UNION ALL
-            SELECT * FROM codex_raw_messages
-        """)  # noqa: S608
+    # Views can't bind prepared parameters, so Codex rows are first
+    # materialized into a real table (parsed once, here), and the lazy view
+    # unions the always-fresh Claude select with that snapshot. Empty when
+    # ``codex_glob`` is ``None`` or matches nothing, so the union is a no-op.
+    conn.execute("DROP TABLE IF EXISTS codex_raw_messages")
+    _create_codex_raw_messages_table(conn, codex_glob)
+    conn.execute(_create_raw_messages_union(conn, claude_select, relation="VIEW"))
 
     # Empty project_map so the JOIN in logical_sessions works in lazy mode
     conn.execute("""

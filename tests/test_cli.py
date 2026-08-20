@@ -30,6 +30,23 @@ _UVICORN_SHOULD_NOT_RUN = "uvicorn.run should not be called in this test"
 _BRANCH_DETECTION_SHOULD_SKIP = "branch detection should be skipped"
 
 
+def _patch_cli_paths(monkeypatch, tmp: str) -> Path:
+    """Point the CLI's DB/JSONL/Codex defaults at non-existent paths under
+    ``tmp``, so tests never touch the real ``~/.claude`` or ``~/.codex``
+    trees on the machine running them. Returns the patched DB path."""
+    db_path = Path(tmp) / "introspect.duckdb"
+    monkeypatch.setattr("introspect.cli.DEFAULT_DB_PATH", db_path)
+    monkeypatch.setattr(
+        "introspect.cli.DEFAULT_JSONL_GLOB",
+        str(Path(tmp) / "claude" / "**" / "*.jsonl"),
+    )
+    monkeypatch.setattr(
+        "introspect.cli.DEFAULT_CODEX_GLOB",
+        str(Path(tmp) / "codex" / "**" / "*.jsonl"),
+    )
+    return db_path
+
+
 # Read commands that should work end-to-end against an empty DB. ``materialize``
 # is exercised explicitly elsewhere; ``serve`` / ``devserve`` / ``mcp`` start
 # long-running processes; ``query`` requires a SQL string. The remaining
@@ -54,17 +71,8 @@ def test_cli_command_works_on_empty_db(monkeypatch, command):
     the "Last materialized" banner so users see when the data was last built.
     """
     with tempfile.TemporaryDirectory() as tmp:
-        db_path = Path(tmp) / "introspect.duckdb"
-        glob_pat = str(Path(tmp) / "claude" / "**" / "*.jsonl")
         # Glob points at a non-existent directory; nothing matches.
-        monkeypatch.setattr("introspect.cli.DEFAULT_DB_PATH", db_path)
-        monkeypatch.setattr("introspect.cli.DEFAULT_JSONL_GLOB", glob_pat)
-        # Point Codex at a non-existent dir too, so tests don't load real
-        # ~/.codex/sessions data from the machine running them.
-        monkeypatch.setattr(
-            "introspect.cli.DEFAULT_CODEX_GLOB",
-            str(Path(tmp) / "codex" / "**" / "*.jsonl"),
-        )
+        db_path = _patch_cli_paths(monkeypatch, tmp)
 
         result = runner.invoke(app, list(command))
 
@@ -95,16 +103,7 @@ def _extract_banner_timestamp(output: str) -> str:
 def test_cli_reuses_existing_materialized_db(monkeypatch):
     """A second CLI invocation prints the prior timestamp instead of rebuilding."""
     with tempfile.TemporaryDirectory() as tmp:
-        db_path = Path(tmp) / "introspect.duckdb"
-        glob_pat = str(Path(tmp) / "claude" / "**" / "*.jsonl")
-        monkeypatch.setattr("introspect.cli.DEFAULT_DB_PATH", db_path)
-        monkeypatch.setattr("introspect.cli.DEFAULT_JSONL_GLOB", glob_pat)
-        # Point Codex at a non-existent dir too, so tests don't load real
-        # ~/.codex/sessions data from the machine running them.
-        monkeypatch.setattr(
-            "introspect.cli.DEFAULT_CODEX_GLOB",
-            str(Path(tmp) / "codex" / "**" / "*.jsonl"),
-        )
+        _patch_cli_paths(monkeypatch, tmp)
 
         first = runner.invoke(app, ["sessions"])
         assert first.exit_code == 0, first.output
@@ -139,16 +138,7 @@ def _stub_behind_cache(monkeypatch, tmp, *, latest="9.9.9", current="0.0.1"):
 def test_nag_prints_to_stderr_not_stdout_when_behind(monkeypatch):
     """An eligible command prints the one-line nag to stderr only, after output."""
     with tempfile.TemporaryDirectory() as tmp:
-        db_path = Path(tmp) / "introspect.duckdb"
-        glob_pat = str(Path(tmp) / "claude" / "**" / "*.jsonl")
-        monkeypatch.setattr("introspect.cli.DEFAULT_DB_PATH", db_path)
-        monkeypatch.setattr("introspect.cli.DEFAULT_JSONL_GLOB", glob_pat)
-        # Point Codex at a non-existent dir too, so tests don't load real
-        # ~/.codex/sessions data from the machine running them.
-        monkeypatch.setattr(
-            "introspect.cli.DEFAULT_CODEX_GLOB",
-            str(Path(tmp) / "codex" / "**" / "*.jsonl"),
-        )
+        _patch_cli_paths(monkeypatch, tmp)
         _stub_behind_cache(monkeypatch, tmp)
 
         result = runner.invoke(app, ["stats"])
@@ -161,16 +151,7 @@ def test_nag_prints_to_stderr_not_stdout_when_behind(monkeypatch):
 
 def test_no_nag_when_up_to_date_cli(monkeypatch):
     with tempfile.TemporaryDirectory() as tmp:
-        db_path = Path(tmp) / "introspect.duckdb"
-        glob_pat = str(Path(tmp) / "claude" / "**" / "*.jsonl")
-        monkeypatch.setattr("introspect.cli.DEFAULT_DB_PATH", db_path)
-        monkeypatch.setattr("introspect.cli.DEFAULT_JSONL_GLOB", glob_pat)
-        # Point Codex at a non-existent dir too, so tests don't load real
-        # ~/.codex/sessions data from the machine running them.
-        monkeypatch.setattr(
-            "introspect.cli.DEFAULT_CODEX_GLOB",
-            str(Path(tmp) / "codex" / "**" / "*.jsonl"),
-        )
+        _patch_cli_paths(monkeypatch, tmp)
         _stub_behind_cache(monkeypatch, tmp, latest="0.0.1", current="0.0.1")
 
         result = runner.invoke(app, ["stats"])
@@ -182,16 +163,7 @@ def test_no_nag_when_up_to_date_cli(monkeypatch):
 
 def test_opt_out_env_silences_nag_cli(monkeypatch):
     with tempfile.TemporaryDirectory() as tmp:
-        db_path = Path(tmp) / "introspect.duckdb"
-        glob_pat = str(Path(tmp) / "claude" / "**" / "*.jsonl")
-        monkeypatch.setattr("introspect.cli.DEFAULT_DB_PATH", db_path)
-        monkeypatch.setattr("introspect.cli.DEFAULT_JSONL_GLOB", glob_pat)
-        # Point Codex at a non-existent dir too, so tests don't load real
-        # ~/.codex/sessions data from the machine running them.
-        monkeypatch.setattr(
-            "introspect.cli.DEFAULT_CODEX_GLOB",
-            str(Path(tmp) / "codex" / "**" / "*.jsonl"),
-        )
+        _patch_cli_paths(monkeypatch, tmp)
         _stub_behind_cache(monkeypatch, tmp)
         monkeypatch.setenv("INTROSPECT_VERSION_CHECK", "off")
 

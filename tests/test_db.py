@@ -99,7 +99,14 @@ def _write_sample_jsonl(tmp_dir: Path) -> Path:
 # the connection rather than hardcoded, so a newly added ``_make()`` can't
 # escape the lazy-vs-materialized coverage check below.
 _RAW_INFRA_NAMES = frozenset(
-    {"raw_data", "raw_messages", "project_map", "search_corpus", "materialize_meta"}
+    {
+        "raw_data",
+        "raw_messages",
+        "codex_raw_messages",
+        "project_map",
+        "search_corpus",
+        "materialize_meta",
+    }
 )
 
 
@@ -620,11 +627,11 @@ def test_materialize_recovers_when_bulk_read_raises(monkeypatch, caplog):
 
         boom_msg = "maximum_object_size exceeded"
 
-        def fail_once(conn, source, day_filter, and_day_filter, codex_rows=None):
+        def fail_once(conn, source, day_filter, and_day_filter):
             calls["n"] += 1
             if calls["n"] == 1:
                 raise duckdb.InvalidInputException(boom_msg)
-            return original(conn, source, day_filter, and_day_filter, codex_rows)
+            return original(conn, source, day_filter, and_day_filter)
 
         monkeypatch.setattr(db_module, "_create_raw_tables", fail_once)
 
@@ -883,6 +890,64 @@ def test_materialize_views_codex_glob_none_is_unchanged():
                 ).fetchall()
             }
             assert providers == {"anthropic"}
+        finally:
+            conn.close()
+
+
+def test_materialize_views_empty_claude_home_still_surfaces_codex():
+    """A fresh Claude install (empty glob) with an existing Codex history
+    still surfaces Codex sessions via the empty-stub raw_messages path."""
+    with tempfile.TemporaryDirectory() as tmp:
+        tmp_path = Path(tmp)
+        _write_codex_session(tmp_path, "codex-only-sess")
+        missing_claude_glob = str(tmp_path / "no-such-claude-dir" / "**" / "*.jsonl")
+
+        db_path = tmp_path / "test.duckdb"
+        conn = duckdb.connect(str(db_path))
+        try:
+            materialize_views(
+                conn,
+                missing_claude_glob,
+                codex_glob=codex_glob_pattern(tmp_path),
+            )
+
+            session_ids = {
+                r[0]
+                for r in conn.execute("SELECT session_id FROM session_stats").fetchall()
+            }
+            assert "codex-only-sess" in session_ids
+        finally:
+            conn.close()
+
+
+def test_materialize_views_skips_unparseable_codex_rollout(caplog):
+    """A single garbage Codex rollout file is skipped (logged), not fatal —
+    the remaining well-formed files still load."""
+    with tempfile.TemporaryDirectory() as tmp:
+        tmp_path = Path(tmp)
+        _write_sample_jsonl(tmp_path)
+        _write_codex_session(tmp_path, "codex-good-sess")
+        garbage_path = tmp_path / "sessions" / "2026" / "08" / "20" / "garbage.jsonl"
+        garbage_path.parent.mkdir(parents=True, exist_ok=True)
+        garbage_path.write_text("not json at all\n")
+
+        db_path = tmp_path / "test.duckdb"
+        conn = duckdb.connect(str(db_path))
+        try:
+            with caplog.at_level("WARNING", logger="introspect.db"):
+                materialize_views(
+                    conn,
+                    glob_pattern(tmp_path),
+                    codex_glob=codex_glob_pattern(tmp_path),
+                )
+
+            assert "unparseable" in caplog.text.lower()
+
+            session_ids = {
+                r[0]
+                for r in conn.execute("SELECT session_id FROM session_stats").fetchall()
+            }
+            assert "codex-good-sess" in session_ids
         finally:
             conn.close()
 

@@ -259,7 +259,7 @@ def test_describe_schema_mentions_query_templates(
     """describe_schema() points at list_query_templates() with the count."""
     monkeypatch.setattr(
         "introspect.mcp.tools.get_read_connection",
-        lambda: duckdb.connect(str(fixture_db_path), read_only=True),
+        lambda **_kwargs: duckdb.connect(str(fixture_db_path), read_only=True),
     )
     result = describe_schema()
     assert f"{len(QUERY_TEMPLATES)} query templates" in result
