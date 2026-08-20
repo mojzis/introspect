@@ -59,6 +59,7 @@ async def sessions(  # noqa: PLR0913
     branch: str = Query("", alias="branch"),
     command: str = Query("", alias="command"),
     q: str = Query("", alias="q"),
+    provider: str = Query("", alias="provider"),
 ):
     return await _sessions(
         request,
@@ -71,6 +72,7 @@ async def sessions(  # noqa: PLR0913
         branch,
         command,
         q,
+        provider,
     )
 
 
