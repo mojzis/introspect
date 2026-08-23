@@ -1,6 +1,7 @@
 ---
 name: python-review
 context: fork
+background: false
 description: Deep Python code quality review. Auto-invoke when finishing a task, before marking work complete, when the user asks to review code, or when preparing a PR. Focuses on design judgment, naming, performance, and test quality — things that ruff and ty cannot catch.
 ---
 
@@ -106,5 +107,24 @@ Patterns that cause real problems, not micro-optimization.
 Group by severity, then area. Each finding: **what** + **where** (file:line) + **why** + **concrete fix**.
 
 End with: X must-fix, Y should-fix, Z suggestions.
+
+---
+
+## Return contract
+
+This skill runs in a forked subagent context. Your final message **is** the return value, and it is
+consumed by the calling agent — not by a human.
+
+- Return the complete review in the final message: every finding, in full, with file:line and the
+  concrete fix. The caller cannot see your tool calls, your intermediate output, or any file you
+  read — anything not in the final message is lost.
+- Do not truncate, summarize, or say "see above" / "as noted earlier". There is no above.
+- Do not address the user, ask questions, or offer follow-ups ("want me to fix these?"). The caller
+  decides what happens next.
+- No preamble, no sign-off. Start with the findings.
+- If a file has to carry the report (the caller asked for a path), still return the full report
+  inline **and** name the path — the caller may not read the file.
+- If the review could not run (e.g. `uv run poe check` fails, no diff to review), say exactly that
+  and why, as the entire final message.
 
 $ARGUMENTS
