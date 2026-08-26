@@ -42,6 +42,7 @@ introspy refresh
 | `devserve` | Launch the web UI with uvicorn auto-reload. |
 | `mcp` | Start the [MCP server](mcp.md) over stdio. |
 | `claude` | Launch a Claude Code session wired to the HTTP MCP endpoint. |
+| `codex` | Launch a Codex session wired to the HTTP MCP endpoint. |
 | `refresh` | Rebuild the search index / materialized tables. |
 
 Run any command with `--help` for its full set of options.

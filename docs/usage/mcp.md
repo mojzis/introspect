@@ -38,6 +38,21 @@ Once connected, try asking Claude:
 
 > what are the most expensive sessions
 
+### Codex
+
+To launch a Codex session with the same temporary HTTP MCP connection:
+
+```bash
+introspy codex
+introspy codex -- --model gpt-5.4
+introspy codex -- "what are the most expensive sessions"
+```
+
+`introspy codex` starts `introspy serve` when needed and passes the MCP URL
+and log-analysis developer instructions as Codex command-line configuration
+overrides. It does not modify your Codex configuration. Pass `--keep-server`
+to leave an auto-started server running after Codex exits.
+
 ## Available tools
 
 | Tool | Description |

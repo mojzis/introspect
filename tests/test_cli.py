@@ -15,8 +15,10 @@ from typer.testing import CliRunner
 from introspect import version_check as vc
 from introspect.cli import (
     CLAUDE_SYSTEM_PROMPT_SUFFIX,
+    CODEX_DEVELOPER_INSTRUCTIONS,
     _branch_db_path,
     _find_available_port,
+    _finish_connected_session,
     _prune_stale_branch_dbs,
     _sanitize_branch,
     _stop_server,
@@ -469,6 +471,29 @@ def test_claude_passes_inline_mcp_config(monkeypatch):
     assert server == {"type": "http", "url": "http://127.0.0.1:3000/mcp"}
 
 
+def test_codex_passes_session_only_mcp_config_and_instructions(monkeypatch):
+    """`codex` uses overrides, never a persistent MCP registration."""
+    calls = []
+    monkeypatch.setattr("shutil.which", lambda _: "/usr/bin/codex")
+    monkeypatch.setattr(
+        socket, "create_connection", lambda *a, **k: contextlib.nullcontext()
+    )
+    monkeypatch.setattr(subprocess, "call", lambda argv: calls.append(argv) or 0)
+
+    result = runner.invoke(app, ["codex", "--port", "3000"])
+
+    assert result.exit_code == 0, result.output
+    assert len(calls) == 1
+    argv = calls[0]
+    assert argv[0] == "/usr/bin/codex"
+    config_values = [argv[i + 1] for i, arg in enumerate(argv) if arg == "--config"]
+    assert 'mcp_servers.introspect.url="http://127.0.0.1:3000/mcp"' in config_values
+    developer_config = next(
+        value for value in config_values if value.startswith("developer_instructions=")
+    )
+    assert json.loads(developer_config.split("=", 1)[1]) == CODEX_DEVELOPER_INSTRUCTIONS
+
+
 def test_claude_steers_session_toward_mcp_tools(monkeypatch):
     """`claude` appends a dedicated system prompt and pre-allows the MCP tools."""
     calls = []
@@ -508,6 +533,21 @@ def test_claude_forwards_extra_args(monkeypatch):
     assert config["mcpServers"]["introspect"]["url"].endswith(":3000/mcp")
 
 
+def test_codex_forwards_extra_args(monkeypatch):
+    """Extra args after `--` are appended verbatim to the Codex invocation."""
+    calls = []
+    monkeypatch.setattr("shutil.which", lambda _: "/usr/bin/codex")
+    monkeypatch.setattr(
+        socket, "create_connection", lambda *a, **k: contextlib.nullcontext()
+    )
+    monkeypatch.setattr(subprocess, "call", lambda argv: calls.append(argv) or 0)
+
+    result = runner.invoke(app, ["codex", "--port", "3000", "--", "--model", "gpt-5.4"])
+
+    assert result.exit_code == 0, result.output
+    assert calls[0][-2:] == ["--model", "gpt-5.4"]
+
+
 def test_claude_system_prompt_lists_every_registered_tool():
     """The hand-written tool list in the system prompt must not drift.
 
@@ -519,6 +559,13 @@ def test_claude_system_prompt_lists_every_registered_tool():
     assert not missing, f"system prompt omits registered MCP tools: {missing}"
 
 
+def test_codex_developer_instructions_list_every_registered_tool():
+    """Codex's dedicated-session instructions must not drift from the registry."""
+    registered = {tool.name for tool in asyncio.run(create_mcp_server().list_tools())}
+    missing = {name for name in registered if name not in CODEX_DEVELOPER_INSTRUCTIONS}
+    assert not missing, f"developer instructions omit registered MCP tools: {missing}"
+
+
 def test_claude_propagates_claude_exit_code(monkeypatch):
     """The claude binary's exit code becomes the command's exit code."""
     monkeypatch.setattr("shutil.which", lambda _: "/usr/bin/claude")
@@ -528,6 +575,18 @@ def test_claude_propagates_claude_exit_code(monkeypatch):
     monkeypatch.setattr(subprocess, "call", lambda argv: 3)
 
     result = runner.invoke(app, ["claude"])
+
+    assert result.exit_code == 3
+
+
+def test_codex_propagates_codex_exit_code(monkeypatch):
+    monkeypatch.setattr("shutil.which", lambda _: "/usr/bin/codex")
+    monkeypatch.setattr(
+        socket, "create_connection", lambda *a, **k: contextlib.nullcontext()
+    )
+    monkeypatch.setattr(subprocess, "call", lambda argv: 3)
+
+    result = runner.invoke(app, ["codex"])
 
     assert result.exit_code == 3
 
@@ -689,6 +748,10 @@ def test_stop_server_noop_when_already_exited():
 
     assert not proc.terminated
     assert not proc.killed
+
+
+def test_finish_connected_session_leaves_existing_server_alone():
+    _finish_connected_session(None, host="127.0.0.1", port=8347, keep_server=False)
 
 
 def test_claude_errors_when_server_exits_during_start(monkeypatch, tmp_path):

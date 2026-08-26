@@ -853,11 +853,30 @@ def _stop_server(proc: "subprocess.Popen[bytes]") -> None:
         proc.wait()
 
 
-# Appended to Claude Code's system prompt by `introspy claude`. The session
-# is dedicated to log analysis, so steer it toward the MCP tools instead of
-# spelunking ~/.claude/projects with Bash.
-CLAUDE_SYSTEM_PROMPT_SUFFIX = (
-    "This session is dedicated to analyzing Claude Code conversation logs "
+def _finish_connected_session(
+    server_proc: "subprocess.Popen[bytes] | None",
+    *,
+    host: str,
+    port: int,
+    keep_server: bool,
+) -> None:
+    """Clean up an Introspect server spawned for an interactive client."""
+    if server_proc is None:
+        return
+    if keep_server:
+        console.print(
+            f"[dim]Server left running on http://{host}:{port} "
+            f"(pid {server_proc.pid})[/dim]"
+        )
+        return
+    _stop_server(server_proc)
+
+
+# Added to the dedicated Claude Code / Codex session prompt. The session is
+# dedicated to log analysis, so steer it toward the MCP tools instead of
+# spelunking the raw rollout logs with Bash.
+INTROSPECT_SESSION_INSTRUCTIONS = (
+    "This session is dedicated to analyzing coding-agent conversation logs "
     "via the `introspect` MCP server. Prefer the mcp__introspect__* tools "
     "(run_sql, describe_schema, search_conversations, get_session, "
     "recent_sessions, tool_failures, tool_failure_rate, refresh_data, "
@@ -868,6 +887,11 @@ CLAUDE_SYSTEM_PROMPT_SUFFIX = (
     "expensive_sessions. Call describe_schema before writing SQL, and "
     "list_query_templates for curated starting-point queries to adapt."
 )
+
+# Kept as a named alias because Claude Code calls this an appended system
+# prompt, while Codex calls it developer instructions.
+CLAUDE_SYSTEM_PROMPT_SUFFIX = INTROSPECT_SESSION_INSTRUCTIONS
+CODEX_DEVELOPER_INSTRUCTIONS = INTROSPECT_SESSION_INSTRUCTIONS
 
 # Permission rule covering every tool on the introspect MCP server, so the
 # dedicated session doesn't permission-prompt on each query.
@@ -940,14 +964,72 @@ def claude(
             ]
         )
     finally:
-        if server_proc is not None:
-            if keep_server:
-                console.print(
-                    f"[dim]Server left running on http://{host}:{port} "
-                    f"(pid {server_proc.pid})[/dim]"
-                )
-            else:
-                _stop_server(server_proc)
+        _finish_connected_session(
+            server_proc, host=host, port=port, keep_server=keep_server
+        )
+    raise typer.Exit(code=exit_code)
+
+
+@app.command(
+    context_settings={"allow_extra_args": True, "ignore_unknown_options": True}
+)
+def codex(
+    ctx: typer.Context,
+    port: int = typer.Option(
+        DEFAULT_PORT, help="Port the introspect server is listening on"
+    ),
+    host: str = typer.Option(
+        "127.0.0.1", help="Host the introspect server is bound to"
+    ),
+    keep_server: bool = typer.Option(
+        False,
+        "--keep-server",
+        help="Leave the auto-started server running after Codex exits",
+    ),
+):
+    """Launch Codex connected to the introspect MCP server.
+
+    Starts ``introspy serve`` automatically in the background when nothing is
+    listening on the target port (log at ``~/.introspect/serve.log``) and stops
+    it again when Codex exits (pass ``--keep-server`` to leave it up). A server
+    that was already running is never touched. The MCP configuration and
+    developer instructions are passed as command-line overrides, so nothing is
+    written to the user's Codex configuration.
+
+    Any extra arguments are forwarded to the ``codex`` CLI as-is, e.g.
+    ``introspy codex -- --model gpt-5.4`` or
+    ``introspy codex -- "what are the most expensive sessions"``. Use ``--``
+    to separate introspect's own options from the ones meant for Codex.
+    """
+    import json  # noqa: PLC0415
+    import shutil  # noqa: PLC0415
+    import subprocess  # noqa: PLC0415
+
+    codex_bin = shutil.which("codex")
+    if codex_bin is None:
+        console.print(
+            "[red]Error:[/red] `codex` CLI not found on PATH. "
+            "Install Codex first: https://developers.openai.com/codex"
+        )
+        raise typer.Exit(code=1)
+
+    server_proc = _ensure_server_running(host, port)
+    mcp_url = f"http://{host}:{port}/mcp"
+    try:
+        exit_code = subprocess.call(  # noqa: S603
+            [
+                codex_bin,
+                "--config",
+                f"mcp_servers.introspect.url={json.dumps(mcp_url)}",
+                "--config",
+                f"developer_instructions={json.dumps(CODEX_DEVELOPER_INSTRUCTIONS)}",
+                *ctx.args,
+            ]
+        )
+    finally:
+        _finish_connected_session(
+            server_proc, host=host, port=port, keep_server=keep_server
+        )
     raise typer.Exit(code=exit_code)
 
 
