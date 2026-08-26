@@ -4,7 +4,7 @@ import json
 
 import pytest
 
-from introspect.codex import _alias_tool_call, transcode_rollout
+from introspect.codex import _alias_tool_call, _extract_call_sites, transcode_rollout
 
 from .conftest import (
     codex_record,
@@ -303,8 +303,8 @@ def test_non_monotonic_token_count_guard(tmp_path):
     assert "usage" not in second_call_row["message"]
 
 
-def test_js_arg_parse_failure_emits_empty_input_and_logs(tmp_path, caplog):
-    """A JS arg literal that fails to parse still emits tool_use with empty input."""
+def test_dynamic_js_args_emit_empty_input_without_startup_warning(tmp_path, caplog):
+    """Dynamic JS arguments remain visible without flooding server startup logs."""
     session_id = "sess-badjs"
     lines = [
         codex_record("session_meta", codex_session_meta(session_id)),
@@ -323,14 +323,38 @@ def test_js_arg_parse_failure_emits_empty_input_and_logs(tmp_path, caplog):
     ]
     path = write_codex_rollout(tmp_path, session_id, lines)
 
-    with caplog.at_level("WARNING", logger="introspect.codex"):
+    with caplog.at_level("DEBUG", logger="introspect.codex"):
         rows = transcode_rollout(path)
 
     tool_use_blocks = _tool_uses(rows)
     assert len(tool_use_blocks) == 1
     assert tool_use_blocks[0]["name"] == "Bash"
     assert tool_use_blocks[0]["input"] == {"command": ""}
-    assert any("parse" in rec.message.lower() for rec in caplog.records)
+    assert not any(rec.levelname == "WARNING" for rec in caplog.records)
+    assert any("dynamic" in rec.message.lower() for rec in caplog.records)
+
+
+def test_js_argument_parser_handles_common_codex_literal_syntax():
+    """Bare keys, JS strings, templates, and booleans retain their tool inputs."""
+    source = (
+        "await tools.mcp__linear_server__save_issue("
+        "{team:'Developer Experience', title:`Fix ${component}`, "
+        "patch:[{op:'replace', enabled:true}], dry_run:false});"
+    )
+
+    sites = _extract_call_sites(source)
+
+    assert sites == [
+        (
+            "mcp__linear_server__save_issue",
+            {
+                "team": "Developer Experience",
+                "title": "Fix ${component}",
+                "patch": [{"op": "replace", "enabled": True}],
+                "dry_run": False,
+            },
+        )
+    ]
 
 
 def test_function_call_arg_parse_failure_emits_empty_input_and_logs(tmp_path, caplog):

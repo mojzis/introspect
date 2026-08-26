@@ -39,6 +39,7 @@ Known lossiness, by design, not bugs to fix later:
 
 from __future__ import annotations
 
+import ast
 import json
 import logging
 import re
@@ -137,7 +138,12 @@ def _js_object_to_dict(raw: str) -> dict[str, Any] | None:
     """Best-effort parse of a JS object literal (unquoted keys allowed).
 
     Not strict JSON: ``{workdir: "/x", cmd: "ls"}`` is valid input. Quotes
-    bare identifier keys, then falls back to ``json.loads``.
+    bare identifier keys, then accepts the common JavaScript literal forms
+    Codex writes into rollouts (single-quoted strings, template literals, and
+    ``true``/``false``/``null``). Expressions such as ``{cmd}`` and
+    ``{session_id: result.id}`` deliberately remain unparseable: evaluating
+    rollout JavaScript would be both unsafe and incapable of reconstructing
+    its runtime values.
     """
     raw = raw.strip()
     if not raw:
@@ -146,8 +152,77 @@ def _js_object_to_dict(raw: str) -> dict[str, Any] | None:
     try:
         parsed = json.loads(quoted)
     except (json.JSONDecodeError, ValueError):
-        return None
+        try:
+            parsed = ast.literal_eval(_python_literal_from_js(quoted))
+        except (SyntaxError, ValueError):
+            return None
     return parsed if isinstance(parsed, dict) else None
+
+
+def _python_literal_from_js(  # noqa: PLR0912, PLR0915 -- small state scanner
+    raw: str,
+) -> str:
+    """Convert the safe, literal-only JS subset into Python literal syntax.
+
+    This is intentionally a syntax normalizer rather than a JavaScript
+    evaluator. It preserves interpolation in template strings as visible text
+    (``${name}``) and converts literal newlines in strings to ``\\n`` so
+    historical rollout records with multiline command strings remain useful.
+    """
+    out: list[str] = []
+    i = 0
+    quote: str | None = None
+    while i < len(raw):
+        ch = raw[i]
+        if quote:
+            if ch == "\\":
+                out.append(raw[i : i + 2])
+                i += 2
+                continue
+            if ch == quote:
+                out.append(ch)
+                quote = None
+            elif ch in "\r\n":
+                # JSON and Python reject literal line breaks in quoted strings;
+                # Codex has emitted them in historical tool-call source.
+                out.append("\\n")
+                if ch == "\r" and i + 1 < len(raw) and raw[i + 1] == "\n":
+                    i += 1
+            else:
+                out.append(ch)
+            i += 1
+            continue
+        if ch in "\"'":
+            quote = ch
+            out.append(ch)
+            i += 1
+            continue
+        if ch == "`":
+            end = i + 1
+            while end < len(raw):
+                if raw[end] == "\\":
+                    end += 2
+                    continue
+                if raw[end] == "`":
+                    break
+                end += 1
+            if end == len(raw):
+                return raw  # malformed template; let literal_eval reject it
+            out.append(json.dumps(raw[i + 1 : end]))
+            i = end + 1
+            continue
+        if ch.isalpha() or ch == "_":
+            end = i + 1
+            while end < len(raw) and (raw[end].isalnum() or raw[end] == "_"):
+                end += 1
+            word = raw[i:end]
+            js_constants = {"true": "True", "false": "False", "null": "None"}
+            out.append(js_constants.get(word, word))
+            i = end
+            continue
+        out.append(ch)
+        i += 1
+    return "".join(out)
 
 
 def _extract_call_sites(js_source: str) -> list[tuple[str, dict[str, Any] | None]]:
@@ -376,8 +451,8 @@ def _handle_custom_tool_call(
             # row with the actual file path; don't also emit the raw call.
             continue
         if args is None:
-            log.warning(
-                "codex adapter: failed to parse JS args for tools.%s(...) in %s",
+            log.debug(
+                "codex adapter: dynamic or unsupported JS args for tools.%s(...) in %s",
                 name,
                 state.file_path,
             )
