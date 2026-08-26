@@ -172,3 +172,69 @@ def write_jsonl(tmp_dir: Path, session_id: str, lines: list[dict]) -> Path:
 def glob_pattern(tmp_dir: Path) -> str:
     """Return the JSONL glob pattern for a test temp directory."""
     return str(tmp_dir / "projects" / "**" / "*.jsonl")
+
+
+def write_codex_rollout(tmp_dir: Path, session_id: str, lines: list[dict]) -> Path:
+    """Write Codex rollout JSONL records (Codex's directory layout, not Claude's)."""
+    jsonl_path = (
+        tmp_dir / "sessions" / "2026" / "08" / "20" / f"rollout-{session_id}.jsonl"
+    )
+    jsonl_path.parent.mkdir(parents=True, exist_ok=True)
+    with jsonl_path.open("w") as f:
+        for line in lines:
+            f.write(json.dumps(line) + "\n")
+    return jsonl_path
+
+
+def codex_glob_pattern(tmp_dir: Path) -> str:
+    """Return the Codex rollout glob pattern for a test temp directory."""
+    return str(tmp_dir / "sessions" / "**" / "*.jsonl")
+
+
+def codex_record(
+    record_type: str, payload: dict, timestamp: str = "2026-08-20T10:00:00Z"
+) -> dict:
+    """Build one ``{timestamp, type, payload}`` Codex rollout record."""
+    return {"timestamp": timestamp, "type": record_type, "payload": payload}
+
+
+def codex_session_meta(
+    session_id: str,
+    *,
+    cwd: str = "/tmp/codex-test",
+    cli_version: str = "0.145.0",
+    originator: str = "codex-tui",
+    model_provider: str = "openai",
+    thread_source: str = "user",
+    git_branch: str = "main",
+) -> dict:
+    """Build a Codex ``session_meta`` payload (always line 1 of a rollout)."""
+    return {
+        "session_id": session_id,
+        "id": session_id,
+        "cwd": cwd,
+        "originator": originator,
+        "cli_version": cli_version,
+        "source": "cli",
+        "thread_source": thread_source,
+        "model_provider": model_provider,
+        "git": {"commit_hash": "abc123", "branch": git_branch, "repository_url": ""},
+    }
+
+
+def codex_turn_context(turn_id: str, model: str = "gpt-5.6-terra") -> dict:
+    """Build a Codex ``turn_context`` payload."""
+    return {"turn_id": turn_id, "model": model, "cwd": "/tmp/codex-test"}
+
+
+def write_codex_session(tmp_dir: Path, session_id: str) -> Path:
+    """Write a minimal single-turn Codex rollout fixture."""
+    lines = [
+        codex_record("session_meta", codex_session_meta(session_id)),
+        codex_record("turn_context", codex_turn_context("turn-1")),
+        codex_record(
+            "event_msg",
+            {"type": "user_message", "message": "please fix", "text_elements": []},
+        ),
+    ]
+    return write_codex_rollout(tmp_dir, session_id, lines)

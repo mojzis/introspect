@@ -234,6 +234,9 @@ def _patched_client(tmp_path: Path, extra_env: dict[str, str] | None = None):
     env = {
         "INTROSPECT_DB_PATH": str(db_path),
         "INTROSPECT_JSONL_GLOB": glob_pattern(tmp_path),
+        # Point at a non-existent dir so route tests don't load real
+        # ~/.codex/sessions data from the machine running them.
+        "INTROSPECT_CODEX_GLOB": str(tmp_path / "codex" / "**" / "*.jsonl"),
         "INTROSPECT_DAYS": "0",
         # The SQL API fails closed on an unset host; tests run as a loopback
         # bind unless a case overrides it via ``extra_env``.

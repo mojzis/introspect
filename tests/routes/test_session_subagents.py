@@ -297,6 +297,7 @@ def _patched_client_with_jsonl(tmp_path: Path, jsonl_writer):
             {
                 "INTROSPECT_DB_PATH": str(db_path),
                 "INTROSPECT_JSONL_GLOB": glob_pattern(tmp_path),
+                "INTROSPECT_CODEX_GLOB": str(tmp_path / "codex" / "**" / "*.jsonl"),
                 "INTROSPECT_DAYS": "0",
             },
         ),

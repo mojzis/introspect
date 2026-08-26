@@ -102,12 +102,14 @@ DuckDB reads JSONL files and exposes them through a fixed schema. Two creation p
 
 JSONL loading falls back to a per-file probe (`_filter_parseable_files`) if the bulk read fails, so a single corrupt file can't take down the whole load. An empty Claude home is handled by `_create_empty_raw_tables` — schema-shaped stubs keep downstream queries valid.
 
+When `codex_glob` is given (non-`None`), Codex CLI rollout logs are transcoded in Python (`codex.py`), registered as a DuckDB relation via `unnest($1::STRUCT(...)[], recursive := true)`, and `UNION ALL`-ed into the Claude `raw_messages` SELECT — one `raw_messages` row set spanning both sources, tagged by `provider` (`anthropic` / `openai`) and `harness` (`claude-code` / `codex`). `codex_glob` matching nothing (missing `~/.codex/sessions`) is a silent no-op, mirroring the empty-Claude-home guard. `provider`/`harness` propagate through `logical_sessions` and `session_stats` via `ANY_VALUE`.
+
 ### Core tables / views
 
 | Name | Description |
 |---|---|
-| `raw_data` | Direct JSONL records with added `filename` column |
-| `raw_messages` | Filtered user/assistant messages with extracted `role` and `model` |
+| `raw_data` | Direct JSONL records with added `filename` column (Claude only — Codex rows don't appear here) |
+| `raw_messages` | Filtered user/assistant messages with extracted `role` and `model`, plus `provider`/`harness`; Claude `UNION ALL` Codex when `codex_glob` is given |
 | `project_map` | `cwd` → canonical project path / name (worktree-aware via `projects.py`) |
 | `logical_sessions` | Session summaries: timestamps, duration, message counts, model, cwd, project, branch |
 | `assistant_message_costs` | Per-assistant-message token usage, deduplicated by API `message.id` (raw_messages can contain duplicate copies of the same response) |
@@ -156,7 +158,8 @@ The `search_corpus` table is rebuilt by `build_search_corpus(conn)` from user me
 | Environment Variable | Default | Description |
 |---|---|---|
 | `INTROSPECT_DB_PATH` | `~/.introspect/introspect.duckdb` | Database file location |
-| `INTROSPECT_JSONL_GLOB` | `~/.claude/projects/**/*.jsonl` | Glob pattern for conversation logs |
+| `INTROSPECT_JSONL_GLOB` | `~/.claude/projects/**/*.jsonl` | Glob pattern for Claude Code conversation logs |
+| `INTROSPECT_CODEX_GLOB` | `~/.codex/sessions/**/*.jsonl` | Glob pattern for Codex CLI rollout logs. A missing directory or non-matching glob is a silent no-op |
 | `INTROSPECT_DAYS` | resolved from `INTROSPECT_REFRESH_WINDOW` | Days of history to load (`0` = no limit). Set explicitly by `serve` / `materialize` (`-d`); takes precedence over the window picker on lifespan startup. |
 | `INTROSPECT_REFRESH_WINDOW` | `30` | Window picker token: `1`, `7`, `30`, or `month` (calendar-month-to-date) |
 | `INTROSPECT_REFRESH_INTERVAL_SECONDS` | `600` | Background refresh poll interval; `0` disables auto-refresh |

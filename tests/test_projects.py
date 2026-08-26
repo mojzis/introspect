@@ -49,7 +49,7 @@ def test_canonical_project_relative_git_dir():
         mock_run.return_value = _make_completed_process(".git\n")
         result = get_canonical_project("/home/user/some-other-project")
         # Must resolve to the target cwd, not the introspect process cwd
-        assert result == "/home/user/some-other-project"
+        assert result == str(Path("/home/user/some-other-project").resolve())
 
 
 def test_canonical_project_fallback_on_error():

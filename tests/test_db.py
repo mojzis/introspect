@@ -21,11 +21,19 @@ from introspect.db import (
 )
 
 from .conftest import (
+    codex_glob_pattern,
+    codex_record,
+    codex_session_meta,
+    codex_turn_context,
     glob_pattern,
     make_assistant_message,
     make_attachment_message,
     make_user_message,
+    write_codex_rollout,
     write_jsonl,
+)
+from .conftest import (
+    write_codex_session as _write_codex_session,
 )
 
 SID = "test-session-001"
@@ -94,7 +102,14 @@ def _write_sample_jsonl(tmp_dir: Path) -> Path:
 # the connection rather than hardcoded, so a newly added ``_make()`` can't
 # escape the lazy-vs-materialized coverage check below.
 _RAW_INFRA_NAMES = frozenset(
-    {"raw_data", "raw_messages", "project_map", "search_corpus", "materialize_meta"}
+    {
+        "raw_data",
+        "raw_messages",
+        "codex_raw_messages",
+        "project_map",
+        "search_corpus",
+        "materialize_meta",
+    }
 )
 
 
@@ -780,3 +795,243 @@ def test_empty_stub_raw_messages_columns_match_real_materialization():
             f"only-in-real={sorted(real_cols - empty_cols)}, "
             f"only-in-empty={sorted(empty_cols - real_cols)}"
         )
+
+
+def test_materialize_views_unions_claude_and_codex():
+    """``raw_messages``/``session_stats`` union both sources with correct
+    ``provider``/``harness`` tagging when ``codex_glob`` is given."""
+    with tempfile.TemporaryDirectory() as tmp:
+        tmp_path = Path(tmp)
+        _write_sample_jsonl(tmp_path)
+        _write_codex_session(tmp_path, "codex-sess-001")
+
+        db_path = tmp_path / "test.duckdb"
+        conn = duckdb.connect(str(db_path))
+        try:
+            materialize_views(
+                conn,
+                glob_pattern(tmp_path),
+                codex_glob=codex_glob_pattern(tmp_path),
+            )
+
+            providers = dict(
+                conn.execute(
+                    "SELECT provider, harness FROM raw_messages GROUP BY 1, 2"
+                ).fetchall()
+            )
+            assert providers == {"anthropic": "claude-code", "openai": "codex"}
+
+            session_stats = {
+                r[0]: (r[1], r[2])
+                for r in conn.execute(
+                    "SELECT session_id, provider, harness FROM session_stats"
+                ).fetchall()
+            }
+            assert session_stats[SID] == ("anthropic", "claude-code")
+            assert session_stats["codex-sess-001"] == ("openai", "codex")
+        finally:
+            conn.close()
+
+
+def test_materialize_views_unions_claude_and_codex_with_day_filter():
+    """The day-filtered Codex select (``days > 0``, the production default via
+    ``INTROSPECT_REFRESH_WINDOW``) still unions correctly. The Claude fixture's
+    timestamp is old (outside the window) and gets filtered on both sides,
+    so only the recent Codex session should survive."""
+    with tempfile.TemporaryDirectory() as tmp:
+        tmp_path = Path(tmp)
+        _write_sample_jsonl(tmp_path)
+        _write_codex_session(tmp_path, "codex-sess-001")
+
+        db_path = tmp_path / "test.duckdb"
+        conn = duckdb.connect(str(db_path))
+        try:
+            materialize_views(
+                conn,
+                glob_pattern(tmp_path),
+                days=30,
+                codex_glob=codex_glob_pattern(tmp_path),
+            )
+
+            providers = dict(
+                conn.execute(
+                    "SELECT provider, harness FROM raw_messages GROUP BY 1, 2"
+                ).fetchall()
+            )
+            assert providers == {"openai": "codex"}
+        finally:
+            conn.close()
+
+
+def test_materialize_views_codex_glob_absent_is_noop():
+    """A Codex glob matching nothing is a silent no-op, like the
+    empty-Claude-home guard — no error, no extra rows."""
+    with tempfile.TemporaryDirectory() as tmp:
+        tmp_path = Path(tmp)
+        _write_sample_jsonl(tmp_path)
+        missing_codex_glob = str(tmp_path / "no-such-codex-dir" / "**" / "*.jsonl")
+
+        db_path = tmp_path / "test.duckdb"
+        conn = duckdb.connect(str(db_path))
+        try:
+            materialize_views(
+                conn, glob_pattern(tmp_path), codex_glob=missing_codex_glob
+            )
+
+            row = conn.execute(
+                "SELECT COUNT(*) FROM raw_messages WHERE provider = 'openai'"
+            ).fetchone()
+            assert row is not None
+            assert row[0] == 0
+
+            row = conn.execute("SELECT COUNT(*) FROM raw_messages").fetchone()
+            assert row is not None
+            assert row[0] > 0, "Claude data should still load normally"
+        finally:
+            conn.close()
+
+
+def test_materialize_views_codex_glob_none_is_unchanged():
+    """Omitting ``codex_glob`` (the default) behaves exactly as before this
+    parameter existed — no ``provider``/``harness`` filtering surprises."""
+    with tempfile.TemporaryDirectory() as tmp:
+        tmp_path = Path(tmp)
+        _write_sample_jsonl(tmp_path)
+
+        db_path = tmp_path / "test.duckdb"
+        conn = duckdb.connect(str(db_path))
+        try:
+            materialize_views(conn, glob_pattern(tmp_path))
+
+            providers = {
+                r[0]
+                for r in conn.execute(
+                    "SELECT DISTINCT provider FROM raw_messages"
+                ).fetchall()
+            }
+            assert providers == {"anthropic"}
+        finally:
+            conn.close()
+
+
+def test_materialize_views_empty_claude_home_still_surfaces_codex():
+    """A fresh Claude install (empty glob) with an existing Codex history
+    still surfaces Codex sessions via the empty-stub raw_messages path."""
+    with tempfile.TemporaryDirectory() as tmp:
+        tmp_path = Path(tmp)
+        _write_codex_session(tmp_path, "codex-only-sess")
+        missing_claude_glob = str(tmp_path / "no-such-claude-dir" / "**" / "*.jsonl")
+
+        db_path = tmp_path / "test.duckdb"
+        conn = duckdb.connect(str(db_path))
+        try:
+            materialize_views(
+                conn,
+                missing_claude_glob,
+                codex_glob=codex_glob_pattern(tmp_path),
+            )
+
+            session_ids = {
+                r[0]
+                for r in conn.execute("SELECT session_id FROM session_stats").fetchall()
+            }
+            assert "codex-only-sess" in session_ids
+        finally:
+            conn.close()
+
+
+def test_materialize_views_skips_unparseable_codex_rollout(caplog):
+    """A single garbage Codex rollout file is skipped (logged), not fatal —
+    the remaining well-formed files still load."""
+    with tempfile.TemporaryDirectory() as tmp:
+        tmp_path = Path(tmp)
+        _write_sample_jsonl(tmp_path)
+        _write_codex_session(tmp_path, "codex-good-sess")
+        garbage_path = tmp_path / "sessions" / "2026" / "08" / "20" / "garbage.jsonl"
+        garbage_path.parent.mkdir(parents=True, exist_ok=True)
+        garbage_path.write_text("not json at all\n")
+
+        db_path = tmp_path / "test.duckdb"
+        conn = duckdb.connect(str(db_path))
+        try:
+            with caplog.at_level("WARNING", logger="introspect.db"):
+                materialize_views(
+                    conn,
+                    glob_pattern(tmp_path),
+                    codex_glob=codex_glob_pattern(tmp_path),
+                )
+
+            assert "unparseable" in caplog.text.lower()
+
+            session_ids = {
+                r[0]
+                for r in conn.execute("SELECT session_id FROM session_stats").fetchall()
+            }
+            assert "codex-good-sess" in session_ids
+        finally:
+            conn.close()
+
+
+def test_materialize_views_skips_codex_rollout_with_bad_timestamp(caplog):
+    """A rollout record with an unparseable (empty) ``timestamp`` must not
+    abort the whole DB build — it's caught and skipped like any other
+    unparseable Codex file, leaving Claude data and other Codex files intact."""
+    with tempfile.TemporaryDirectory() as tmp:
+        tmp_path = Path(tmp)
+        _write_sample_jsonl(tmp_path)
+        _write_codex_session(tmp_path, "codex-good-sess")
+
+        bad_lines = [
+            codex_record("session_meta", codex_session_meta("codex-bad-sess")),
+            codex_record("turn_context", codex_turn_context("turn-1")),
+            codex_record(
+                "event_msg",
+                {"type": "user_message", "message": "please fix", "text_elements": []},
+                timestamp="",
+            ),
+        ]
+        write_codex_rollout(tmp_path, "codex-bad-sess", bad_lines)
+
+        db_path = tmp_path / "test.duckdb"
+        conn = duckdb.connect(str(db_path))
+        try:
+            with caplog.at_level("WARNING", logger="introspect.db"):
+                materialize_views(
+                    conn,
+                    glob_pattern(tmp_path),
+                    codex_glob=codex_glob_pattern(tmp_path),
+                )
+
+            assert "unparseable" in caplog.text.lower()
+
+            session_ids = {
+                r[0]
+                for r in conn.execute("SELECT session_id FROM session_stats").fetchall()
+            }
+            assert SID in session_ids
+            assert "codex-good-sess" in session_ids
+            assert "codex-bad-sess" not in session_ids
+        finally:
+            conn.close()
+
+
+def test_get_connection_lazy_path_unions_codex():
+    """The lazy view path (no prior materialization) also unions Codex rows."""
+    with tempfile.TemporaryDirectory() as tmp:
+        tmp_path = Path(tmp)
+        _write_sample_jsonl(tmp_path)
+        _write_codex_session(tmp_path, "codex-sess-002")
+
+        db_path = tmp_path / "lazy.duckdb"
+        conn = get_connection(
+            db_path, glob_pattern(tmp_path), codex_glob_pattern(tmp_path)
+        )
+        try:
+            providers = dict(
+                conn.execute(
+                    "SELECT provider, harness FROM raw_messages GROUP BY 1, 2"
+                ).fetchall()
+            )
+            assert providers == {"anthropic": "claude-code", "openai": "codex"}
+        finally:
+            conn.close()

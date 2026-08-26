@@ -268,6 +268,9 @@ def e2e(tmp_path):
         os.environ,
         {
             "INTROSPECT_JSONL_GLOB": glob_pattern,
+            # Point at a non-existent dir so e2e tests don't load real
+            # ~/.codex/sessions data from the machine running them.
+            "INTROSPECT_CODEX_GLOB": str(tmp_path / "codex" / "**" / "*.jsonl"),
             "INTROSPECT_DB_PATH": str(db_path),
             "INTROSPECT_DAYS": "0",
         },

@@ -103,6 +103,19 @@ Once connected, try asking Claude:
 
 > what are the most expensive sessions
 
+The same session-only setup is available for Codex:
+
+```bash
+introspy codex
+introspy codex -- --model gpt-5.4
+introspy codex -- "what are the most expensive sessions"
+```
+
+`introspy codex` starts and stops the server with the same lifecycle as
+`introspy claude`. It passes the MCP endpoint and dedicated log-analysis
+instructions as temporary Codex command-line configuration overrides, leaving
+your Codex configuration unchanged.
+
 ### SQL API (local notebooks)
 
 When the web server is bound to a loopback address (the default

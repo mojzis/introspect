@@ -5,7 +5,14 @@ from pathlib import Path
 
 import pytest
 
+from ..conftest import codex_glob_pattern, write_codex_session
 from .conftest import SID, _patched_client
+
+CODEX_SID = "codex-sess-provider-001"
+
+
+def _write_codex_session(tmp_dir: Path, session_id: str = CODEX_SID) -> Path:
+    return write_codex_session(tmp_dir, session_id)
 
 
 def test_sessions_returns_200():
@@ -80,6 +87,7 @@ def test_sessions_all_empty_params_returns_200():
         "project",
         "branch",
         "cost",
+        "provider",
     ],
 )
 def test_sessions_sort_column(col):
@@ -259,3 +267,66 @@ def test_cost_overview_nav_link_present():
         assert response.status_code == 200
         assert 'href="/cost-overview"' in response.text
         assert "Cost Overview" in response.text
+
+
+# --- Provider filter tests ---
+
+
+def test_sessions_unfiltered_shows_both_providers():
+    """Sessions page interleaves Claude and Codex sessions by default."""
+    with tempfile.TemporaryDirectory() as tmp:
+        tmp_path = Path(tmp)
+        _write_codex_session(tmp_path)
+        with _patched_client(
+            tmp_path,
+            extra_env={"INTROSPECT_CODEX_GLOB": codex_glob_pattern(tmp_path)},
+        ) as client:
+            response = client.get("/sessions")
+            assert response.status_code == 200
+            assert SID[:8] in response.text
+            assert CODEX_SID in response.text
+
+
+def test_sessions_filter_by_provider_narrows_to_codex():
+    """``?provider=openai`` narrows the list to Codex sessions only."""
+    with tempfile.TemporaryDirectory() as tmp:
+        tmp_path = Path(tmp)
+        _write_codex_session(tmp_path)
+        with _patched_client(
+            tmp_path,
+            extra_env={"INTROSPECT_CODEX_GLOB": codex_glob_pattern(tmp_path)},
+        ) as client:
+            response = client.get("/sessions?provider=openai")
+            assert response.status_code == 200
+            assert CODEX_SID in response.text
+            assert SID[:8] not in response.text
+
+
+def test_sessions_provider_dropdown_populated():
+    """Sessions page populates the provider filter dropdown."""
+    with tempfile.TemporaryDirectory() as tmp:
+        tmp_path = Path(tmp)
+        _write_codex_session(tmp_path)
+        with _patched_client(
+            tmp_path,
+            extra_env={"INTROSPECT_CODEX_GLOB": codex_glob_pattern(tmp_path)},
+        ) as client:
+            response = client.get("/sessions")
+            assert response.status_code == 200
+            assert "All providers" in response.text
+            assert "openai" in response.text
+            assert "anthropic" in response.text
+
+
+def test_sessions_provider_filter_survives_sort_and_page_change():
+    """The ``provider`` filter is preserved in sort/pagination links (qs() macro)."""
+    with tempfile.TemporaryDirectory() as tmp:
+        tmp_path = Path(tmp)
+        _write_codex_session(tmp_path)
+        with _patched_client(
+            tmp_path,
+            extra_env={"INTROSPECT_CODEX_GLOB": codex_glob_pattern(tmp_path)},
+        ) as client:
+            response = client.get("/sessions?provider=openai&sort=started_at")
+            assert response.status_code == 200
+            assert "provider=openai" in response.text

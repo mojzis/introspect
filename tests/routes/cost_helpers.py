@@ -216,6 +216,7 @@ def _run_with_client(tmp: Path, fn):
             {
                 "INTROSPECT_DB_PATH": str(db_path),
                 "INTROSPECT_JSONL_GLOB": glob_pattern(tmp),
+                "INTROSPECT_CODEX_GLOB": str(tmp / "codex" / "**" / "*.jsonl"),
                 "INTROSPECT_DAYS": "0",
             },
         ),

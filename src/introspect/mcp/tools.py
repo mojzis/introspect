@@ -7,7 +7,7 @@ from typing import cast, get_args
 
 import duckdb
 
-from introspect.db import DEFAULT_DB_PATH, get_read_connection
+from introspect.db import DEFAULT_CODEX_GLOB, DEFAULT_DB_PATH, get_read_connection
 from introspect.mcp import refresh_bridge
 from introspect.query_templates import (
     QUERY_TEMPLATES,
@@ -57,6 +57,15 @@ _PARETO_CUTOFF = 0.80
 REFRESH_TIMEOUT = 30.0
 
 
+def _get_read_connection() -> duckdb.DuckDBPyConnection:
+    """``get_read_connection`` with the Codex default glob applied.
+
+    Mirrors ``cli._db``'s ``DEFAULT_CODEX_GLOB`` passthrough so the
+    lazy-view fallback surfaces Codex sessions too, not just Claude ones.
+    """
+    return get_read_connection(codex_glob=DEFAULT_CODEX_GLOB)
+
+
 def _validate_since(since: str) -> str | None:
     """Return a friendly error message if `since` isn't empty or ISO-parseable.
 
@@ -104,7 +113,7 @@ def search_conversations(  # noqa: PLR0913
     if since_error:
         return since_error
 
-    conn = get_read_connection()
+    conn = _get_read_connection()
     try:
         ensure_search_corpus(conn)
 
@@ -140,7 +149,7 @@ def get_session(session_id: str) -> str:
 
     Returns all messages as structured data.
     """
-    conn = get_read_connection()
+    conn = _get_read_connection()
     try:
         # Session metadata
         meta = conn.execute(
@@ -192,7 +201,7 @@ def get_session(session_id: str) -> str:
 
 def recent_sessions(n: int = 10) -> str:
     """List the most recent N sessions with metadata."""
-    conn = get_read_connection()
+    conn = _get_read_connection()
     try:
         rows = conn.execute(
             """
@@ -306,7 +315,7 @@ def describe_schema() -> str:
     DuckDB's information_schema. Use this before writing a `run_sql` query
     to discover column names and types.
     """
-    conn = get_read_connection()
+    conn = _get_read_connection()
     try:
         rows = conn.execute(
             """
@@ -510,7 +519,7 @@ def tool_failure_rate(limit: int = 20, since: str = "", min_calls: int = 5) -> s
     if template is None:  # pragma: no cover - defensive, registry can't drop this
         return "Error: 'tool_failure_rate' template not found in registry."
 
-    conn = get_read_connection()
+    conn = _get_read_connection()
     try:
         rows = run_query_template(
             template,
@@ -533,7 +542,7 @@ def tool_failure_rate(limit: int = 20, since: str = "", min_calls: int = 5) -> s
 
 def tool_failures(command_prefix: str = "", limit: int = 20) -> str:
     """List failed tool calls, optionally filtered by tool name prefix."""
-    conn = get_read_connection()
+    conn = _get_read_connection()
     try:
         if command_prefix:
             rows = conn.execute(
@@ -643,7 +652,7 @@ def expensive_sessions(limit: int = 15, since: str = "") -> str:  # noqa: PLR091
     else:
         cost_subquery = SESSION_COST_SUBQUERY
 
-    conn = get_read_connection()
+    conn = _get_read_connection()
     try:
         # --- Query 1: Pareto ranking + metadata ---
         # Mirrors cost_overview._build_pareto — keep cutoff semantics in sync.

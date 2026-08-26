@@ -247,6 +247,7 @@ async def sessions(  # noqa: PLR0913
     branch: str,
     command: str,
     q: str,
+    provider: str,
 ) -> HTMLResponse:
     """Paginated session list with filtering and sorting."""
     db = conn(request)
@@ -267,6 +268,9 @@ async def sessions(  # noqa: PLR0913
     if branch.strip():
         where_clauses.append("ss.git_branch = ?")
         params.append(branch.strip())
+    if provider.strip():
+        where_clauses.append("ss.provider = ?")
+        params.append(provider.strip())
     if command.strip():
         where_clauses.append(
             "EXISTS (SELECT 1 FROM message_commands mc"
@@ -336,6 +340,10 @@ async def sessions(  # noqa: PLR0913
         SELECT DISTINCT git_branch FROM logical_sessions
         WHERE git_branch IS NOT NULL ORDER BY git_branch
     """).fetchall()
+    providers = db.execute("""
+        SELECT DISTINCT provider FROM logical_sessions
+        WHERE provider IS NOT NULL ORDER BY provider
+    """).fetchall()
     commands_list = db.execute(f"""
         SELECT DISTINCT command FROM message_commands
         WHERE command NOT IN {OBVIOUS_COMMANDS_SQL}
@@ -358,11 +366,13 @@ async def sessions(  # noqa: PLR0913
             "filter_model": model,
             "filter_project": project,
             "filter_branch": branch,
+            "filter_provider": provider,
             "filter_command": command,
             "filter_q": search_query,
             "models": [r[0] for r in models],
             "projects": [r[0] for r in projects],
             "branches": [r[0] for r in branches],
+            "providers": [r[0] for r in providers],
             "commands_list": [r[0] for r in commands_list],
         },
     )

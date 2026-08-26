@@ -5,7 +5,8 @@ Introspect is configured through environment variables.
 | Variable | Default | Description |
 |---|---|---|
 | `INTROSPECT_DB_PATH` | `~/.introspect/introspect.duckdb` | Database file location. |
-| `INTROSPECT_JSONL_GLOB` | `~/.claude/projects/**/*.jsonl` | Glob pattern for conversation logs. |
+| `INTROSPECT_JSONL_GLOB` | `~/.claude/projects/**/*.jsonl` | Glob pattern for Claude Code conversation logs. |
+| `INTROSPECT_CODEX_GLOB` | `~/.codex/sessions/**/*.jsonl` | Glob pattern for Codex CLI rollout logs. A missing directory or non-matching glob is a silent no-op. |
 | `INTROSPECT_DAYS` | resolved from `INTROSPECT_REFRESH_WINDOW` | Days of history to load (`0` = no limit). Set explicitly by `serve` / `materialize` (`-d`); takes precedence over the window picker on lifespan startup. |
 | `INTROSPECT_REFRESH_WINDOW` | `30` | Window picker token: `1`, `7`, `30`, or `month` (calendar-month-to-date). |
 | `INTROSPECT_REFRESH_INTERVAL_SECONDS` | `600` | Background refresh poll interval; `0` disables auto-refresh. |

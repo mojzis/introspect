@@ -104,6 +104,9 @@ def _client_with_attachments(tmp_path: Path):
     env = {
         "INTROSPECT_DB_PATH": str(db_path),
         "INTROSPECT_JSONL_GLOB": glob_pattern(tmp_path),
+        # Point at a non-existent dir so this test doesn't load real
+        # ~/.codex/sessions data from the machine running it.
+        "INTROSPECT_CODEX_GLOB": str(tmp_path / "codex" / "**" / "*.jsonl"),
         "INTROSPECT_DAYS": "0",
         "INTROSPECT_HOST": "127.0.0.1",
     }

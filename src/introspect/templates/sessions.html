@@ -5,7 +5,7 @@
    Uses kwargs + context-var fallback because Jinja2 macro defaults cannot
    reference template context variables when the template uses {% extends %}. #}
 {% macro qs() -%}
-page={{ kwargs.get("page", page) }}&page_size={{ kwargs.get("page_size", page_size) }}&sort={{ kwargs.get("sort", sort) }}&order={{ kwargs.get("order", order) }}&model={{ kwargs.get("model", filter_model) }}&project={{ kwargs.get("project", filter_project) }}&branch={{ kwargs.get("branch", filter_branch) }}&command={{ kwargs.get("command", filter_command) }}&q={{ kwargs.get("q", filter_q) }}
+page={{ kwargs.get("page", page) }}&page_size={{ kwargs.get("page_size", page_size) }}&sort={{ kwargs.get("sort", sort) }}&order={{ kwargs.get("order", order) }}&model={{ kwargs.get("model", filter_model) }}&project={{ kwargs.get("project", filter_project) }}&branch={{ kwargs.get("branch", filter_branch) }}&provider={{ kwargs.get("provider", filter_provider) }}&command={{ kwargs.get("command", filter_command) }}&q={{ kwargs.get("q", filter_q) }}
 {%- endmacro %}
 
 {# Sortable column header #}
@@ -31,6 +31,7 @@ page={{ kwargs.get("page", page) }}&page_size={{ kwargs.get("page_size", page_si
         <input type="hidden" name="model" value="{{ filter_model }}" />
         <input type="hidden" name="project" value="{{ filter_project }}" />
         <input type="hidden" name="branch" value="{{ filter_branch }}" />
+        <input type="hidden" name="provider" value="{{ filter_provider }}" />
         <input type="hidden" name="command" value="{{ filter_command }}" />
         <input type="search" name="q" value="{{ filter_q }}" placeholder="Search content..." style="padding:0.4rem 0.6rem;border:1px solid #ccc;border-radius:4px;font-size:0.85rem;width:160px;" />
         <button type="submit" style="padding:0.4rem 0.6rem;font-size:0.85rem;">Search</button>
@@ -59,8 +60,14 @@ page={{ kwargs.get("page", page) }}&page_size={{ kwargs.get("page_size", page_si
         <option value="{{ c }}" {{ 'selected' if c == filter_command else '' }}>{{ c }}</option>
         {% endfor %}
     </select>
-    {% if filter_model or filter_project or filter_branch or filter_command or filter_q %}
-    <a href="/sessions?{{ qs(page=1, model='', project='', branch='', command='', q='') }}" hx-get="/sessions?{{ qs(page=1, model='', project='', branch='', command='', q='') }}" hx-target="#content" hx-push-url="true" class="tool-btn tool-btn-sm">Clear filters</a>
+    <select onchange="window.location='/sessions?{{ qs(page=1) }}'.replace('provider={{ filter_provider }}', 'provider='+this.value)" style="padding:0.4rem 0.6rem;border:1px solid #ccc;border-radius:4px;font-size:0.85rem;">
+        <option value="">All providers</option>
+        {% for pr in providers %}
+        <option value="{{ pr }}" {{ 'selected' if pr == filter_provider else '' }}>{{ pr }}</option>
+        {% endfor %}
+    </select>
+    {% if filter_model or filter_project or filter_branch or filter_provider or filter_command or filter_q %}
+    <a href="/sessions?{{ qs(page=1, model='', project='', branch='', provider='', command='', q='') }}" hx-get="/sessions?{{ qs(page=1, model='', project='', branch='', provider='', command='', q='') }}" hx-target="#content" hx-push-url="true" class="tool-btn tool-btn-sm">Clear filters</a>
     {% endif %}
 </div>
 
@@ -86,6 +93,7 @@ page={{ kwargs.get("page", page) }}&page_size={{ kwargs.get("page_size", page_si
                 <th>Commands</th>
                 {{ sort_header('Cost', 'cost') }}
                 {{ sort_header('Model', 'model') }}
+                {{ sort_header('Provider', 'provider') }}
             </tr>
         </thead>
         <tbody>
@@ -108,6 +116,7 @@ page={{ kwargs.get("page", page) }}&page_size={{ kwargs.get("page_size", page_si
                 <td>{% if s.commands %}{% for c in s.commands.split(', ') %}<span class="tool-btn tool-btn-sm" style="font-size:0.75rem;padding:0.1rem 0.4rem;margin:0.1rem;">{{ c }}</span>{% endfor %}{% endif %}</td>
                 <td style="white-space:nowrap;text-align:right;">{% if s.cost %}<a href="/sessions/{{ s.id }}?tab=cost" hx-get="/sessions/{{ s.id }}?tab=cost" hx-target="#content" hx-push-url="true">{{ s.cost }}</a>{% else %}—{% endif %}</td>
                 <td>{{ s.model }}</td>
+                <td>{{ s.provider }}</td>
             </tr>
             {% endfor %}
         </tbody>
