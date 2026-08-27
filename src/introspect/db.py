@@ -10,6 +10,11 @@ from typing import Any
 
 import duckdb
 
+from introspect.cache_ttl import (
+    CACHE_REQUESTS_BODY,
+    SESSION_CACHE_TTL_BODY,
+    TTL_OBSERVED_SQL,
+)
 from introspect.codex import transcode_rollout
 from introspect.projects import resolve_project_map
 from introspect.search import build_search_corpus
@@ -385,6 +390,8 @@ def materialize_views(
     # Drop everything to avoid table/view name conflicts
     for name in (
         "session_stats",
+        "session_cache_ttl",
+        "cache_requests",
         "message_commands",
         "session_titles",
         "conversation_turns",
@@ -797,7 +804,8 @@ def _create_derived_views(
     # makes "earliest copy wins" deterministic.
     _make(
         "assistant_message_costs",
-        """
+        f"""
+        SELECT *, {TTL_OBSERVED_SQL} AS ttl_observed FROM (
         SELECT DISTINCT ON (json_extract_string(message, '$.id'))
             session_id,
             uuid,
@@ -830,8 +838,20 @@ def _create_derived_views(
         WHERE type = 'assistant'
           AND json_extract_string(message, '$.id') IS NOT NULL
         ORDER BY json_extract_string(message, '$.id'), timestamp
-        """,
+        )
+        """,  # noqa: S608
     )
+
+    # ``cache_requests``: one row per API request, chain-ordered, carrying the
+    # gap that decides cache warmth plus the 5m/1h counterfactual costs. The
+    # single home of the cache-TTL detection rule — the session-detail
+    # divider, the tokenscape event track and the cost-overview panel all read
+    # it, so no two surfaces can disagree about what a cache break is.
+    _make("cache_requests", CACHE_REQUESTS_BODY)
+
+    # Per-session counterfactual rollup (diagnostics; the setting is per
+    # user/project, so the actionable rollups are project/global).
+    _make("session_cache_ttl", SESSION_CACHE_TTL_BODY)
 
     # Tool calls: assistant tool_use content blocks joined with results.
     # Unnests all content blocks so multi-tool messages are captured.
@@ -1222,6 +1242,9 @@ _DERIVED_INDEXES = (
     "CREATE INDEX idx_tcalls_tooluseid ON tool_calls(tool_use_id)",
     "CREATE INDEX idx_amc_session ON assistant_message_costs(session_id)",
     "CREATE INDEX idx_amc_uuid ON assistant_message_costs(uuid)",
+    "CREATE INDEX idx_creq_session ON cache_requests(session_id)",
+    "CREATE INDEX idx_creq_sidechain ON cache_requests(is_sidechain)",
+    "CREATE INDEX idx_sttl_session ON session_cache_ttl(session_id)",
     "CREATE INDEX idx_sme_session ON session_messages_enriched(session_id)",
     "CREATE INDEX idx_sme_tooluseid ON session_messages_enriched(tool_use_id)",
     "CREATE INDEX idx_freads_session ON file_reads(session_id)",

@@ -6,6 +6,7 @@ import json
 import socket
 import subprocess
 import tempfile
+from datetime import timedelta
 from pathlib import Path
 from typing import cast
 
@@ -25,6 +26,8 @@ from introspect.cli import (
     app,
 )
 from introspect.mcp.server import create_mcp_server
+
+from .conftest import TTL_T0, glob_pattern, ttl_turn, write_jsonl
 
 runner = CliRunner()
 
@@ -61,6 +64,9 @@ _EMPTY_DB_COMMANDS: tuple[tuple[str, ...], ...] = (
     ("tables",),
     ("search", "anything"),
     ("refresh",),
+    ("cache-ttl",),
+    ("cache-ttl", "--verify"),
+    ("cache-ttl", "--subagents"),
 )
 
 
@@ -85,6 +91,53 @@ def test_cli_command_works_on_empty_db(monkeypatch, command):
             assert "Last materialized" in result.output, result.output
         # The DB file should now exist and contain the materialize_meta stamp.
         assert db_path.exists()
+
+
+def test_cache_ttl_recommends_5m_when_there_are_no_gaps(monkeypatch):
+    """No pauses → 1h's 2x write surcharge is pure loss, and it says so."""
+    sid = "77777777-7777-7777-7777-777777777777"
+    lines = ttl_turn(sid, 1, TTL_T0, read=0, create=50_000)
+    for n in range(2, 6):
+        lines += ttl_turn(
+            sid,
+            n,
+            TTL_T0 + timedelta(seconds=20 * (n - 1)),
+            read=50_000 * (n - 1),
+            create=50_000,
+        )
+    with tempfile.TemporaryDirectory() as tmp:
+        _patch_cli_paths(monkeypatch, tmp)
+        claude = Path(tmp) / "claude"
+        write_jsonl(claude, sid, lines)
+        monkeypatch.setattr("introspect.cli.DEFAULT_JSONL_GLOB", glob_pattern(claude))
+
+        result = runner.invoke(app, ["cache-ttl"])
+
+        assert result.exit_code == 0, result.output
+        assert "Main conversation" in result.output
+        assert "5m saves" in result.output
+        # Every gap is short, so nothing is recoverable and nothing is a break.
+        assert "0 recoverable gap(s)" in result.output
+
+
+def test_cache_ttl_verify_reports_zero_residual_on_uniform_session(monkeypatch):
+    """The gate: simulating the billed TTL reproduces the billed cost."""
+    sid = "88888888-8888-8888-8888-888888888888"
+    lines = ttl_turn(sid, 1, TTL_T0, read=0, create=10_000, ttl="1h")
+    lines += ttl_turn(
+        sid, 2, TTL_T0 + timedelta(minutes=2), read=10_000, create=10_000, ttl="1h"
+    )
+    with tempfile.TemporaryDirectory() as tmp:
+        _patch_cli_paths(monkeypatch, tmp)
+        claude = Path(tmp) / "claude"
+        write_jsonl(claude, sid, lines)
+        monkeypatch.setattr("introspect.cli.DEFAULT_JSONL_GLOB", glob_pattern(claude))
+
+        result = runner.invoke(app, ["cache-ttl", "--verify"])
+
+        assert result.exit_code == 0, result.output
+        assert "Worst residual: 0.000%" in result.output
+        assert "0 (0.0%)" in result.output  # split present on every row
 
 
 _MATERIALIZED_BANNER_PREFIX = "Last materialized: "

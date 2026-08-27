@@ -57,8 +57,11 @@ the sessions list shows, so the numbers always agree.
 - **Daily and hourly charts** — stacked bars of cost per day, optionally split
   by model or project. Clicking a bar drills into that day's hours; clicking an
   hour reruns the portfolio panel under that time window.
-- **Cache loss** — the aggregate premium paid across the window for caches that
-  went cold. See [Cache loss](#cache-loss).
+- **Cache loss** — the premium paid across the window for caches that went
+  cold, split into what a longer TTL would recover and what nothing would. See
+  [Cache loss](#cache-loss).
+- **Prompt-cache TTL** — both TTL policies replayed over the same requests, with
+  the margin between them. See [Prompt-cache TTL](#prompt-cache-ttl).
 
 When you filter by day or hour, the cost aggregation and the Pareto rows narrow
 to that window, but the subagent and skill classifiers stay all-time session
@@ -163,35 +166,71 @@ subagent I fired and forgot?*
 
 ## Cache loss
 
-Anthropic's ephemeral prompt cache has a default 5-minute TTL. Walk away
-mid-session and the next prompt pays to rebuild context that would otherwise
-have been a cheap cache read.
+Anthropic's ephemeral prompt cache expires. Walk away mid-session — or fire a
+tool that runs for ten minutes — and the next request pays to rebuild context
+that would otherwise have been a cheap cache read.
 
-**The rule.** A cache-loss event is a human prompt whose timestamp is more than
-`CACHE_TTL_SECONDS` (300) after the previous non-sidechain assistant API call,
-*and* where the next non-sidechain assistant call had to rebuild
-(`cache_creation_tokens > cache_read_tokens`). Sidechain turns are excluded —
-subagents have their own cache lifetimes.
+**The rule.** One rule, in one place: the `cache_requests` relation (see
+[Cache TTL](../architecture.md#cache-ttl-cache_ttlpy)). A request is a cache
+miss when the gap since the previous request outran the TTL that request was
+*actually billed at*, and the prefix did not change underneath it. The gap runs
+from the end of the previous response to whatever triggered the next one — a
+human prompt **or** a tool result. Sidechain turns are scored separately;
+subagents have their own `subagentPromptCacheTtl`.
 
-**The cost.** The reported figure is the *premium*: tokens that on a warm cache
-would have been billed at `cache_read` rates but were instead billed at
-`cache_write_5m` / `cache_write_1h`.
+Two things it deliberately does not count:
+
+- **Structural invalidations.** Reading back almost nothing after a sub-5-minute
+  gap means the prefix itself changed — a model or effort switch, `/compact`, a
+  tool-set change — not that time ran out. Those cost the same under any TTL.
+- **Breaks.** A gap longer than an hour is past the longest TTL Claude Code
+  offers, so no setting recovers it. Reported separately, never as waste.
+
+**The cost.** The reported figure is the *premium*: the prefix a warm cache
+would have read, billed at the write rate instead. It is scoped to that shared
+prefix — the tokens the new message itself added would have been written under
+any policy.
 
 Events appear inline in the Messages tab as a divider reading
-`cache lost · N min gap · ~$X wasted`, as a "Cache losses" line in the session
-header, and as a "Wasted on cache misses" stat on the Cost Overview portfolio
-panel (which follows the same day/hour window as the rest of that panel).
+`cache lost · N min gap · ~$X wasted` (or `break · N min gap · no TTL recovers
+this`), as "Cache losses" and "Cache breaks" lines in the session header, and as
+"Recoverable cache waste" plus "Breaks > 60 min" stats on the Cost Overview
+portfolio panel, which follows the same day/hour window as the rest of it.
+
+**Waste is not the whole question.** Zero recoverable waste does not mean
+nothing to fix: a 1h TTL charges 2× input on *every* incremental write, so it
+can cost money on a session that never pauses at all. The
+[TTL panel](#prompt-cache-ttl) beside these stats prices both policies; the CLI
+does the same with `introspy cache-ttl`.
 
 **Known limits.**
 
-- It assumes the 5-minute TTL. A gap longer than an hour is still counted as one
-  event, even though a 1-hour cache entry would also have expired — the rule
-  doesn't distinguish which TTL was in play.
 - The premium is a **lower bound**: it prices the rebuild itself, not the
-  secondary cost of subsequent turns reading a cache they should never have had
-  to re-create.
-- Detection depends on `cache_creation_tokens > cache_read_tokens` on the next
-  call, so a rebuild that happens to be small can slip under the bar.
+  secondary cost of later turns reading a cache they should never have had to
+  re-create.
+- A structural invalidation with a gap between 5 and 60 minutes is
+  indistinguishable from a real miss, so it is counted as one.
+
+## Prompt-cache TTL
+
+Sitting beside the cache-loss stats on the Cost Overview portfolio panel: would
+a 1h or a 5m `promptCacheTtl` have been cheaper, over the sessions in view?
+
+Both policies are replayed over the same requests. The prefix a request re-sends
+is a property of the conversation, not of the setting, so only the read/write
+split moves — which makes the comparison a like-for-like one. The panel reports
+each policy's total, the margin as a percentage, how many gaps a longer TTL
+would rescue, how many are breaks past its reach, and which TTL the sessions
+were actually billed at.
+
+**Read the margin, not the sign.** Under about 2% the panel says the two are too
+close to call rather than naming a winner — the simulation carries real
+modelling error (estimated overlaps on cold requests, gaps measured from log
+timestamps), and a 1% edge is inside it.
+
+Subagents are excluded; they carry their own `subagentPromptCacheTtl`. Costs are
+list API prices, so on a subscription plan treat the result as a ratio as much
+as a dollar figure.
 
 ## Triggers
 

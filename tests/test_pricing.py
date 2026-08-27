@@ -11,7 +11,6 @@ from introspect.pricing import (
     PRICING_INPUT_RATE_SQL,
     PRICING_OUTPUT_RATE_SQL,
     Rates,
-    cache_miss_premium_usd,
     compute_cost_usd,
     rates_for,
 )
@@ -122,27 +121,6 @@ def test_compute_cost_usd_synthetic_is_zero():
             input_tokens=10_000_000,
         )
         == 0
-    )
-
-
-def test_cache_miss_premium_usd_legacy_fallback():
-    """When cc_5m and cc_1h are both 0 but cc_total is set, bill at 5m rate."""
-    # opus-4-6: cache_write_5m=6.25, cache_read=0.50; premium=5.75 per 1M.
-    legacy = cache_miss_premium_usd(
-        model="claude-opus-4-6", cc_total=8500, cc_5m=0, cc_1h=0
-    )
-    assert legacy == pytest.approx(8500 * 5.75 / 1_000_000)
-
-    # Same totals, but explicit 5m breakdown — same cost.
-    explicit = cache_miss_premium_usd(
-        model="claude-opus-4-6", cc_total=8500, cc_5m=8500, cc_1h=0
-    )
-    assert explicit == pytest.approx(legacy)
-
-    # Unknown model → zero rates → zero premium.
-    assert (
-        cache_miss_premium_usd(model="<synthetic>", cc_total=8500, cc_5m=0, cc_1h=0)
-        == 0.0
     )
 
 

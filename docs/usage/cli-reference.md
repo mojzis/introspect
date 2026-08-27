@@ -28,6 +28,7 @@ Commands:
   query        Run an ad-hoc SQL query against the views.
   raw          Show raw unfiltered JSONL records — all fields, no...
   stats        Show summary statistics.
+  cache-ttl    Would a 1h or 5m prompt-cache TTL have been cheaper?
   search       Full-text search across conversation logs.
   materialize  Materialize data into DuckDB for fast CLI and MCP queries.
   serve        Launch the web UI.
@@ -36,6 +37,25 @@ Commands:
   claude       Launch Claude Code connected to the introspect MCP server.
   codex        Launch Codex connected to the introspect MCP server.
   refresh      Rebuild the search corpus table and FTS index.
+```
+
+## `introspy cache-ttl`
+
+```
+Usage: introspy cache-ttl [OPTIONS]
+
+  Would a 1h or 5m prompt-cache TTL have been cheaper?
+
+  Replays every API request under both policies. The prefix a request re-sends
+  is the same either way; only the read/write split moves, so the comparison
+  turns on one thing — which gaps each TTL would have kept warm.
+
+Options:
+  --verify     Show the simulation's parity residuals and 5m/1h split coverage
+               instead of the recommendation.
+  --subagents  Score sidechain traffic (subagentPromptCacheTtl) instead of the
+               main conversation. Never merged with the main-chain verdict.
+  --help       Show this message and exit.
 ```
 
 ## `introspy claude`

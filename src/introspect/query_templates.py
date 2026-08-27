@@ -322,6 +322,77 @@ QUERY_TEMPLATES: tuple[QueryTemplate, ...] = (
         ),
         kind="exploratory",
     ),
+    QueryTemplate(
+        name="cache_ttl_choice",
+        question="Which prompt-cache TTL should I set — 5m or 1h?",
+        sql=(
+            "SELECT\n"
+            "    COALESCE(ls.project, '?') AS project,\n"
+            "    COUNT(*) AS n_requests,\n"
+            "    COUNT(*) FILTER (WHERE cr.gap_recoverable) "
+            "AS n_gaps_recoverable,\n"
+            "    COUNT(*) FILTER (WHERE cr.gap_unrecoverable) "
+            "AS n_breaks_over_1h,\n"
+            "    COUNT(*) FILTER (WHERE cr.structural_invalidation) "
+            "AS n_structural,\n"
+            "    mode(cr.ttl_observed) FILTER (WHERE cr.ttl_observed <> "
+            "'unknown') AS ttl_observed,\n"
+            "    round(SUM(cr.cost_5m_usd), 2) AS cost_5m,\n"
+            "    round(SUM(cr.cost_1h_usd), 2) AS cost_1h,\n"
+            "    round(SUM(cr.cost_1h_usd) - SUM(cr.cost_5m_usd), 2) "
+            "AS delta_1h_minus_5m,\n"
+            "    round(100 * (SUM(cr.cost_1h_usd) - SUM(cr.cost_5m_usd))\n"
+            "          / NULLIF(LEAST(SUM(cr.cost_5m_usd), "
+            "SUM(cr.cost_1h_usd)), 0), 1) AS margin_pct\n"
+            "FROM cache_requests cr\n"
+            "LEFT JOIN logical_sessions ls ON ls.session_id = cr.session_id\n"
+            "WHERE cr.is_sidechain = $sidechain\n"
+            "  AND ($since IS NULL OR cr.timestamp >= $since::TIMESTAMP)\n"
+            "GROUP BY 1\n"
+            "ORDER BY GREATEST(SUM(cr.cost_5m_usd), SUM(cr.cost_1h_usd)) DESC\n"
+            "LIMIT $limit"
+        ),
+        params=(
+            _LIMIT_PARAM,
+            Param(
+                name="sidechain",
+                type="bool",
+                required=False,
+                default=False,
+                description=(
+                    "False scores the main conversation (promptCacheTtl). "
+                    "True scores subagents, which have their own "
+                    "subagentPromptCacheTtl — never merge the two."
+                ),
+            ),
+            Param(
+                name="since",
+                type="str",
+                required=False,
+                default=None,
+                description=(
+                    "ISO date/timestamp; only requests at or after this "
+                    "point. None means all time."
+                ),
+            ),
+        ),
+        note=(
+            "Negative delta_1h_minus_5m means 1h is cheaper. Read margin_pct "
+            "before acting: under ~2% is inside the simulation's modelling "
+            "error and is not a decision. The comparison works because "
+            "prefix_total (cache_read + cache_creation) is a property of the "
+            "conversation, not of the TTL — only the read/write split moves, "
+            "and cost_5m_usd / cost_1h_usd in cache_requests replay each "
+            "request under both policies. n_gaps_recoverable counts gaps "
+            "between the TTL a row was actually billed at and 60 min — the "
+            "only ones a longer TTL rescues; n_breaks_over_1h is reported "
+            "separately because no setting recovers those, and folding them "
+            "in overstates the case for switching. Group by project, not "
+            "session: the setting is per user/project, so per-session rows "
+            "(session_cache_ttl) are diagnostics only."
+        ),
+        kind="deterministic",
+    ),
 )
 
 

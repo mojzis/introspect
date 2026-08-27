@@ -93,13 +93,23 @@ The two ephemeral fields matter because the 5m and 1h caches bill at different
 write rates (input × 1.25 and input × 2.0). `assistant_message_costs` extracts
 them as `cache_creation_5m` / `cache_creation_1h`.
 
+**Which bucket is filled tells you the TTL regime.** Claude Code hands out 1h
+on subscription-within-plan for the main conversation and 5m otherwise, and
+nothing else in the record says which was in force. `assistant_message_costs`
+derives `ttl_observed` (`'5m'` / `'1h'` / `'mixed'` / `'unknown'`) from it,
+and the whole [cache-TTL counterfactual](architecture.md#cache-ttl-cache_ttlpy)
+depends on it: a 20-minute gap is a cache miss on a 5m session and not a miss
+at all on a 1h one. Subagent (sidechain) requests are governed by a separate
+`subagentPromptCacheTtl`, 5m by default for everyone.
+
 **Fallback when the split is absent.** Older records carry only the flat
 `cache_creation_input_tokens` with no nested `cache_creation` object. When both
 ephemeral fields are zero and the flat total is not, Introspect bills the whole
 total at the **5-minute** rate — the cheaper of the two, so a legacy record is
-never over-billed. The same rule is implemented twice, in
-`sql_fragments.CACHE_WRITE_FALLBACK_SQL` and in `pricing.cache_miss_premium_usd`
-/ `pricing.compute_cost_usd`; `tests/test_pricing.py` checks the two agree.
+never over-billed. The same rule is implemented in
+`sql_fragments.CACHE_WRITE_FALLBACK_SQL`, in `pricing.compute_cost_usd`, and in
+`cache_ttl.CACHE_CREATION_EFFECTIVE_SQL`; `tests/test_pricing.py` checks the
+first two agree.
 
 **Recorded but not priced.** `usage.speed` (`standard` / `fast`) and
 `usage.inference_geo` (`not_available` / `us`) are request-level pricing

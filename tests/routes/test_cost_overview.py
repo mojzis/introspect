@@ -701,7 +701,7 @@ def test_cost_overview_cache_loss_stat_card():
             response = client.get("/cost-overview")
             assert response.status_code == 200
             text = response.text
-            assert "Wasted on cache misses" in text
+            assert "Recoverable cache waste" in text
             # opus-4-6 5m write premium = (6.25 - 0.50)/1M * 8500 ≈ $0.0489.
             # format_cost rounds to "$0.05".
             assert "$0.05" in text
@@ -722,7 +722,57 @@ def test_cost_overview_cache_loss_card_hidden_without_events():
         def _check(client):
             response = client.get("/cost-overview")
             assert response.status_code == 200
-            assert "Wasted on cache misses" not in response.text
+            assert "Recoverable cache waste" not in response.text
+
+        _run_with_client(tmp, _check)
+
+
+def test_cost_overview_ttl_panel_recommends_5m_without_gaps():
+    """No pauses → 1h's 2x write surcharge is pure loss, and the panel says so.
+
+    This is the case the waste number alone gets backwards: zero waste reads
+    as "nothing to fix", when the actionable finding is that the longer TTL
+    is costing money on every incremental write.
+    """
+    sid = "sess-ttl-01-aaaa-aaaa-aaaaaaaaaaaa"
+    # 4-min gap: warm under both policies, so the only difference is the
+    # write rate.
+    specs = [(sid, _cache_loss_session_lines(sid, gap_minutes=4))]
+    with tempfile.TemporaryDirectory() as tmp_str:
+        tmp = Path(tmp_str)
+        _cost_overview_setup(tmp, specs)
+
+        def _check(client):
+            response = client.get("/cost-overview")
+            assert response.status_code == 200
+            text = response.text
+            assert "Prompt-cache TTL" in text
+            assert "would have been" in text
+            assert "Replayed at 5m" in text
+            assert "subagentPromptCacheTtl" in text
+
+        _run_with_client(tmp, _check)
+
+
+def test_cost_overview_caps_waste_at_one_hour():
+    """A 90-min gap is a break, not waste — no TTL setting recovers it.
+
+    Counting it as waste is what inflated the old number: it made pausing
+    look expensive in a band where no ``promptCacheTtl`` would have helped.
+    """
+    sid = "sess-break-01-aaaa-aaaa-aaaaaaaaaaa"
+    specs = [(sid, _cache_loss_session_lines(sid, gap_minutes=90))]
+    with tempfile.TemporaryDirectory() as tmp_str:
+        tmp = Path(tmp_str)
+        _cost_overview_setup(tmp, specs)
+
+        def _check(client):
+            response = client.get("/cost-overview")
+            assert response.status_code == 200
+            text = response.text
+            assert "Recoverable cache waste" not in text
+            assert "unrecoverable" in text
+            assert "1 ·" in text
 
         _run_with_client(tmp, _check)
 
@@ -754,7 +804,7 @@ def test_cost_overview_cache_loss_respects_window():
             assert response.status_code == 200
             text = response.text
             # In-window event surfaces.
-            assert "Wasted on cache misses" in text
+            assert "Recoverable cache waste" in text
             assert "1 event" in text
             # Out-of-window event does not — count would say "2 event" if it did.
             assert "2 event" not in text

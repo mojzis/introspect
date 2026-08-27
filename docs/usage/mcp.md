@@ -24,7 +24,7 @@ The web server exposes the same tools and prompts at
 
 ## Tools
 
-Nine hand-built tools, plus one generated per deterministic
+Nine hand-built tools, plus the ones generated per deterministic
 [query template](#query-templates).
 
 | Tool | Parameters | What it does |
@@ -34,6 +34,7 @@ Nine hand-built tools, plus one generated per deterministic
 | `recent_sessions` | `n` | List the most recent N sessions with metadata. |
 | `tool_failures` | `command_prefix`, `limit` | List failed tool calls, optionally filtered by tool-name prefix. |
 | `tool_failure_rate` | `limit`, `since`, `min_calls` | Rank tools by failure *rate* and count. `min_calls` suppresses low-N noise. Generated from the query-template registry. |
+| `cache_ttl_choice` | `limit`, `since`, `sidechain` | Would a 1h or 5m prompt-cache TTL have been cheaper, per project? Replays every request under both policies and reports the margin — a thin margin comes back as "either" rather than a recommendation. Ask this here rather than inferring it from cache-miss waste, which cannot answer it. Generated from the query-template registry. |
 | `expensive_sessions` | `limit`, `since` | Sessions ranked by cost with a `[pareto]` marker on the rows that together make 80% of spend, plus cost split, spend shape, subagent flag, and commands used. Mirrors the web Cost Overview Pareto table. |
 | `run_sql` | `sql`, `limit` | Execute one read-only `SELECT` / `WITH` query. Capped at 500 rows. |
 | `describe_schema` | — | List relations available to `run_sql` with their columns. Call it before writing SQL. |
@@ -57,6 +58,7 @@ not canned answers.
 |---|---|---|
 | `expensive_sessions` | deterministic | Which sessions cost the most? |
 | `tool_failure_rate` | deterministic | Which tools fail most, by rate and count? |
+| `cache_ttl_choice` | deterministic | Which prompt-cache TTL should I set — 5m or 1h? |
 | `session_cost_tail` | exploratory | For one session, where does cumulative cost decouple from progress? |
 | `first_prompt_triggers` | exploratory | What did each opening prompt reference and trigger? |
 | `topic_to_cost` | exploratory | Sessions about a topic, ranked by cost. |

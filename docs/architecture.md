@@ -192,7 +192,9 @@ relations; every entry appears below. `search_corpus` is built separately by
 | `raw_messages` | `file_path`, `type`, `timestamp`, `session_id`, `uuid`, `parent_uuid`, `is_sidechain`, `cwd`, `role`, `model`, `message`, `tool_use_result`, `provider`, `harness` | User/assistant messages only (`type IN ('user','assistant')`), snake_cased, with `role`/`model` extracted. Claude `UNION ALL` Codex. Every derived relation except `session_context_loads` builds on this. |
 | `project_map` | `cwd`, `canonical_path`, `project_name` | `cwd` → canonical project, worktree-aware via `projects.py`. Empty in lazy-view mode. |
 | `logical_sessions` | `session_id`, `started_at`, `ended_at`, `duration`, `user_messages`, `assistant_messages`, `model`, `cwd`, `project`, `git_branch`, `entrypoint`, `provider`, `harness` | One row per session: timestamps, duration, message counts, provenance. |
-| `assistant_message_costs` | `session_id`, `uuid`, `timestamp`, `is_sidechain`, `model`, `message_id`, `input_tokens`, `output_tokens`, `cache_read_tokens`, `cache_creation_tokens`, `cache_creation_5m`, `cache_creation_1h` | Per-assistant-message token usage, deduplicated by API `message.id` (`raw_messages` can hold duplicate copies of one response). The base for every cost figure. |
+| `assistant_message_costs` | `session_id`, `uuid`, `timestamp`, `is_sidechain`, `model`, `message_id`, `input_tokens`, `output_tokens`, `cache_read_tokens`, `cache_creation_tokens`, `cache_creation_5m`, `cache_creation_1h`, `ttl_observed` | Per-assistant-message token usage, deduplicated by API `message.id` (`raw_messages` can hold duplicate copies of one response). The base for every cost figure. `ttl_observed` (`5m` / `1h` / `mixed` / `unknown`) records which prompt-cache TTL the row was actually billed at. |
+| `cache_requests` | `session_id`, `uuid`, `message_id`, `timestamp`, `trigger_ts`, `response_end_ts`, `is_sidechain`, `model`, `seq`, `prefix_total`, `prev_prefix_total`, `common_prefix`, `gap_seconds`, `gap_bucket`, `ttl_observed`, `structural_invalidation`, `prefix_shrank`, `cache_miss`, `gap_recoverable`, `gap_unrecoverable`, `miss_premium_usd`, `warm_5m`, `warm_1h`, `cost_5m_usd`, `cost_1h_usd`, `cost_observed_usd` | One row per API request, chain-ordered by timestamp within `(session_id, is_sidechain)`. The **only** definition of a prompt-cache break — the session divider, the tokenscape event track and the cost-overview panel all read it — plus both TTL policies replayed over the same requests. See [Cache TTL](#cache-ttl-cache_ttlpy). |
+| `session_cache_ttl` | `session_id`, `is_sidechain`, `cost_5m`, `cost_1h`, `delta`, `cost_observed`, `n_requests`, `n_gaps_recoverable`, `n_gaps_unrecoverable`, `n_structural`, `ttl_observed_dominant`, `recoverable_waste_usd`, `unrecoverable_break_usd`, `recoverable_prefix_tokens` | Per-session rollup of `cache_requests`, for ad-hoc SQL. Diagnostics only: `promptCacheTtl` is set per user/project, so act on the project/global rollups, not on this. |
 | `tool_calls` | `session_id`, `called_at`, `tool_name`, `tool_use_id`, `tool_input`, `is_error`, `tool_use_result`, `result_at`, `execution_time` | Tool invocations joined with their results. `is_error` is the string `'true'`, not a SQL boolean. |
 | `session_messages_enriched` | `session_id`, `uuid`, `parent_uuid`, `timestamp`, `block_idx`, `is_sidechain`, `model`, `kind`, `text`, `thinking_text`, `tool_name`, `tool_use_id`, `tool_input` | One row per content block, classified into a `kind` (`agent_text`, `agent_thinking`, `agent_tool_call`, `tool_result`, `slash_command`, `human_prompt`, `subagent_prompt`). Backs the session detail page. |
 | `conversation_turns` | `session_id`, `timestamp`, `type`, `role`, `uuid`, `turn_order`, `content_text` | Ordered user/assistant text turns per session. |
@@ -295,6 +297,83 @@ tool) returns exactly what the registry SQL returns
 other half of the guard — see `_wire_template_adapters()` above.
 `tests/test_docs_drift.py` checks every template name is mentioned in the docs.
 
+## Cache TTL (`cache_ttl.py`)
+
+Two questions, deliberately kept apart:
+
+1. **What did idling cost?** A pause longer than the cache TTL means the
+   next request rebuilds the prefix at the write rate instead of reading it.
+2. **Would a different TTL have been cheaper?** 1h charges 2x input on every
+   incremental write, against 1.25x for 5m — so it buys back the rebuilds in
+   the 5-60 minute band and pays a surcharge on everything else.
+
+The second cannot be read off the first, which is why the module simulates
+both policies rather than reporting a waste figure.
+
+**One detection rule.** `cache_requests` is the only place a cache break is
+defined. The session-detail divider, the tokenscape event track and the
+cost-overview panel all read it; before this there were two rules with
+different thresholds (300s vs 270s, different secondary conditions) that
+could disagree about the same session.
+
+**Gap semantics.** Measured from the end of the previous response (the last
+logged block of that `message.id`) to whatever triggered the next request —
+a human prompt *or* a tool result. A tool that runs for six minutes expires
+the cache exactly like a coffee break does. Anthropic's TTL refreshes on
+every hit, so the gap since the previous *request* is the right clock, not
+the gap since the cache was first written.
+
+**Ordering** is by wall-clock timestamp within `(session_id, is_sidechain)`.
+`parent_uuid` would be the more principled chain, but real transcripts break
+it — parallel tool calls and harness rewrites leave dangling parents.
+
+**The counterfactual.** For `T ∈ {300, 3600}`, independent of what was
+observed:
+
+```
+warm(T) = gap_seconds <= T AND NOT structural_invalidation AND seq > 1
+warm : read = common_prefix;  write = prefix_total - read
+cold : read = 0;              write = prefix_total
+cost(T) = read*rate_read + write*rate_write(T) + input*rate_in + output*rate_out
+```
+
+Assumptions, stated so they can be argued with:
+
+- **Prefix invariance.** `prefix_total = cache_read + cache_creation` is a
+  property of the conversation, not the TTL — the same messages get re-sent
+  either way. Only the read/write split moves. This is what makes the
+  comparison honest.
+- **Common prefix.** A request that was observed *warm* reports its reusable
+  overlap directly as `cache_read_tokens` (cache-breakpoint granularity
+  included). A request that *missed* reports only whatever residue survived,
+  so it falls back to `min(prev_prefix_total, prefix_total)` — exact for the
+  ordinary append-only case.
+- **Structural invalidations are excluded.** Reading back ~nothing after a
+  sub-5-minute gap means the prefix changed (model or effort switch,
+  `/compact`, a tool-set change), not that time ran out. Identical cost under
+  both policies, so attributing it to pausing would be wrong.
+- **Gaps over an hour are breaks, not waste.** No TTL Claude Code offers
+  recovers them; counting them inflates the apparent upside of switching, so
+  they are reported separately.
+- **Subscription dollars are API-equivalent.** Costs are list API prices; no
+  plan coefficient is recorded in the transcripts, so treat the margin as a
+  ratio as much as a dollar figure.
+- **Sidechains never merge into the main verdict.** Subagents carry their own
+  `subagentPromptCacheTtl`, and concurrent subagents interleave in wall-clock
+  order, so their gaps are noisier. Scored separately, always.
+- **One TTL bucket per request.** Mixed-TTL billing positions inside a single
+  request are not modelled.
+
+**The gate.** `introspy cache-ttl --verify` replays the TTL each uniform-TTL
+session was *actually* billed at and compares against the observed bill. Any
+non-zero residual means the gap definition misclassified a request's warmth,
+and nothing built on the simulation is trustworthy until it is explained. The
+same command reports 5m/1h split coverage by month.
+
+Surfaces: the cost-overview portfolio panel, `introspy cache-ttl`, the
+`Prompt-cache TTL` line in `introspy stats`, and the `cache_ttl_choice`
+query template / MCP tool.
+
 ## Pricing (`pricing.py`)
 
 A hardcoded snapshot of published API list prices in USD per 1M tokens, keyed by
@@ -318,9 +397,9 @@ both the Python and the SQL lookup path. Anthropic and OpenAI (Codex
 `ephemeral_1h_input_tokens` into `cache_creation_5m` / `cache_creation_1h`.
 Older records only carry the flat `cache_creation_input_tokens`; when both split
 fields are zero and the total is non-zero, the **fallback** bills the whole
-total at the 5-minute rate (`CACHE_WRITE_FALLBACK_SQL` in SQL,
-`cache_miss_premium_usd` / `compute_cost_usd` in Python). That's the cheaper of
-the two, so a legacy record is never over-billed.
+total at the 5-minute rate (`CACHE_WRITE_FALLBACK_SQL` and
+`cache_ttl.CACHE_CREATION_EFFECTIVE_SQL` in SQL, `compute_cost_usd` in Python).
+That's the cheaper of the two, so a legacy record is never over-billed.
 
 Other exports:
 
@@ -330,10 +409,10 @@ Other exports:
   `PRICING_CACHE_WRITE_1H_RATE_SQL` — DuckDB `CASE` expressions, so mixed-model
   sessions price correctly without materializing every message in Python.
   `tests/test_pricing.py` checks the SQL and Python totals agree.
-- `CACHE_TTL_SECONDS = 300` — Anthropic's default ephemeral cache TTL, used by
-  [cache-loss detection](usage/web-ui.md#cache-loss).
-- `cache_miss_premium_usd(...)` — the premium paid for cache-write tokens that
-  would have been cache reads on a warm cache.
+- `CACHE_TTL_SECONDS = 300` — Anthropic's default ephemeral cache TTL. Just the
+  constant; the detection rule built on it (and the 1h alternative) lives in
+  [`cache_ttl.py`](#cache-ttl-cache_ttlpy), which is also where the cache-miss
+  premium is now computed — per request, in the `cache_requests` view.
 
 **Unknown models bill at $0.** `rates_for()` returns zero rates for `None`, the
 empty string, `<synthetic>`, and any unrecognized model, logging once per name

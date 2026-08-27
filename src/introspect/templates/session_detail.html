@@ -22,7 +22,10 @@
         <div><span class="meta-label">Est. Cost</span> {{ token_usage.cost or '—' }}</div>
         {% endif %}
         {% if cache_loss_summary and cache_loss_summary.count %}
-        <div><span class="meta-label">Cache losses</span> {{ cache_loss_summary.count }} · ~{{ cache_loss_summary.cost }} wasted</div>
+        <div title="Gaps between 5 and {{ cache_loss_summary.max_ttl_minutes }} min, where a longer prompt-cache TTL would have kept the prefix warm."><span class="meta-label">Cache losses</span> {{ cache_loss_summary.count }} · ~{{ cache_loss_summary.cost }} wasted</div>
+        {% endif %}
+        {% if cache_loss_summary and cache_loss_summary.break_count %}
+        <div title="Gaps longer than {{ cache_loss_summary.max_ttl_minutes }} min. No prompt-cache TTL recovers these, so they are not counted as avoidable waste."><span class="meta-label">Cache breaks</span> {{ cache_loss_summary.break_count }} · ~{{ cache_loss_summary.break_cost }} (no TTL recovers)</div>
         {% endif %}
         {% if tool_summary and tool_summary[0] > 0 %}
         <div><span class="meta-label">Tools</span> {{ tool_summary[0] }} tool call{{ 's' if tool_summary[0] != 1 else '' }}{% if tool_summary[1] > 0 %} ({{ tool_summary[1] }} failed){% endif %}{% if tool_summary[2] %} — {{ tool_summary[2] }}{% endif %}</div>
