@@ -37,6 +37,19 @@ uv run biston scan --suggest .
 uv run biston overview .
 ```
 
+## Claude Code skills
+
+Skills under `.claude/skills/` extend Claude Code when working in this repo:
+
+| Skill | Purpose |
+|---|---|
+| `/python-review` | Deep code-quality review — design, naming, performance, test quality. |
+| `/docs-review` | Checks the diff against `docs/`, `README.md`, and `CLAUDE.md`, and fixes reference docs that are missing or stale. |
+| `nolegend` | Tufte-style Plotly conventions for the server-side `go.Figure` charts. |
+
+After finishing a change, run `/python-review` and then `/docs-review`, and
+apply every 🔴 Must Fix finding before marking the work complete.
+
 ## Worktrees
 
 ```bash

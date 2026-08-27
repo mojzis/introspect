@@ -76,3 +76,4 @@ uv, ruff (lint/format), ty (type check), tyf (code search), biston (clone detect
 - Pre-commit hook auto-fixes and restages files. Only blocks on unfixable issues.
 - All user-facing features must have tests. When adding new routes, template variables, query parameters, or UI functionality, add corresponding tests in `tests/routes/`.
 - **IMPORTANT**: After completing any task, you MUST run the `/python-review` skill to review all changes. Apply all 🔴 Must Fix and 🟡 Should Fix findings before marking work as complete.
+- **IMPORTANT**: Then run the `/docs-review` skill to check the diff against `docs/`, `README.md`, and `CLAUDE.md`. Apply all 🔴 Must Fix findings before marking work as complete.
