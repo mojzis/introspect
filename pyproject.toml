@@ -171,6 +171,10 @@ help = "Run all checks (report all failures)"
 cmd = "pytest tests/e2e -v"
 help = "Run E2E tests"
 
+[tool.poe.tasks.docs-cli]
+cmd = "python scripts/gen_cli_docs.py"
+help = "Regenerate docs/usage/cli-reference.md from the CLI's own --help"
+
 [tool.poe.tasks.setup]
 cmd = "bash scripts/install-hooks.sh"
 help = "Install git hooks"

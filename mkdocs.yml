@@ -55,6 +55,7 @@ nav:
   - Usage:
       - Web UI: usage/web-ui.md
       - CLI: usage/cli.md
+      - CLI reference: usage/cli-reference.md
       - MCP server: usage/mcp.md
       - SQL API: usage/sql-api.md
   - Reference:
@@ -101,6 +102,7 @@ plugins:
         Usage:
           - usage/web-ui.md
           - usage/cli.md
+          - usage/cli-reference.md
           - usage/mcp.md
           - usage/sql-api.md
         Reference:
