@@ -50,13 +50,17 @@
          {% if msg.kind == 'slash_command' %}x-show="!onlyHuman"{% endif %}
          {% if msg.kind == 'subagent_prompt' %}x-show="!onlyHuman"{% endif %}>
 
+        {# Anchored on the request that paid, so a long-running tool that
+           returns after the TTL shows a divider too — not only a human
+           pause. #}
+        {% if msg.cache_loss_event %}
+        <div class="cache-loss-divider"
+             title="{% if msg.cache_loss_recoverable %}The prompt cache expired during this {{ msg.cache_loss_gap_minutes }} min gap, and this reply paid {{ msg.cache_loss_cost }} extra to rebuild it. A {{ msg.cache_loss_max_ttl_minutes }} min cache TTL would have kept it warm.{% else %}This gap ran past {{ msg.cache_loss_max_ttl_minutes }} min, so no prompt-cache TTL would have kept the prefix warm — a break, not avoidable waste. Rebuilding cost {{ msg.cache_loss_cost }}.{% endif %}">
+            <span>{% if msg.cache_loss_recoverable %}cache lost · {{ msg.cache_loss_gap_minutes }} min gap · ~{{ msg.cache_loss_cost }} wasted{% else %}break · {{ msg.cache_loss_gap_minutes }} min gap · no TTL recovers this{% endif %}</span>
+        </div>
+        {% endif %}
+
         {% if msg.kind == 'human_prompt' %}
-            {% if msg.cache_loss_event %}
-            <div class="cache-loss-divider"
-                 title="The previous turn was more than 5 min ago — the prompt cache likely expired and the next assistant reply paid {{ msg.cache_loss_cost }} extra to rebuild it.">
-                <span>cache lost · {{ msg.cache_loss_gap_minutes }} min gap · ~{{ msg.cache_loss_cost }} wasted</span>
-            </div>
-            {% endif %}
             <div class="msg-kind-label">you <span class="msg-time" title="{{ msg.timestamp_full }}">{{ msg.timestamp }}</span></div>
             {{ clamp_body(msg.text, msg.text_needs_collapse, msg.text_line_count, msg.text_char_count, 'msg-text-human') }}
 

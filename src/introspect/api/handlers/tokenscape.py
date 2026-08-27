@@ -54,12 +54,6 @@ _CHARS_PER_TOKEN = 4.0
 # /compact: total context plummets — history truncated.
 _COMPACT_DROP_RATIO = 0.5
 _COMPACT_MIN_DROP = 5_000
-# 5m cache TTL: idle gap >= ~5min and cache_read collapsed — the same
-# context is re-sent and re-cached at the write rate.
-_TTL_MIN_GAP_SECONDS = 4 * 60 + 30
-_TTL_CACHE_DROP_RATIO = 0.5
-_TTL_MIN_CACHE = 5_000
-
 _TOP_BANDS = 6
 # Inline slab captions only when the slab is tall enough to hold them.
 _LABEL_MIN_HEIGHT_RATIO = 0.07
@@ -568,31 +562,42 @@ def _sidechain_costs_per_turn(
 
 
 def _detect_event(
-    turns: list[_Turn],
-    ts: datetime.datetime | None,
-    ctx: int,
-    cache_read: int,
+    turns: list[_Turn], ctx: int, uuid: str, ttl_break_uuids: frozenset[str]
 ) -> str | None:
-    """Classify the transition into this turn: /compact, 5m TTL break, or none."""
+    """Classify the transition into this turn: /compact, TTL break, or none.
+
+    TTL breaks are not re-derived here. ``ttl_break_uuids`` comes from the
+    ``cache_requests`` view — the single detection rule the session-detail
+    divider and the cost-overview panel also read — so this event track and
+    those surfaces can no longer disagree about what a cache break is.
+    """
     if not turns:
         return None
     prev = turns[-1]
     drop = prev.ctx - ctx
     if drop > _COMPACT_MIN_DROP and ctx < prev.ctx * _COMPACT_DROP_RATIO:
         return "compact"
-    if (
-        prev.ts is not None
-        and ts is not None
-        and (ts - prev.ts).total_seconds() >= _TTL_MIN_GAP_SECONDS
-        and prev.cache_read > _TTL_MIN_CACHE
-        and cache_read < prev.cache_read * _TTL_CACHE_DROP_RATIO
-    ):
+    if uuid in ttl_break_uuids:
         return "ttl_break"
     return None
 
 
+def _fetch_ttl_break_uuids(
+    db: duckdb.DuckDBPyConnection, session_id: str, *, sidechain: bool
+) -> frozenset[str]:
+    """Request uuids the shared rule flags as cache misses, for one chain."""
+    rows = db.execute(
+        "SELECT uuid FROM cache_requests"
+        " WHERE session_id = ? AND is_sidechain = ? AND cache_miss",
+        [session_id, sidechain],
+    ).fetchall()
+    return frozenset(str(row[0]) for row in rows)
+
+
 def _walk_rows(  # noqa: PLR0912
-    rows: list[tuple], edited_files: set[str]
+    rows: list[tuple],
+    edited_files: set[str],
+    ttl_break_uuids: frozenset[str] = frozenset(),
 ) -> tuple[list[_Band], list[_Turn]]:
     """Single pass: build bands (token-attributed content) and turns.
 
@@ -638,7 +643,7 @@ def _walk_rows(  # noqa: PLR0912
             continue
 
         turn_idx = len(turns)
-        event = _detect_event(turns, ts, ctx, int(cache_read or 0))
+        event = _detect_event(turns, ctx, str(uuid), ttl_break_uuids)
 
         if event == "compact":
             for band in bands:
@@ -1296,7 +1301,10 @@ def _render_stripes_figure(stripes: list[dict], turns: list[_Turn]) -> str:
 
 
 def _build_subagent_run_context(
-    group_rows: list[tuple], label: str, edited_files: set[str]
+    group_rows: list[tuple],
+    label: str,
+    edited_files: set[str],
+    ttl_break_uuids: frozenset[str] = frozenset(),
 ) -> dict | None:
     """Stripes data for one subagent invocation (figure rendered later).
 
@@ -1306,7 +1314,7 @@ def _build_subagent_run_context(
     priced assistant turns (orphan/degenerate sidechains — e.g. a lone
     prompt with no usage).
     """
-    bands, turns = _walk_rows(group_rows, edited_files)
+    bands, turns = _walk_rows(group_rows, edited_files, ttl_break_uuids)
     if not turns:
         return None
     generation_costs = _allocate_costs(bands, turns)
@@ -1366,9 +1374,14 @@ def _build_subagent_runs(
         groups = _group_sidechain_rows(sidechain_rows)
         prompts = _fetch_subagent_prompts(db, session_id)
         merged = _label_and_merge_subagent_groups(db, session_id, groups, prompts)
+        # Subagents run under their own `subagentPromptCacheTtl`; the shared
+        # rule scores them off the same view, on the sidechain partition.
+        ttl_breaks = _fetch_ttl_break_uuids(db, session_id, sidechain=True)
         run_ctxs = []
         for group, label in merged:
-            run_ctx = _build_subagent_run_context(group, label, edited_files)
+            run_ctx = _build_subagent_run_context(
+                group, label, edited_files, ttl_breaks
+            )
             if run_ctx is not None:
                 run_ctxs.append(run_ctx)
         shown, hidden = _select_subagent_runs(run_ctxs)
@@ -1394,7 +1407,8 @@ def build_tokenscape_context(db: duckdb.DuckDBPyConnection, session_id: str) -> 
     if not rows:
         return no_data
 
-    bands, turns = _walk_rows(rows, edited_files)
+    ttl_breaks = _fetch_ttl_break_uuids(db, session_id, sidechain=False)
+    bands, turns = _walk_rows(rows, edited_files, ttl_breaks)
     if not turns:
         return no_data
 
