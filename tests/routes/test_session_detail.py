@@ -72,6 +72,27 @@ def test_session_detail_marks_cache_loss_event():
             assert "~$0.05 wasted" in text
 
 
+def test_cache_loss_divider_survives_the_message_filters():
+    """The divider sits outside the row, so ``x-show`` can't swallow it.
+
+    It anchors on the reply that paid, and a reply routinely opens with a
+    thinking or tool_use block — both of which live in rows the "hide
+    thinking" / "hide tools" toggles hide. Nesting the divider inside such a
+    row would make it vanish exactly when the reply is collapsed.
+    """
+    with tempfile.TemporaryDirectory() as tmp_str:
+        tmp = Path(tmp_str)
+        with _cache_loss_client(tmp, gap_minutes=6) as client:
+            response = client.get(f"/sessions/{_CACHE_LOSS_SID}?tab=messages")
+            assert response.status_code == 200
+            divider = response.text.index('class="cache-loss-divider"')
+            row_open = response.text.rindex("<div ", 0, divider)
+            # The element opened immediately before the divider must not be
+            # the visibility-gated msg-row wrapper.
+            assert "msg-row" not in response.text[row_open:divider]
+            assert "x-show" not in response.text[row_open:divider]
+
+
 def test_session_detail_marks_long_gap_as_unrecoverable_break():
     """A 90-min gap is labelled a break, not waste — no TTL recovers it."""
     with tempfile.TemporaryDirectory() as tmp_str:

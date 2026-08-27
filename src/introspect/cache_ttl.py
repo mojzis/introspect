@@ -137,24 +137,28 @@ TTL_OBSERVED_SQL = """
 """
 
 
+def _warm_sql(ttl_seconds: int) -> str:
+    """Would this request have hit the cache under a ``ttl_seconds`` policy?
+
+    The whole counterfactual turns on this one predicate — everything else
+    (``prefix_total``, ``common_prefix``) is invariant to the setting.
+    """
+    return f"(seq > 1 AND NOT structural_invalidation AND gap_seconds <= {ttl_seconds})"
+
+
 def _policy_cost_sql(ttl_seconds: int, write_rate_sql: str) -> str:
     """Simulated USD cost of one request under a fixed TTL policy.
 
     ``prefix_total`` is invariant to the policy; only the read/write split
     moves, so the counterfactual is one CASE over ``warm(T)``.
     """
-    warm = f"(seq > 1 AND NOT structural_invalidation AND gap_seconds <= {ttl_seconds})"
-    read = f"(CASE WHEN {warm} THEN common_prefix ELSE 0 END)"
+    read = f"(CASE WHEN {_warm_sql(ttl_seconds)} THEN common_prefix ELSE 0 END)"
     return (
         f"({read} * ({PRICING_CACHE_READ_RATE_SQL})"
         f" + (prefix_total - {read}) * ({write_rate_sql})"
         f" + input_tokens * ({PRICING_INPUT_RATE_SQL})"
         f" + output_tokens * ({PRICING_OUTPUT_RATE_SQL})) / 1000000.0"
     )
-
-
-def _warm_sql(ttl_seconds: int) -> str:
-    return f"(seq > 1 AND NOT structural_invalidation AND gap_seconds <= {ttl_seconds})"
 
 
 # Seconds of TTL a row was actually billed under. 'mixed' and 'unknown' fall
@@ -183,10 +187,11 @@ def _gap_bucket_sql() -> str:
 # The observed (actually billed) cost of one request. Kept separate from the
 # shared ``COST_EXPR_SQL`` fragment because ``cache_requests`` has already
 # resolved the legacy split into ``cache_creation_effective``.
+# Everything that is not a 1h write bills at the 5m rate — the 5m bucket
+# itself and, for legacy rows, the unsplit remainder of cache_creation.
 _OBSERVED_COST_SQL = (
     f"(cache_read_tokens * ({PRICING_CACHE_READ_RATE_SQL})"
-    f" + cache_creation_5m * ({PRICING_CACHE_WRITE_5M_RATE_SQL})"
-    f" + (cache_creation_effective - cache_creation_5m - cache_creation_1h)"
+    f" + (cache_creation_effective - cache_creation_1h)"
     f"   * ({PRICING_CACHE_WRITE_5M_RATE_SQL})"
     f" + cache_creation_1h * ({PRICING_CACHE_WRITE_1H_RATE_SQL})"
     f" + input_tokens * ({PRICING_INPUT_RATE_SQL})"
@@ -327,14 +332,12 @@ classified AS (
         -- The one detection rule. A request paid to rebuild a prefix it
         -- could have read: the gap outran the TTL it was actually billed
         -- under, and the prefix itself did not change underneath it.
+        -- DuckDB resolves lateral aliases in the same SELECT list, so this
+        -- reuses ``structural_invalidation`` above rather than restating the
+        -- predicate — one copy of the rule, not two.
         COALESCE(
             seq > 1
-            AND NOT (
-                gap_seconds <= {TTL_5M_SECONDS}
-                AND prev_prefix_total >= {STRUCTURAL_MIN_PREFIX}
-                AND cache_read_tokens
-                    < {STRUCTURAL_READ_RATIO} * prev_prefix_total
-            )
+            AND NOT structural_invalidation
             AND gap_seconds > {OBSERVED_TTL_SECONDS_SQL},
             FALSE
         ) AS cache_miss
@@ -416,35 +419,54 @@ FROM priced
 """  # noqa: S608
 
 
-# Per-session rollup of the counterfactual. Diagnostics only: the setting is
-# per user/project, so a per-session "you should have used 1h here" is not
-# actionable on its own — the project and global rollups are.
-SESSION_CACHE_TTL_BODY = """
+def _rollup_select(alias: str = "") -> str:
+    """Aggregate list every TTL rollup shares, optionally table-qualified.
+
+    ``_comparison_from_row`` unpacks these positionally, and
+    ``session_cache_ttl`` is built from the same fragment, so the column
+    order lives in exactly one place.
+    """
+    q = f"{alias}." if alias else ""
+    return f"""
+    SUM({q}cost_5m_usd) AS cost_5m,
+    SUM({q}cost_1h_usd) AS cost_1h,
+    COUNT(*) AS n_requests,
+    COUNT(*) FILTER (WHERE {q}gap_recoverable) AS n_gaps_recoverable,
+    COUNT(*) FILTER (WHERE {q}gap_unrecoverable) AS n_gaps_unrecoverable,
+    COUNT(*) FILTER (WHERE {q}structural_invalidation) AS n_structural,
+    mode({q}ttl_observed) FILTER (WHERE {q}ttl_observed <> 'unknown')
+        AS ttl_observed_dominant,
+    COALESCE(
+        SUM({q}miss_premium_usd) FILTER (WHERE {q}gap_recoverable), 0
+    ) AS recoverable_waste_usd,
+    COALESCE(
+        SUM({q}miss_premium_usd) FILTER (WHERE {q}gap_unrecoverable), 0
+    ) AS unrecoverable_break_usd
+"""
+
+
+# Per-session rollup of the counterfactual, exposed for ad-hoc SQL.
+# Diagnostics only: ``promptCacheTtl`` is set per user/project, so a
+# per-session "you should have used 1h here" is not actionable on its own —
+# the project and global rollups are what you act on. Built from the same
+# ``_rollup_select`` fragment as those, so the aggregate definitions cannot
+# drift between the view and the Python API.
+def _session_cache_ttl_body() -> str:
+    return f"""
 SELECT
     cr.session_id,
     cr.is_sidechain,
-    COUNT(*) AS n_requests,
-    COUNT(*) FILTER (WHERE cr.gap_recoverable) AS n_gaps_recoverable,
-    COUNT(*) FILTER (WHERE cr.gap_unrecoverable) AS n_gaps_unrecoverable,
-    COUNT(*) FILTER (WHERE cr.structural_invalidation) AS n_structural,
-    SUM(cr.prefix_total) FILTER (WHERE cr.gap_recoverable)
-        AS recoverable_prefix_tokens,
-    COALESCE(SUM(cr.miss_premium_usd) FILTER (WHERE cr.gap_recoverable), 0)
-        AS recoverable_waste_usd,
-    COALESCE(SUM(cr.miss_premium_usd) FILTER (WHERE cr.gap_unrecoverable), 0)
-        AS unrecoverable_break_usd,
-    SUM(cr.cost_5m_usd) AS cost_5m,
-    SUM(cr.cost_1h_usd) AS cost_1h,
-    SUM(cr.cost_observed_usd) AS cost_observed,
+    {_rollup_select("cr")},
     SUM(cr.cost_1h_usd) - SUM(cr.cost_5m_usd) AS delta,
-    mode(cr.ttl_observed) FILTER (WHERE cr.ttl_observed <> 'unknown')
-        AS ttl_observed_dominant,
-    COUNT(DISTINCT cr.ttl_observed) FILTER (
-        WHERE cr.ttl_observed <> 'unknown'
-    ) = 1 AS ttl_observed_uniform
+    SUM(cr.cost_observed_usd) AS cost_observed,
+    COALESCE(SUM(cr.prefix_total) FILTER (WHERE cr.gap_recoverable), 0)
+        AS recoverable_prefix_tokens
 FROM cache_requests cr
 GROUP BY cr.session_id, cr.is_sidechain
-"""
+"""  # noqa: S608
+
+
+SESSION_CACHE_TTL_BODY = _session_cache_ttl_body()
 
 
 class TtlComparison(NamedTuple):
@@ -522,21 +544,6 @@ def compare_ttl(  # noqa: PLR0913
     )
 
 
-_ROLLUP_SELECT = """
-    SUM(cost_5m_usd) AS cost_5m,
-    SUM(cost_1h_usd) AS cost_1h,
-    COUNT(*) AS n_requests,
-    COUNT(*) FILTER (WHERE gap_recoverable) AS n_gaps_recoverable,
-    COUNT(*) FILTER (WHERE gap_unrecoverable) AS n_gaps_unrecoverable,
-    COUNT(*) FILTER (WHERE structural_invalidation) AS n_structural,
-    mode(ttl_observed) FILTER (WHERE ttl_observed <> 'unknown') AS ttl_dominant,
-    COALESCE(SUM(miss_premium_usd) FILTER (WHERE gap_recoverable), 0)
-        AS recoverable_waste,
-    COALESCE(SUM(miss_premium_usd) FILTER (WHERE gap_unrecoverable), 0)
-        AS unrecoverable_break
-"""
-
-
 def _comparison_from_row(row: tuple | None) -> TtlComparison:
     if row is None or row[0] is None:
         return compare_ttl(cost_5m=0.0, cost_1h=0.0)
@@ -554,13 +561,18 @@ def _comparison_from_row(row: tuple | None) -> TtlComparison:
 
 
 def _sidechain_and_window(
-    *, sidechain: bool, window: tuple[str, str] | None
+    *, sidechain: bool, window: tuple[str, str] | None, alias: str = ""
 ) -> tuple[str, list[Any]]:
-    """Build the WHERE clause shared by the global and per-project rollups."""
-    clause = "WHERE is_sidechain = ?"
+    """WHERE clause shared by the global and per-project rollups.
+
+    ``alias`` qualifies the column names for callers that join
+    ``cache_requests`` against another relation.
+    """
+    prefix = f"{alias}." if alias else ""
+    clause = f"WHERE {prefix}is_sidechain = ?"
     params: list[Any] = [sidechain]
     if window is not None:
-        clause += " AND timestamp >= ? AND timestamp < ?"
+        clause += f" AND {prefix}timestamp >= ? AND {prefix}timestamp < ?"
         params.extend(window)
     return clause, params
 
@@ -578,7 +590,7 @@ def global_ttl_comparison(
     """
     clause, params = _sidechain_and_window(sidechain=sidechain, window=window)
     row = db.execute(
-        f"SELECT {_ROLLUP_SELECT} FROM cache_requests {clause}",  # noqa: S608
+        f"SELECT {_rollup_select()} FROM cache_requests {clause}",  # noqa: S608
         params,
     ).fetchone()
     return _comparison_from_row(row)
@@ -595,19 +607,17 @@ def project_ttl_comparisons(
     The setting is per user/project, so this — not the per-session rollup —
     is the actionable granularity.
     """
-    clause, params = _sidechain_and_window(sidechain=sidechain, window=window)
+    clause, params = _sidechain_and_window(
+        sidechain=sidechain, window=window, alias="cr"
+    )
     rows = db.execute(
         f"""
-        SELECT COALESCE(ls.project, '?') AS project, {_ROLLUP_SELECT}
+        SELECT COALESCE(ls.project, '?') AS project, {_rollup_select("cr")}
         FROM cache_requests cr
         LEFT JOIN logical_sessions ls ON ls.session_id = cr.session_id
-        {
-            clause.replace("WHERE ", "WHERE cr.").replace(
-                "AND timestamp", "AND cr.timestamp"
-            )
-        }
+        {clause}
         GROUP BY 1
-        ORDER BY GREATEST(SUM(cost_5m_usd), SUM(cost_1h_usd)) DESC
+        ORDER BY GREATEST(SUM(cr.cost_5m_usd), SUM(cr.cost_1h_usd)) DESC
         """,  # noqa: S608
         params,
     ).fetchall()
@@ -662,7 +672,7 @@ def cache_miss_event_rows(
             "ttl_observed": row[6],
             "prefix_total": int(row[7] or 0),
             "common_prefix": int(row[8] or 0),
-            "wasted_usd": float(row[9] or 0.0),
+            "miss_premium_usd": float(row[9] or 0.0),
             "recoverable": bool(row[10]),
             "prefix_shrank": bool(row[11]),
         }
@@ -670,7 +680,25 @@ def cache_miss_event_rows(
     ]
 
 
-def summarize_misses(events: list[dict[str, Any]]) -> dict[str, Any]:
+class MissSummary(NamedTuple):
+    """Cache misses split by whether any TTL setting would have avoided them.
+
+    Kept as a pair rather than one total: adding them back together is
+    exactly the conflation this replaced.
+    """
+
+    recoverable_count: int
+    recoverable_usd: float
+    break_count: int
+    break_usd: float
+
+    @property
+    def count(self) -> int:
+        """Every miss, recoverable or not — for diagnostics, not display."""
+        return self.recoverable_count + self.break_count
+
+
+def summarize_misses(events: list[dict[str, Any]]) -> MissSummary:
     """Split a miss list into recoverable waste and unrecoverable breaks.
 
     Kept next to the detection rule so every surface renders the same two
@@ -678,13 +706,12 @@ def summarize_misses(events: list[dict[str, Any]]) -> dict[str, Any]:
     """
     recoverable = [e for e in events if e["recoverable"]]
     breaks = [e for e in events if not e["recoverable"]]
-    return {
-        "recoverable_count": len(recoverable),
-        "recoverable_usd": sum(e["wasted_usd"] for e in recoverable),
-        "break_count": len(breaks),
-        "break_usd": sum(e["wasted_usd"] for e in breaks),
-        "count": len(events),
-    }
+    return MissSummary(
+        recoverable_count=len(recoverable),
+        recoverable_usd=sum(e["miss_premium_usd"] for e in recoverable),
+        break_count=len(breaks),
+        break_usd=sum(e["miss_premium_usd"] for e in breaks),
+    )
 
 
 def gap_histogram(
@@ -723,9 +750,16 @@ def gap_histogram(
             "bucket": label,
             "count": counts.get(label, (0, 0))[0],
             "prefix_tokens": counts.get(label, (0, 0))[1],
-            "recoverable": label in ("5-15m", "15-60m"),
+            # Derived from the bucket's own upper bound, so renaming a label
+            # can't silently turn the column all-False. Note this is the
+            # *policy* band (what 1h rescues over 5m), not a claim about any
+            # particular project: on a project already billed at 1h these
+            # gaps are already warm, which is why the summary line reports
+            # recoverable misses separately.
+            "recoverable": upper is not None
+            and TTL_5M_SECONDS < upper <= MAX_RECOVERABLE_GAP_SECONDS,
         }
-        for label, _ in GAP_BUCKETS
+        for label, upper in GAP_BUCKETS
     ]
 
 
@@ -743,12 +777,20 @@ def parity_residuals(
     rows = db.execute(
         """
         WITH uniform AS (
+            -- Uniformity is tested over *every* request in the session, not
+            -- only the 5m/1h ones: pre-filtering would let a 'mixed' or
+            -- 'unknown' row hide from the test and then be simulated at a
+            -- TTL it was never billed under, reporting a residual against a
+            -- model that is in fact correct.
             SELECT session_id,
                    ANY_VALUE(ttl_observed) AS ttl
             FROM cache_requests
-            WHERE is_sidechain = ? AND ttl_observed IN ('5m', '1h')
+            WHERE is_sidechain = ?
             GROUP BY session_id
-            HAVING COUNT(DISTINCT ttl_observed) = 1
+            HAVING COUNT(*) FILTER (
+                       WHERE ttl_observed NOT IN ('5m', '1h')
+                   ) = 0
+               AND COUNT(DISTINCT ttl_observed) = 1
         )
         SELECT
             cr.session_id,

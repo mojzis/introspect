@@ -378,20 +378,6 @@ async def sessions(  # noqa: PLR0913
     )
 
 
-def _detect_cache_loss_events(db, session_id: str) -> list[dict]:
-    """Per-session cache misses with the fields the messages view needs.
-
-    Thin adapter over ``cache_ttl.cache_miss_event_rows`` — the detection
-    rule itself lives in the ``cache_requests`` view, so this marker, the
-    tokenscape event track and the portfolio panel cannot drift apart.
-
-    Anchored on the *request* that paid, not on the human prompt, so a
-    long-running tool that returns after six minutes is visible too; the old
-    human-prompt-only anchor missed those entirely.
-    """
-    return cache_miss_event_rows(db, session_id=session_id)
-
-
 def _build_messages_context(
     db,
     session_id: str,
@@ -529,7 +515,7 @@ def _build_messages_context(
             continue
         msg["cache_loss_event"] = True
         msg["cache_loss_gap_minutes"] = max(1, event["gap_seconds"] // 60)
-        msg["cache_loss_cost"] = format_cost(event["wasted_usd"])
+        msg["cache_loss_cost"] = format_cost(event["miss_premium_usd"])
         msg["cache_loss_recoverable"] = event["recoverable"]
         msg["cache_loss_max_ttl_minutes"] = MAX_RECOVERABLE_GAP_SECONDS // 60
     return parsed_messages
@@ -1727,13 +1713,17 @@ async def session_detail(
         [session_id, session_id, session_cwd or ""],
     ).fetchone()
 
-    cache_loss_events = _detect_cache_loss_events(db, session_id)
+    # Detection lives in the ``cache_requests`` view, so this marker, the
+    # tokenscape event track and the portfolio panel cannot drift apart. Each
+    # event is anchored on the *request* that paid rather than on a human
+    # prompt, so a long-running tool that returns past the TTL shows up too.
+    cache_loss_events = cache_miss_event_rows(db, session_id=session_id)
     misses = summarize_misses(cache_loss_events)
     cache_loss_summary = {
-        "count": misses["recoverable_count"],
-        "cost": format_cost(misses["recoverable_usd"]),
-        "break_count": misses["break_count"],
-        "break_cost": format_cost(misses["break_usd"]),
+        "count": misses.recoverable_count,
+        "cost": format_cost(misses.recoverable_usd),
+        "break_count": misses.break_count,
+        "break_cost": format_cost(misses.break_usd),
         "max_ttl_minutes": MAX_RECOVERABLE_GAP_SECONDS // 60,
     }
 

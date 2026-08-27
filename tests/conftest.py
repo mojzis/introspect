@@ -1,10 +1,14 @@
 """Shared test fixtures and helpers."""
 
 import json
+from contextlib import contextmanager
+from datetime import datetime, timedelta
 from pathlib import Path
 
 import duckdb
 import pytest
+
+from introspect.db import materialize_views
 
 LOCK_ERROR_MESSAGE = (
     'IO Error: Could not set lock on file "/tmp/fake.duckdb": '
@@ -238,3 +242,93 @@ def write_codex_session(tmp_dir: Path, session_id: str) -> Path:
         ),
     ]
     return write_codex_rollout(tmp_dir, session_id, lines)
+
+
+# ---------------------------------------------------------------------------
+# Cache-TTL fixture builders
+#
+# Shared by ``test_cache_ttl``, ``test_cli`` and ``test_mcp_tools`` — token
+# counts and gaps are round numbers so an expected cost can be worked out by
+# hand from ``pricing._PRICING`` instead of snapshotted from the code.
+# ---------------------------------------------------------------------------
+
+TTL_MODEL = "claude-opus-4-6"
+TTL_T0 = datetime.fromisoformat("2026-04-21T09:00:00+00:00")
+
+
+def ttl_ts(moment: datetime) -> str:
+    """Render a datetime the way Claude Code stamps its JSONL records."""
+    return moment.strftime("%Y-%m-%dT%H:%M:%S.000Z")
+
+
+def ttl_usage(
+    *, read: int, create: int, ttl: str | None = "5m", inp: int = 10, out: int = 20
+) -> dict:
+    """Usage block with an optional nested 5m/1h split.
+
+    ``ttl=None`` reproduces the legacy schema — ``cache_creation_input_tokens``
+    with no ``cache_creation`` sub-object — which bills at the 5m rate.
+    """
+    usage: dict = {
+        "input_tokens": inp,
+        "output_tokens": out,
+        "cache_read_input_tokens": read,
+        "cache_creation_input_tokens": create,
+    }
+    if ttl is not None:
+        usage["cache_creation"] = {
+            "ephemeral_5m_input_tokens": create if ttl == "5m" else 0,
+            "ephemeral_1h_input_tokens": create if ttl == "1h" else 0,
+        }
+    return usage
+
+
+def ttl_turn(
+    session_id: str,
+    n: int,
+    at: datetime,
+    *,
+    prompt: str = "go",
+    read: int,
+    create: int,
+    ttl: str | None = "5m",
+    inp: int = 10,
+    out: int = 20,
+) -> list[dict]:
+    """One user prompt plus the assistant reply it triggered.
+
+    The first prompt carries a ``toolUseResult`` so ``read_json_auto`` infers
+    that column; without it the raw-messages load fails to bind.
+    """
+    return [
+        make_user_message(
+            session_id,
+            f"u{n}",
+            f"a{n - 1}" if n > 1 else None,
+            ttl_ts(at),
+            prompt,
+            tool_use_result={"content": "seed"} if n == 1 else None,
+        ),
+        make_assistant_message(
+            session_id,
+            f"a{n}",
+            f"u{n}",
+            ttl_ts(at + timedelta(seconds=1)),
+            [{"type": "text", "text": f"reply {n}"}],
+            model=TTL_MODEL,
+            msg_id=f"msg{n}",
+            usage=ttl_usage(read=read, create=create, ttl=ttl, inp=inp, out=out),
+        ),
+    ]
+
+
+@contextmanager
+def ttl_materialized(tmp_dir: Path, session_id: str, lines: list[dict]):
+    """Write ``lines`` and yield an in-memory DB materialized over them."""
+    write_jsonl(tmp_dir, session_id, lines)
+    conn = duckdb.connect(":memory:")
+    materialize_views(conn, glob_pattern(tmp_dir), 0, resolve_projects=False)
+    try:
+        yield conn
+    finally:
+        conn.close()

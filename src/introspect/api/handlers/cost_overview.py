@@ -47,6 +47,7 @@ from fastapi.responses import HTMLResponse
 from introspect.cache_ttl import (
     MAX_RECOVERABLE_GAP_SECONDS,
     cache_miss_event_rows,
+    global_ttl_comparison,
     summarize_misses,
 )
 from introspect.sql_fragments import (
@@ -409,6 +410,37 @@ def _build_panel_context(
         "cache_loss": _aggregate_cache_loss(
             db, window, total_cost_usd=pareto["total_cost_usd"]
         ),
+        "ttl_verdict": _build_ttl_verdict(db, window),
+    }
+
+
+def _build_ttl_verdict(
+    db: duckdb.DuckDBPyConnection, window: TimeWindow | None
+) -> dict[str, Any]:
+    """Would 1h or 5m have been cheaper, over the sessions in ``window``?
+
+    The waste number alone can't answer this: 1h charges 2x input on every
+    incremental cache write, not just on the rebuilds it avoids. So both
+    policies are replayed over the same requests and the totals compared.
+
+    Reported at portfolio scope because ``promptCacheTtl`` is set per
+    user/project — a per-session verdict would not be actionable. Subagents
+    are excluded: they have their own ``subagentPromptCacheTtl``.
+    """
+    verdict = global_ttl_comparison(db, window=window)
+    return {
+        "n_requests": verdict.n_requests,
+        "cost_5m": format_cost(verdict.cost_5m),
+        "cost_1h": format_cost(verdict.cost_1h),
+        "recommendation": verdict.recommendation,
+        "decisive": verdict.decisive,
+        "savings": format_cost(verdict.savings),
+        "margin_pct": verdict.margin_pct,
+        "ttl_observed": verdict.ttl_observed_dominant,
+        "n_gaps_recoverable": verdict.n_gaps_recoverable,
+        "n_gaps_unrecoverable": verdict.n_gaps_unrecoverable,
+        "n_structural": verdict.n_structural,
+        "max_ttl_minutes": MAX_RECOVERABLE_GAP_SECONDS // 60,
     }
 
 
@@ -427,20 +459,18 @@ def _aggregate_cache_loss(
     switching. They are reported alongside as breaks instead.
     """
     misses = summarize_misses(cache_miss_event_rows(db, timestamp_window=window))
-    cost_usd = misses["recoverable_usd"]
+    cost_usd = misses.recoverable_usd
     pct_of_total = 100.0 * cost_usd / total_cost_usd if total_cost_usd > 0 else 0.0
-    break_pct = (
-        100.0 * misses["break_usd"] / total_cost_usd if total_cost_usd > 0 else 0.0
-    )
+    break_pct = 100.0 * misses.break_usd / total_cost_usd if total_cost_usd > 0 else 0.0
     return {
-        "count": misses["recoverable_count"],
+        "count": misses.recoverable_count,
         "cost_usd": cost_usd,
         "cost": format_cost(cost_usd),
         "pct_of_total": pct_of_total,
         "show_pct": pct_of_total >= CACHE_LOSS_PCT_DISPLAY_THRESHOLD,
-        "break_count": misses["break_count"],
-        "break_cost_usd": misses["break_usd"],
-        "break_cost": format_cost(misses["break_usd"]),
+        "break_count": misses.break_count,
+        "break_cost_usd": misses.break_usd,
+        "break_cost": format_cost(misses.break_usd),
         "break_pct_of_total": break_pct,
         "max_ttl_minutes": MAX_RECOVERABLE_GAP_SECONDS // 60,
     }

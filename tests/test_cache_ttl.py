@@ -6,10 +6,9 @@ gaps are round numbers so an expected cost can be worked out by hand from
 """
 
 import tempfile
-from datetime import datetime, timedelta
+from datetime import timedelta
 from pathlib import Path
 
-import duckdb
 import pytest
 
 from introspect.cache_ttl import (
@@ -25,91 +24,20 @@ from introspect.cache_ttl import (
     split_coverage,
     summarize_misses,
 )
-from introspect.db import materialize_views
 from introspect.pricing import rates_for
 
 from .conftest import (
-    glob_pattern,
+    TTL_MODEL,
+    TTL_T0,
     make_assistant_message,
     make_user_message,
-    write_jsonl,
+    ttl_materialized,
+    ttl_ts,
+    ttl_turn,
+    ttl_usage,
 )
 
-_MODEL = "claude-opus-4-6"
-_RATES = rates_for(_MODEL)
-_T0 = datetime.fromisoformat("2026-04-21T09:00:00+00:00")
-
-
-def _ts(moment: datetime) -> str:
-    return moment.strftime("%Y-%m-%dT%H:%M:%S.000Z")
-
-
-def _usage(
-    *, read: int, create: int, ttl: str | None = "5m", inp: int = 10, out: int = 20
-) -> dict:
-    """Usage block with an optional nested 5m/1h split.
-
-    ``ttl=None`` reproduces the legacy schema — ``cache_creation_input_tokens``
-    with no ``cache_creation`` sub-object — which bills at the 5m rate.
-    """
-    usage: dict = {
-        "input_tokens": inp,
-        "output_tokens": out,
-        "cache_read_input_tokens": read,
-        "cache_creation_input_tokens": create,
-    }
-    if ttl is not None:
-        usage["cache_creation"] = {
-            "ephemeral_5m_input_tokens": create if ttl == "5m" else 0,
-            "ephemeral_1h_input_tokens": create if ttl == "1h" else 0,
-        }
-    return usage
-
-
-def _turn(
-    session_id: str,
-    n: int,
-    at: datetime,
-    *,
-    prompt: str = "go",
-    read: int,
-    create: int,
-    ttl: str | None = "5m",
-    inp: int = 10,
-    out: int = 20,
-) -> list[dict]:
-    """One user prompt plus the assistant reply it triggered.
-
-    The first prompt carries a ``toolUseResult`` so ``read_json_auto``
-    infers that column; without it the raw-messages load fails to bind.
-    """
-    return [
-        make_user_message(
-            session_id,
-            f"u{n}",
-            f"a{n - 1}" if n > 1 else None,
-            _ts(at),
-            prompt,
-            tool_use_result={"content": "seed"} if n == 1 else None,
-        ),
-        make_assistant_message(
-            session_id,
-            f"a{n}",
-            f"u{n}",
-            _ts(at + timedelta(seconds=1)),
-            [{"type": "text", "text": f"reply {n}"}],
-            model=_MODEL,
-            msg_id=f"msg{n}",
-            usage=_usage(read=read, create=create, ttl=ttl, inp=inp, out=out),
-        ),
-    ]
-
-
-def _materialize(tmp: Path, session_id: str, lines: list[dict]):
-    write_jsonl(tmp, session_id, lines)
-    conn = duckdb.connect(":memory:")
-    materialize_views(conn, glob_pattern(tmp), 0, resolve_projects=False)
-    return conn
+_RATES = rates_for(TTL_MODEL)
 
 
 def _requests(conn, session_id: str) -> list[dict]:
@@ -152,22 +80,22 @@ def _mixed_gap_lines() -> list[dict]:
     Prefix grows 10k -> 20k -> 30k -> 40k, then /compact truncates it to 5k.
     """
     lines: list[dict] = []
-    lines += _turn(_MIXED_SID, 1, _T0, read=0, create=10_000)
-    lines += _turn(
-        _MIXED_SID, 2, _T0 + timedelta(minutes=2), read=10_000, create=10_000
+    lines += ttl_turn(_MIXED_SID, 1, TTL_T0, read=0, create=10_000)
+    lines += ttl_turn(
+        _MIXED_SID, 2, TTL_T0 + timedelta(minutes=2), read=10_000, create=10_000
     )
-    lines += _turn(
-        _MIXED_SID, 3, _T0 + timedelta(minutes=22), read=20_000, create=10_000
+    lines += ttl_turn(
+        _MIXED_SID, 3, TTL_T0 + timedelta(minutes=22), read=20_000, create=10_000
     )
-    lines += _turn(
-        _MIXED_SID, 4, _T0 + timedelta(minutes=112), read=30_000, create=10_000
+    lines += ttl_turn(
+        _MIXED_SID, 4, TTL_T0 + timedelta(minutes=112), read=30_000, create=10_000
     )
     # /compact: the prefix collapses and almost nothing is reused, but the
     # next request follows immediately.
-    lines += _turn(
+    lines += ttl_turn(
         _MIXED_SID,
         5,
-        _T0 + timedelta(minutes=113),
+        TTL_T0 + timedelta(minutes=113),
         prompt="/compact",
         read=0,
         create=5_000,
@@ -177,10 +105,11 @@ def _mixed_gap_lines() -> list[dict]:
 
 @pytest.fixture
 def mixed_gaps():
-    with tempfile.TemporaryDirectory() as tmp_str:
-        conn = _materialize(Path(tmp_str), _MIXED_SID, _mixed_gap_lines())
+    with (
+        tempfile.TemporaryDirectory() as tmp_str,
+        ttl_materialized(Path(tmp_str), _MIXED_SID, _mixed_gap_lines()) as conn,
+    ):
         yield conn, _requests(conn, _MIXED_SID)
-        conn.close()
 
 
 def test_gap_seconds_measured_from_previous_response_end(mixed_gaps):
@@ -249,36 +178,35 @@ def test_compact_is_structural_not_a_pause(mixed_gaps):
 def test_no_gap_session_is_cheaper_under_5m():
     """1h pays 2x on every incremental write; with no gaps that is pure loss."""
     sid = "22222222-2222-2222-2222-222222222222"
-    lines = _turn(sid, 1, _T0, read=0, create=10_000)
+    lines = ttl_turn(sid, 1, TTL_T0, read=0, create=10_000)
     for n in range(2, 8):
-        lines += _turn(
+        lines += ttl_turn(
             sid,
             n,
-            _T0 + timedelta(seconds=30 * (n - 1)),
+            TTL_T0 + timedelta(seconds=30 * (n - 1)),
             read=10_000 * (n - 1),
             create=10_000,
         )
-    with tempfile.TemporaryDirectory() as tmp_str:
-        conn = _materialize(Path(tmp_str), sid, lines)
-        try:
-            verdict = global_ttl_comparison(conn)
-            assert verdict.cost_1h > verdict.cost_5m
-            assert verdict.recommendation == "5m"
-            assert verdict.n_gaps_recoverable == 0
-        finally:
-            conn.close()
+    with (
+        tempfile.TemporaryDirectory() as tmp_str,
+        ttl_materialized(Path(tmp_str), sid, lines) as conn,
+    ):
+        verdict = global_ttl_comparison(conn)
+        assert verdict.cost_1h > verdict.cost_5m
+        assert verdict.recommendation == "5m"
+        assert verdict.n_gaps_recoverable == 0
 
 
 def test_recoverable_and_unrecoverable_are_reported_apart(mixed_gaps):
     """The cap is the point: only the 20-min gap counts as avoidable waste."""
     conn, _ = mixed_gaps
     misses = summarize_misses(cache_miss_event_rows(conn, session_id=_MIXED_SID))
-    assert misses["recoverable_count"] == 1
-    assert misses["break_count"] == 1
-    assert misses["recoverable_usd"] > 0
-    assert misses["break_usd"] > 0
+    assert misses.recoverable_count == 1
+    assert misses.break_count == 1
+    assert misses.recoverable_usd > 0
+    assert misses.break_usd > 0
     # A caller that adds them back together gets the old, inflated number.
-    assert misses["count"] == 2
+    assert misses.count == 2
 
 
 def test_tool_result_triggered_break_is_detected():
@@ -292,7 +220,7 @@ def test_tool_result_triggered_break_is_detected():
             sid,
             "u1",
             None,
-            _ts(_T0),
+            ttl_ts(TTL_T0),
             "go",
             tool_use_result={"content": "seed"},
         ),
@@ -300,40 +228,39 @@ def test_tool_result_triggered_break_is_detected():
             sid,
             "a1",
             "u1",
-            _ts(_T0 + timedelta(seconds=1)),
+            ttl_ts(TTL_T0 + timedelta(seconds=1)),
             [{"type": "tool_use", "id": "t1", "name": "Bash", "input": {}}],
-            model=_MODEL,
+            model=TTL_MODEL,
             msg_id="msg1",
-            usage=_usage(read=0, create=10_000),
+            usage=ttl_usage(read=0, create=10_000),
         ),
         # The tool returns 20 minutes later — no human involved.
         make_user_message(
             sid,
             "u2",
             "a1",
-            _ts(_T0 + timedelta(minutes=20)),
+            ttl_ts(TTL_T0 + timedelta(minutes=20)),
             [{"type": "tool_result", "tool_use_id": "t1", "content": "done"}],
         ),
         make_assistant_message(
             sid,
             "a2",
             "u2",
-            _ts(_T0 + timedelta(minutes=20, seconds=1)),
+            ttl_ts(TTL_T0 + timedelta(minutes=20, seconds=1)),
             [{"type": "text", "text": "ok"}],
-            model=_MODEL,
+            model=TTL_MODEL,
             msg_id="msg2",
-            usage=_usage(read=0, create=20_000),
+            usage=ttl_usage(read=0, create=20_000),
         ),
     ]
-    with tempfile.TemporaryDirectory() as tmp_str:
-        conn = _materialize(Path(tmp_str), sid, lines)
-        try:
-            events = cache_miss_event_rows(conn, session_id=sid)
-            assert len(events) == 1
-            assert events[0]["recoverable"] is True
-            assert events[0]["gap_seconds"] == pytest.approx(20 * 60 - 1, abs=2)
-        finally:
-            conn.close()
+    with (
+        tempfile.TemporaryDirectory() as tmp_str,
+        ttl_materialized(Path(tmp_str), sid, lines) as conn,
+    ):
+        events = cache_miss_event_rows(conn, session_id=sid)
+        assert len(events) == 1
+        assert events[0]["recoverable"] is True
+        assert events[0]["gap_seconds"] == pytest.approx(20 * 60 - 1, abs=2)
 
 
 # --------------------------------------------------------------------------
@@ -345,64 +272,145 @@ def test_tool_result_triggered_break_is_detected():
 @pytest.mark.parametrize("ttl", ["5m", "1h"])
 def test_uniform_ttl_session_simulates_to_its_observed_bill(ttl):
     sid = f"44444444-4444-4444-4444-4444444444{'55' if ttl == '5m' else '11'}"
-    lines = _turn(sid, 1, _T0, read=0, create=10_000, ttl=ttl)
+    lines = ttl_turn(sid, 1, TTL_T0, read=0, create=10_000, ttl=ttl)
     for n in range(2, 6):
-        lines += _turn(
+        lines += ttl_turn(
             sid,
             n,
-            _T0 + timedelta(minutes=n - 1),
+            TTL_T0 + timedelta(minutes=n - 1),
             read=10_000 * (n - 1),
             create=10_000,
             ttl=ttl,
         )
-    with tempfile.TemporaryDirectory() as tmp_str:
-        conn = _materialize(Path(tmp_str), sid, lines)
-        try:
-            residuals = parity_residuals(conn)
-            assert len(residuals) == 1
-            assert residuals[0]["ttl_observed"] == ttl
-            assert residuals[0]["residual_pct"] == pytest.approx(0.0, abs=1e-9)
-        finally:
-            conn.close()
+    with (
+        tempfile.TemporaryDirectory() as tmp_str,
+        ttl_materialized(Path(tmp_str), sid, lines) as conn,
+    ):
+        residuals = parity_residuals(conn)
+        assert len(residuals) == 1
+        assert residuals[0]["ttl_observed"] == ttl
+        assert residuals[0]["residual_pct"] == pytest.approx(0.0, abs=1e-9)
+
+
+def test_mixed_ttl_session_is_excluded_from_the_parity_gate():
+    """A session with a 'mixed' row has no single policy to reproduce.
+
+    Regression: filtering rows to 5m/1h *before* the uniformity test let a
+    mixed row hide from it, then simulated the whole session at the one
+    surviving TTL — reporting a residual against a model that was correct,
+    and inviting someone to normalize a band that would hide a real defect.
+    """
+    sid = "99999999-9999-9999-9999-999999999999"
+    lines = ttl_turn(sid, 1, TTL_T0, read=0, create=10_000, ttl="5m")
+    # Turn 2 splits across both buckets — neither '5m' nor '1h'.
+    lines += [
+        make_user_message(sid, "u2", "a1", ttl_ts(TTL_T0 + timedelta(minutes=1)), "go"),
+        make_assistant_message(
+            sid,
+            "a2",
+            "u2",
+            ttl_ts(TTL_T0 + timedelta(minutes=1, seconds=1)),
+            [{"type": "text", "text": "reply 2"}],
+            model=TTL_MODEL,
+            msg_id="msg2",
+            usage={
+                "input_tokens": 10,
+                "output_tokens": 20,
+                "cache_read_input_tokens": 10_000,
+                "cache_creation_input_tokens": 8_000,
+                "cache_creation": {
+                    "ephemeral_5m_input_tokens": 3_000,
+                    "ephemeral_1h_input_tokens": 5_000,
+                },
+            },
+        ),
+    ]
+    lines += ttl_turn(
+        sid, 3, TTL_T0 + timedelta(minutes=2), read=18_000, create=1_000, ttl="5m"
+    )
+    with (
+        tempfile.TemporaryDirectory() as tmp_str,
+        ttl_materialized(Path(tmp_str), sid, lines) as conn,
+    ):
+        assert [r["ttl_observed"] for r in _requests(conn, sid)] == [
+            "5m",
+            "mixed",
+            "5m",
+        ]
+        assert parity_residuals(conn) == []
+
+
+def test_session_cache_ttl_rollup_matches_the_python_verdict(mixed_gaps):
+    """The ad-hoc-SQL view and ``global_ttl_comparison`` agree.
+
+    Both are built from ``_rollup_select``; this pins that they stay so.
+    """
+    conn, _ = mixed_gaps
+    row = conn.execute(
+        "SELECT n_requests, n_gaps_recoverable, n_gaps_unrecoverable,"
+        " n_structural, cost_5m, cost_1h, delta"
+        " FROM session_cache_ttl WHERE NOT is_sidechain"
+    ).fetchone()
+    verdict = global_ttl_comparison(conn)
+    assert row[0] == verdict.n_requests
+    assert row[1] == verdict.n_gaps_recoverable
+    assert row[2] == verdict.n_gaps_unrecoverable
+    assert row[3] == verdict.n_structural
+    assert float(row[4]) == pytest.approx(verdict.cost_5m)
+    assert float(row[5]) == pytest.approx(verdict.cost_1h)
+    assert float(row[6]) == pytest.approx(verdict.delta)
+
+
+def test_gap_histogram_scopes_to_one_project(mixed_gaps):
+    """The histogram is a per-project view; an unknown project is empty."""
+    conn, _ = mixed_gaps
+    # ``make_user_message`` stamps cwd=/tmp/test, so the project is "test".
+    scoped = gap_histogram(conn, project="test")
+    assert sum(b["count"] for b in scoped) == 4  # every request past the first
+    missing = gap_histogram(conn, project="no-such-project")
+    assert sum(b["count"] for b in missing) == 0
+    # Labels and their recoverability survive an empty result.
+    assert [b["bucket"] for b in missing] == [b["bucket"] for b in scoped]
+    assert [b["recoverable"] for b in missing] == [b["recoverable"] for b in scoped]
 
 
 def test_legacy_rows_without_the_split_still_simulate():
     """No nested cache_creation → ttl_observed 'unknown', simulation runs."""
     sid = "55555555-5555-5555-5555-555555555555"
-    lines = _turn(sid, 1, _T0, read=0, create=10_000, ttl=None)
-    lines += _turn(sid, 2, _T0 + timedelta(minutes=20), read=0, create=20_000, ttl=None)
-    with tempfile.TemporaryDirectory() as tmp_str:
-        conn = _materialize(Path(tmp_str), sid, lines)
-        try:
-            reqs = _requests(conn, sid)
-            assert [r["ttl_observed"] for r in reqs] == ["unknown", "unknown"]
-            # Legacy rows bill at 5m, so a 20-min gap is a recoverable miss.
-            assert reqs[1]["cache_miss"] is True
-            assert reqs[1]["gap_recoverable"] is True
-            assert reqs[1]["cost_1h_usd"] < reqs[1]["cost_5m_usd"]
-            # Every month is reported as lacking the split.
-            coverage = split_coverage(conn)
-            assert coverage[0]["pct_missing_split"] == pytest.approx(100.0)
-            assert coverage[0]["n_split_mismatch"] == 0
-        finally:
-            conn.close()
+    lines = ttl_turn(sid, 1, TTL_T0, read=0, create=10_000, ttl=None)
+    lines += ttl_turn(
+        sid, 2, TTL_T0 + timedelta(minutes=20), read=0, create=20_000, ttl=None
+    )
+    with (
+        tempfile.TemporaryDirectory() as tmp_str,
+        ttl_materialized(Path(tmp_str), sid, lines) as conn,
+    ):
+        reqs = _requests(conn, sid)
+        assert [r["ttl_observed"] for r in reqs] == ["unknown", "unknown"]
+        # Legacy rows bill at 5m, so a 20-min gap is a recoverable miss.
+        assert reqs[1]["cache_miss"] is True
+        assert reqs[1]["gap_recoverable"] is True
+        assert reqs[1]["cost_1h_usd"] < reqs[1]["cost_5m_usd"]
+        # Every month is reported as lacking the split.
+        coverage = split_coverage(conn)
+        assert coverage[0]["pct_missing_split"] == pytest.approx(100.0)
+        assert coverage[0]["n_split_mismatch"] == 0
 
 
 def test_session_already_on_1h_has_nothing_recoverable():
     """You cannot recover a gap by switching to the TTL you already have."""
     sid = "66666666-6666-6666-6666-666666666666"
-    lines = _turn(sid, 1, _T0, read=0, create=10_000, ttl="1h")
-    lines += _turn(
-        sid, 2, _T0 + timedelta(minutes=20), read=10_000, create=10_000, ttl="1h"
+    lines = ttl_turn(sid, 1, TTL_T0, read=0, create=10_000, ttl="1h")
+    lines += ttl_turn(
+        sid, 2, TTL_T0 + timedelta(minutes=20), read=10_000, create=10_000, ttl="1h"
     )
-    with tempfile.TemporaryDirectory() as tmp_str:
-        conn = _materialize(Path(tmp_str), sid, lines)
-        try:
-            reqs = _requests(conn, sid)
-            assert reqs[1]["cache_miss"] is False
-            assert reqs[1]["gap_recoverable"] is False
-        finally:
-            conn.close()
+    with (
+        tempfile.TemporaryDirectory() as tmp_str,
+        ttl_materialized(Path(tmp_str), sid, lines) as conn,
+    ):
+        reqs = _requests(conn, sid)
+        assert reqs[1]["cache_miss"] is False
+        assert reqs[1]["gap_recoverable"] is False
 
 
 # --------------------------------------------------------------------------
