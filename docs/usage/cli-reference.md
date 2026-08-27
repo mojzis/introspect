@@ -152,6 +152,9 @@ Usage: introspy mcp [OPTIONS]
 
   Run the MCP server (stdio transport) for Claude Code integration.
 
+  Its `run_sql` tool takes one read-only SELECT, capped at 500 rows / 64 KB / 20
+  s, on a connection with no filesystem, network or extension access.
+
 Options:
   --help  Show this message and exit.
 ```
@@ -162,6 +165,15 @@ Options:
 Usage: introspy query [OPTIONS] SQL
 
   Run an ad-hoc SQL query against the views.
+
+  Runs on the same hardened read connection the web UI and MCP server use:
+  filesystem, network and extension access are disabled, and memory and thread
+  limits are in force (INTROSPECT_DB_MEMORY_LIMIT / INTROSPECT_DB_THREADS). So
+  `read_csv`, `glob`, `ATTACH` and `COPY ... TO` are refused here too.
+
+  Unlike `POST /api/query` and the MCP `run_sql` tool, this command applies no
+  row cap and no wall-clock timeout — it is your own shell, and Ctrl-C is the
+  way out of a runaway query.
 
 Arguments:
   SQL  SQL query to execute  [required]
@@ -215,6 +227,11 @@ Options:
 Usage: introspy serve [OPTIONS]
 
   Launch the web UI.
+
+  Binding to loopback (the default) also exposes the local SQL API at POST
+  /api/query, capped at 10 000 rows / 8 MB / 30 s per query and requiring an
+  X-Introspect-Client header. A non-loopback --host disables it, as does
+  INTROSPECT_SQL_API=off.
 
 Options:
   --port INTEGER         Port to listen on  [default: 8347]

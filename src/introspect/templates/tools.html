@@ -97,7 +97,7 @@
         <tbody>
             {% for tc in tool_calls %}
             <tr>
-                <td><a href="/sessions/{{ tc[0] }}#tc-{{ tc[8] }}" hx-get="/sessions/{{ tc[0] }}" hx-target="#content" hx-push-url="/sessions/{{ tc[0] }}#tc-{{ tc[8] }}"><span class="truncate" style="max-width:250px;" title="{{ clean_title(tc[7] or '')|e }}">{{ (clean_title(tc[7] or '') or (tc[0]|string)[:12] + '...')|truncate(50) }}</span></a></td>
+                <td><a href="/sessions/{{ tc[0] }}?focus={{ tc[8] }}#tc-{{ tc[8] }}" hx-get="/sessions/{{ tc[0] }}?focus={{ tc[8] }}" hx-target="#content" hx-push-url="/sessions/{{ tc[0] }}?focus={{ tc[8] }}#tc-{{ tc[8] }}"><span class="truncate" style="max-width:250px;" title="{{ clean_title(tc[7] or '')|e }}">{{ (clean_title(tc[7] or '') or (tc[0]|string)[:12] + '...')|truncate(50) }}</span></a></td>
                 <td>{{ tc[9] or '' }}</td>
                 <td style="white-space:nowrap;">{{ tc[1] }}</td>
                 <td>{{ tc[2] or '' }}</td>

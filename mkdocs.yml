@@ -62,6 +62,7 @@ nav:
       - Architecture: architecture.md
       - JSONL schema: schema.md
       - Configuration: configuration.md
+      - Security: security.md
   - Development: development.md
   - For LLMs: llms.md
 
@@ -109,6 +110,7 @@ plugins:
           - architecture.md
           - schema.md
           - configuration.md
+          - security.md
         Development:
           - development.md
         For LLMs:

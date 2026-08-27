@@ -1,8 +1,35 @@
 """MCP server for introspect."""
 
 from mcp.server.fastmcp import FastMCP
+from mcp.server.transport_security import TransportSecuritySettings
 
 from introspect.mcp._register import register_prompts, register_tools
+from introspect.sql_query import is_loopback_host
+
+# The streamable-HTTP endpoint is mounted at /mcp on the same loopback-bound
+# app as the web UI, so it is reachable from any page the user has open in a
+# browser. The SDK's DNS-rebinding protection checks Host and Origin inside
+# the transport, which also covers the sub-app's own paths.
+#
+# ``[::1]`` is spelled bracketed here because that is how it appears in a Host
+# header. Ports are enumerated because the SDK matches the header verbatim,
+# unlike Starlette's TrustedHostMiddleware, which strips the port; the
+# wildcard entries cover a server started on a non-default port.
+_LOOPBACK_HOSTS = ["localhost", "127.0.0.1", "[::1]"]
+_LOOPBACK_TRANSPORT_SECURITY = TransportSecuritySettings(
+    enable_dns_rebinding_protection=True,
+    allowed_hosts=[*_LOOPBACK_HOSTS, *(f"{h}:*" for h in _LOOPBACK_HOSTS)],
+    allowed_origins=[
+        *(f"http://{h}" for h in _LOOPBACK_HOSTS),
+        *(f"http://{h}:*" for h in _LOOPBACK_HOSTS),
+    ],
+)
+# A deliberate non-loopback bind (``serve --host 0.0.0.0``) is the user asking
+# to reach this from another machine, and we cannot know which hostnames they
+# will use. Mirrors ``api.main.host_allowlist_applies``.
+_OPEN_TRANSPORT_SECURITY = TransportSecuritySettings(
+    enable_dns_rebinding_protection=False
+)
 
 # Sent to MCP clients at initialize. Most users connect from outside this
 # repo and have no other context about the data, so this carries the schema
@@ -12,7 +39,8 @@ Introspect explores Claude Code conversation logs (~/.claude/projects/**/*.jsonl
 materialized into a read-only DuckDB.
 
 Workflow: call `describe_schema` first, then `run_sql` (single SELECT/WITH
-statement, capped at 500 rows) for anything the canned tools don't cover.
+statement, capped at 500 rows / 64 KB / 20 s) for anything the canned tools
+don't cover.
 Prefer these tools over reading the JSONL files directly — the views already
 handle session stitching, cost attribution, and project resolution.
 
@@ -46,9 +74,24 @@ Example — top sessions by cost:
 """
 
 
-def create_mcp_server() -> FastMCP:
-    """Create a fresh MCP server instance with all tools registered."""
-    server = FastMCP("introspect", instructions=INSTRUCTIONS)
+def create_mcp_server(bind_host: str = "") -> FastMCP:
+    """Create a fresh MCP server instance with all tools registered.
+
+    ``bind_host`` is the address the HTTP server bound to, used only to
+    decide whether the transport enforces its loopback host/origin
+    allowlists. The default — an empty string, and what the stdio entry point
+    passes — enforces them; stdio has no HTTP transport for them to apply to.
+    """
+    security = (
+        _OPEN_TRANSPORT_SECURITY
+        if bind_host and not is_loopback_host(bind_host)
+        else _LOOPBACK_TRANSPORT_SECURITY
+    )
+    server = FastMCP(
+        "introspect",
+        instructions=INSTRUCTIONS,
+        transport_security=security,
+    )
     # Serve the streamable HTTP endpoint at the sub-app root so that mounting
     # it at `/mcp` in FastAPI yields a final path of `/mcp`, not `/mcp/mcp`.
     server.settings.streamable_http_path = "/"

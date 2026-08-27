@@ -15,14 +15,14 @@ which invariants the code depends on. For settings see
 ```
 src/introspect/
 ├── cli.py                  # Typer CLI commands
-├── db.py                   # DuckDB schema, materialization, lazy views
+├── db.py                   # DuckDB schema, materialization, lazy views, hardened reads
 ├── codex.py                # Codex rollout-log transcoder (Python, not SQL)
 ├── refresh.py              # Background refresh loop + window picker
 ├── projects.py             # Git worktree-aware cwd → canonical project
 ├── pricing.py              # Model pricing (Python rates + SQL CASE)
 ├── sql_fragments.py        # Shared SQL building blocks (cost / tool / file rollups)
 ├── query_templates.py      # Curated SQL investigation registry (leaf module)
-├── sql_query.py            # Read-only SQL guard shared by run_sql and /api/query
+├── sql_query.py            # SQL validator + bounded executor for run_sql and /api/query
 ├── search.py               # Full-text search (BM25 / ILIKE fallback)
 ├── version_check.py        # Once-a-day PyPI update check + stderr nag
 ├── api/
@@ -62,6 +62,7 @@ src/introspect/
                             #   _refresh_indicator, _daily_cost_panel,
                             #   _hourly_cost_panel, _cost_portfolio_panel,
                             #   _spend_shapes (split/spark macros),
+                            #   _pagination (shared Prev/Next + size picker),
                             #   _session_cost, _session_cost_bloat,
                             #   _session_messages, _session_tokenscape,
                             #   _session_trajectory, _session_subagents
@@ -106,9 +107,14 @@ A FastAPI application launched via `introspy serve`.
   `month` (calendar-month-to-date). The choice lives on
   `app.state.refresh_window` and forces a rebuild on the next tick when it
   changes.
-- **Middleware**: `db_middleware` opens a fresh per-request read-only connection
-  on `request.state.conn`, so in-flight queries are decoupled from the
-  background swap.
+- **Middleware**, three of them: `db_middleware` opens a fresh per-request
+  *hardened* read connection (`connect_read_hardened`) on
+  `request.state.conn`, so in-flight queries are decoupled from the background
+  swap; `host_guard` rejects a `Host` outside the loopback allowlist, but only
+  when the bind is itself loopback (`host_allowlist_applies`); `local_api_guard`
+  rejects a non-loopback `Origin` on `/api/query`, `/api/schema` and `/mcp`, and
+  requires an `X-Introspect-Client` header on `POST /api/query`. `CORSMiddleware`
+  is deliberately absent — see [Security](security.md#http-boundary).
 - **Handler pattern**: each handler queries via `conn(request)`, builds dynamic
   SQL with parameterized filters, paginates (1-based, fetch `size+1` to detect
   the next page), and renders a Jinja2 template. Cost-bearing handlers reuse
@@ -123,10 +129,14 @@ A FastAPI application launched via `introspy serve`.
 
 ### MCP server (`mcp/server.py`)
 
-Built with FastMCP. `create_mcp_server()` registers tools (`register_tools`) and
-prompts (`register_prompts`) and attaches the client-facing `INSTRUCTIONS`
-blob — schema orientation for clients that have no other context about the
-data. Runs over stdio (`introspy mcp`) or mounted at `/mcp` in the web app; the
+Built with FastMCP. `create_mcp_server(bind_host)` registers tools
+(`register_tools`) and prompts (`register_prompts`) and attaches the
+client-facing `INSTRUCTIONS` blob — schema orientation for clients that have no
+other context about the data. `bind_host` selects the transport's
+`TransportSecuritySettings`: a loopback bind (and stdio, which passes the
+default) gets the SDK's DNS-rebinding protection with loopback host and origin
+allowlists; a deliberate non-loopback bind turns it off, mirroring
+`api.main.host_allowlist_applies`. Runs over stdio (`introspy mcp`) or mounted at `/mcp` in the web app; the
 HTTP mount is built inside the lifespan and replaces a placeholder `FastAPI()`
 so the MCP session manager runs concurrently with request handling.
 
@@ -235,29 +245,51 @@ the names for handler call sites.
 
 ## Read-only SQL guard (`sql_query.py`)
 
-`sql_query.py` is the **primary safety boundary** for both the MCP `run_sql`
-tool and `POST /api/query` — not the read-only DuckDB connection.
+Both ad-hoc SQL surfaces — the MCP `run_sql` tool and `POST /api/query` — go
+through the same three layers, and it matters which one is load bearing.
+[Security](security.md) has the threat model; this is the code map.
 
-A `read_only=True` connection still permits some side-effecting statements: for
-example `COPY ... TO '/file'` can write outside the database. So the real guard
-is a validator that strips comments and string literals, rejects anything
-containing a `;` (no multi-statement scripts), and requires the first keyword to
-be `SELECT` or `WITH`. That single check is what blocks `ATTACH`, `INSTALL`,
-`LOAD`, `PRAGMA`, `COPY`, `INSERT`, `UPDATE`, `DELETE`, `DROP`, `CREATE`, and
-`CALL`. Do not weaken it on the assumption that the connection already
-protects you.
+**The engine configuration is the boundary.**
+`db.connect_read_hardened()` is the only place the codebase opens a read-only
+connection to the main DB. It opens with resource caps, loads FTS, then sets
+`enable_external_access = false` (plus the extension and secret toggles) and
+`lock_configuration = true`. A `read_only=True` connection on its own permits
+plenty: `read_csv('/etc/passwd')`, `glob('/home/**')`, `COPY ... TO '/file'`,
+`ATTACH`. The locked configuration is what stops them.
 
-Two more pieces live here:
+Two ordering constraints, both verified on DuckDB 1.5.3 and documented in the
+factory's docstring: `LOAD fts` must precede the external-access disable, and
+the factory must skip its SETs on an already-locked instance. Settings are
+instance-global, and DuckDB refuses a second connection to a file whose
+instance was opened with a different config — which is why one factory serves
+the API middleware, `run_sql` and `describe_schema` alike.
 
-- **Row caps.** `clamp_row_limit()` bounds the caller's limit, and
-  `wrap_with_row_cap()` re-wraps the query as `SELECT * FROM (...) LIMIT n` so
-  the cap is applied by the planner rather than at fetch time. `run_sql` caps at
-  `MCP_SQL_ROW_CAP = 500` (an LLM context is the consumer); the HTTP API caps at
-  `API_SQL_ROW_CAP = 10_000` (a notebook legitimately wants more).
-- **`is_loopback_host()`.** The gate for exposing the HTTP SQL API. Bound to
-  loopback, the OS itself refuses non-local TCP, so no per-request client check
-  is needed. Unknown hostnames fail closed rather than triggering DNS
-  resolution.
+**`sql_query.validate_read_only_sql()` is defense in depth.** It parses with
+`duckdb.extract_statements()` and requires exactly one `SELECT` statement,
+which correctly handles comments, string literals, `WITH`, `WITH RECURSIVE`
+and DuckDB's FROM-first syntax without hand-rolled scanning. A denylist of
+file- and network-reading functions rides along so callers get a readable
+error instead of a `PermissionException`, and so a loosened engine config
+fails loudly.
+
+**`sql_query.execute_bounded()` bounds resources.** One shared executor for
+both callers, taking a frozen `SqlBudget` (`MCP_BUDGET` / `API_BUDGET`) rather
+than five loose limits: an outer `LIMIT` for rows, `fetchmany` batching for a
+byte cap, per-cell clipping, and a `threading.Timer` calling
+`conn.interrupt()` for wall clock. Narrow one limit for a single request with
+`dataclasses.replace()`. `interrupt()` is per connection or cursor, so the object handed to
+`execute_bounded` must be the one executing. The API handler calls it through
+`asyncio.to_thread` — `db.execute` is blocking, and on the event loop one slow
+query froze the UI, the MCP endpoint and the refresh loop together.
+
+Also here: **`is_loopback_host()`**, which gates exposure of the HTTP SQL API
+and backs the per-request `Origin` check in `api/main.py`. Unknown hostnames
+fail closed rather than triggering DNS resolution.
+
+The HTTP boundary itself lives in `api/main.py`: `host_guard` (a loopback
+`Host` allowlist, applied only when the bind is itself loopback — see
+`host_allowlist_applies`), an `Origin` check and the `X-Introspect-Client`
+requirement in `local_api_guard`, and deliberately **no** `CORSMiddleware`.
 
 ## Query-template registry (`query_templates.py`)
 

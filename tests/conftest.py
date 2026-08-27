@@ -7,6 +7,7 @@ from pathlib import Path
 
 import duckdb
 import pytest
+from fastapi.testclient import TestClient
 
 from introspect.db import materialize_views
 
@@ -399,3 +400,16 @@ def ttl_materialized(tmp_dir: Path, session_id: str, lines: list[dict]):
         yield conn
     finally:
         conn.close()
+
+
+# ``host_guard`` (see introspect.api.main) only accepts loopback Host headers,
+# which is what makes DNS rebinding against the local server fail.
+# TestClient's default base URL is ``http://testserver``, so every test client
+# has to speak as a local browser would or it gets a 400 before reaching a
+# route.
+LOOPBACK_BASE_URL = "http://127.0.0.1:8347"
+
+
+def local_client(app) -> TestClient:
+    """``TestClient`` with a loopback Host header."""
+    return TestClient(app, base_url=LOOPBACK_BASE_URL)
