@@ -15,8 +15,8 @@ Every Claude Code session is written to a JSONL file under
 
 -   :material-monitor-dashboard: __Web UI__
 
-    A FastAPI + HTMX dashboard for sessions, tool calls, cost breakdowns, and
-    search.
+    Sessions, tool calls, cost analytics — Pareto, tokenscape, trajectory,
+    cache loss — and search.
 
     [:octicons-arrow-right-24: Web UI](usage/web-ui.md)
 
@@ -28,7 +28,8 @@ Every Claude Code session is written to a JSONL file under
 
 -   :material-robot: __MCP server__
 
-    Expose your logs to Claude Code itself — search, inspect, and query over MCP.
+    Expose your logs to Claude Code or Codex — search, inspect, query, and
+    seeded investigation prompts, over MCP.
 
     [:octicons-arrow-right-24: MCP server](usage/mcp.md)
 
@@ -57,9 +58,17 @@ Once the MCP server is connected to Claude Code, you can ask questions like:
 
 > what are the most expensive sessions
 
-> which Bash commands fail most often
+> which tools fail most often, by rate rather than count
 
 > show me every session that touched `pricing.py`
+
+> where did the cost run away in session `abc123` — find the tail
+
+> which of my opening prompts started blind: no files named, no skill loaded
+
+> how much did I pay to rebuild caches I let go cold last week
+
+> list the query templates, then adapt the cost one to group by project
 
 ## Using this project with an LLM
 
