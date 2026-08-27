@@ -7,6 +7,7 @@ from typing import cast, get_args
 
 import duckdb
 
+from introspect.cache_ttl import compare_ttl
 from introspect.db import DEFAULT_CODEX_GLOB, DEFAULT_DB_PATH, get_read_connection
 from introspect.mcp import refresh_bridge
 from introspect.query_templates import (
@@ -536,6 +537,96 @@ def tool_failure_rate(limit: int = 20, since: str = "", min_calls: int = 5) -> s
     for tool_name, calls, failures, failure_rate in rows:
         lines.append(
             f"{tool_name}: {failures}/{calls} failed ({float(failure_rate):.1%})"
+        )
+    return "\n".join(lines)
+
+
+# Offsets into the `cache_ttl_choice` template's SELECT list, past the
+# leading `project` column. Named so a reordered SELECT fails loudly at one
+# place rather than silently mislabelling every number.
+_TTL_N_REQUESTS = 0
+_TTL_N_RECOVERABLE = 1
+_TTL_N_BREAKS = 2
+_TTL_N_STRUCTURAL = 3
+_TTL_OBSERVED = 4
+_TTL_COST_5M = 5
+_TTL_COST_1H = 6
+
+
+def cache_ttl_choice(limit: int = 20, since: str = "", sidechain: bool = False) -> str:
+    """Which prompt-cache TTL is cheaper per project — 5m or 1h?
+
+    Replays every API request under both policies and reports the margin.
+    Executes the `cache_ttl_choice` entry from the query-template registry
+    (`list_query_templates`) so the tool and the cookbook cannot drift.
+
+    A negative delta means 1h is cheaper. Read the margin before acting:
+    under ~2% is inside the simulation's modelling error and is not a
+    decision. Gaps longer than an hour are counted separately as breaks —
+    no TTL setting recovers them, so they are not evidence for switching.
+
+    Parameters
+    ----------
+    limit:
+        Max projects to return (default 20).
+    since:
+        Optional ISO date/timestamp; only requests at or after this point.
+        Empty string (default) means all time.
+    sidechain:
+        False (default) scores the main conversation, governed by
+        `promptCacheTtl`. True scores subagents, which have their own
+        `subagentPromptCacheTtl` — the two are never merged.
+    """
+    since_error = _validate_since(since)
+    if since_error:
+        return since_error
+
+    template = get_template("cache_ttl_choice")
+    if template is None:  # pragma: no cover - defensive, registry can't drop this
+        return "Error: 'cache_ttl_choice' template not found in registry."
+
+    conn = _get_read_connection()
+    try:
+        rows = run_query_template(
+            template,
+            conn,
+            {"limit": limit, "since": since or None, "sidechain": sidechain},
+        )
+    finally:
+        conn.close()
+
+    if not rows:
+        return "No cache data in range."
+
+    lines: list[str] = []
+    for project, *rollup in rows:
+        # Route through ``compare_ttl`` rather than re-deriving the verdict
+        # from the SQL's own margin column: the "under N% is not a decision"
+        # rule and the sign convention live in one place.
+        verdict = compare_ttl(
+            cost_5m=float(rollup[_TTL_COST_5M] or 0.0),
+            cost_1h=float(rollup[_TTL_COST_1H] or 0.0),
+            n_requests=int(rollup[_TTL_N_REQUESTS] or 0),
+            n_gaps_recoverable=int(rollup[_TTL_N_RECOVERABLE] or 0),
+            n_gaps_unrecoverable=int(rollup[_TTL_N_BREAKS] or 0),
+            n_structural=int(rollup[_TTL_N_STRUCTURAL] or 0),
+            ttl_observed_dominant=rollup[_TTL_OBSERVED],
+        )
+        if verdict.decisive:
+            call = (
+                f"{verdict.recommendation} saves ${verdict.savings:.2f} "
+                f"({verdict.margin_pct:.1f}%)"
+            )
+        else:
+            call = f"either (only {verdict.margin_pct:.1f}% apart — within noise)"
+        lines.append(
+            f"{project}: {call} "
+            f"[5m ${verdict.cost_5m:.2f} vs 1h ${verdict.cost_1h:.2f}; "
+            f"{verdict.n_requests} requests, "
+            f"{verdict.n_gaps_recoverable} recoverable gap(s), "
+            f"{verdict.n_gaps_unrecoverable} break(s) >1h, "
+            f"{verdict.n_structural} structural; "
+            f"currently billed at {verdict.ttl_observed_dominant or '?'}]"
         )
     return "\n".join(lines)
 

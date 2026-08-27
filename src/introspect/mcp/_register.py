@@ -114,9 +114,15 @@ def _register_deterministic_template_tools(
     `registered_names` check is what keeps the richer tool from being
     shadowed by a generated one.
     """
-    from introspect.mcp.tools import tool_failure_rate  # noqa: PLC0415
+    from introspect.mcp.tools import (  # noqa: PLC0415
+        cache_ttl_choice,
+        tool_failure_rate,
+    )
 
-    deterministic_tool_fns = {"tool_failure_rate": tool_failure_rate}
+    deterministic_tool_fns = {
+        "tool_failure_rate": tool_failure_rate,
+        "cache_ttl_choice": cache_ttl_choice,
+    }
     spec = _AdapterSpec(
         kind="deterministic",
         fns_var_name="deterministic_tool_fns",

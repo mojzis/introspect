@@ -17,6 +17,7 @@ from introspect.mcp.server import create_mcp_server
 from introspect.mcp.tools import (
     _SQL_CELL_MAX,
     _SQL_ROW_CAP,
+    cache_ttl_choice,
     describe_schema,
     expensive_sessions,
     get_session,
@@ -29,9 +30,11 @@ from introspect.mcp.tools import (
 from introspect.search import build_search_corpus
 
 from .conftest import (
+    TTL_T0,
     glob_pattern,
     make_assistant_message,
     make_user_message,
+    ttl_turn,
     write_jsonl,
 )
 
@@ -518,6 +521,118 @@ def test_server_instructions_mention_key_views():
     assert instructions is not None
     assert "session_stats" in instructions
     assert "describe_schema" in instructions
+
+
+# ---------------------------------------------------------------------------
+# cache_ttl_choice tests
+# ---------------------------------------------------------------------------
+
+
+def _ttl_db(tmp_path: Path, session_id: str, lines: list[dict]) -> Path:
+    """Materialize one hand-built session for the TTL tool."""
+    write_jsonl(tmp_path, session_id, lines)
+    db_path = tmp_path / "ttl.duckdb"
+    conn = duckdb.connect(str(db_path))
+    materialize_views(conn, glob_pattern(tmp_path), resolve_projects=False)
+    conn.close()
+    return db_path
+
+
+def _run_cache_ttl_choice(db_path: Path, **kwargs) -> str:
+    with patch("introspect.mcp.tools.get_read_connection") as mock_conn:
+        mock_conn.return_value = duckdb.connect(str(db_path), read_only=True)
+        return cache_ttl_choice(**kwargs)
+
+
+def test_cache_ttl_choice_recommends_5m_when_nothing_pauses():
+    """No gaps → 1h's 2x write surcharge buys nothing, and it says so."""
+    sid = "aaaaaaaa-0000-0000-0000-00000000ttl1".replace("ttl1", "0001")
+    lines = ttl_turn(sid, 1, TTL_T0, read=0, create=40_000)
+    for n in range(2, 5):
+        lines += ttl_turn(
+            sid,
+            n,
+            TTL_T0 + timedelta(seconds=15 * (n - 1)),
+            read=40_000 * (n - 1),
+            create=40_000,
+        )
+    with tempfile.TemporaryDirectory() as tmp:
+        db_path = _ttl_db(Path(tmp), sid, lines)
+        result = _run_cache_ttl_choice(db_path)
+
+    assert "5m saves" in result
+    assert "0 recoverable gap(s)" in result
+    assert "currently billed at 5m" in result
+
+
+def test_cache_ttl_choice_recommends_1h_when_pauses_dominate():
+    """20-minute pauses over a large prefix are what a 1h TTL is for."""
+    sid = "bbbbbbbb-0000-0000-0000-000000000002"
+    lines = ttl_turn(sid, 1, TTL_T0, read=0, create=200_000)
+    for n in range(2, 6):
+        lines += ttl_turn(
+            sid,
+            n,
+            TTL_T0 + timedelta(minutes=20 * (n - 1)),
+            read=0,
+            create=200_000 * n,
+        )
+    with tempfile.TemporaryDirectory() as tmp:
+        db_path = _ttl_db(Path(tmp), sid, lines)
+        result = _run_cache_ttl_choice(db_path)
+
+    assert "1h saves" in result
+    assert "recoverable gap(s)" in result
+
+
+def test_cache_ttl_choice_reports_a_thin_margin_as_undecided():
+    """An output-dominated session: the cache policy barely moves the bill.
+
+    The delta still has a sign, but it is a rounding error next to the
+    generation cost — reporting it as a recommendation would be dressing
+    modelling noise up as a decision.
+    """
+    sid = "cccccccc-0000-0000-0000-000000000003"
+    lines = ttl_turn(sid, 1, TTL_T0, read=0, create=1_000, inp=1, out=200_000)
+    lines += ttl_turn(
+        sid,
+        2,
+        TTL_T0 + timedelta(minutes=20),
+        read=0,
+        create=2_000,
+        inp=1,
+        out=200_000,
+    )
+    with tempfile.TemporaryDirectory() as tmp:
+        db_path = _ttl_db(Path(tmp), sid, lines)
+        result = _run_cache_ttl_choice(db_path)
+
+    assert "within noise" in result
+    assert "saves" not in result
+
+
+def test_cache_ttl_choice_reports_no_data():
+    with tempfile.TemporaryDirectory() as tmp:
+        db_path = _materialize_test_data(Path(tmp))
+        result = _run_cache_ttl_choice(db_path, sidechain=True)
+
+    assert result == "No cache data in range."
+
+
+def test_cache_ttl_choice_rejects_a_malformed_since():
+    with tempfile.TemporaryDirectory() as tmp:
+        db_path = _materialize_test_data(Path(tmp))
+        result = _run_cache_ttl_choice(db_path, since="not-a-date")
+
+    assert result.startswith("Error: invalid 'since'")
+
+
+def test_register_tools_adds_cache_ttl_choice_once():
+    """The deterministic-template adapter wires it exactly once."""
+    tools = asyncio.run(create_mcp_server().list_tools())
+    names = [t.name for t in tools]
+
+    assert names.count("cache_ttl_choice") == 1
 
 
 def test_register_tools_adds_tool_failure_rate_without_shadowing_expensive_sessions():

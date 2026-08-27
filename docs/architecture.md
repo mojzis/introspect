@@ -112,7 +112,9 @@ When `codex_glob` is given (non-`None`), Codex CLI rollout logs are transcoded i
 | `raw_messages` | Filtered user/assistant messages with extracted `role` and `model`, plus `provider`/`harness`; Claude `UNION ALL` Codex when `codex_glob` is given |
 | `project_map` | `cwd` → canonical project path / name (worktree-aware via `projects.py`) |
 | `logical_sessions` | Session summaries: timestamps, duration, message counts, model, cwd, project, branch |
-| `assistant_message_costs` | Per-assistant-message token usage, deduplicated by API `message.id` (raw_messages can contain duplicate copies of the same response) |
+| `assistant_message_costs` | Per-assistant-message token usage, deduplicated by API `message.id` (raw_messages can contain duplicate copies of the same response); `ttl_observed` records which prompt-cache TTL the row was billed at |
+| `cache_requests` | One row per API request, chain-ordered, with the gap that decides cache warmth, the single cache-break detection rule, and both TTL policies replayed (`cost_5m_usd` / `cost_1h_usd`) — see [Cache TTL](#cache-ttl-cache_ttlpy) |
+| `session_cache_ttl` | Per-session rollup of `cache_requests` (diagnostics — the setting is per user/project) |
 | `tool_calls` | Tool invocations joined with results, including execution time and error status |
 | `session_messages_enriched` | One row per content block, classified into a `kind` (`agent_text`, `agent_thinking`, `agent_tool_call`, `tool_result`, `slash_command`, `human_prompt`, `subagent_prompt`) — used by the session detail page |
 | `conversation_turns` | Ordered user/assistant text turns per session |
@@ -134,6 +136,83 @@ Pure SQL building blocks consumed by both `db.py` (materializing `session_stats`
 - `SESSION_COST_SUBQUERY` and `session_cost_subquery_filtered(timestamp_where)` (built from the per-row pricing CASE expressions in `pricing.py`)
 
 Keeping these in a leaf module avoids inverting the layering — `db.py` would otherwise have to import from `api.handlers._helpers`. `_helpers.py` re-exports the names for backward compatibility with handler call sites.
+
+## Cache TTL (`cache_ttl.py`)
+
+Two questions, deliberately kept apart:
+
+1. **What did idling cost?** A pause longer than the cache TTL means the
+   next request rebuilds the prefix at the write rate instead of reading it.
+2. **Would a different TTL have been cheaper?** 1h charges 2x input on every
+   incremental write, against 1.25x for 5m — so it buys back the rebuilds in
+   the 5-60 minute band and pays a surcharge on everything else.
+
+The second cannot be read off the first, which is why the module simulates
+both policies rather than reporting a waste figure.
+
+**One detection rule.** `cache_requests` is the only place a cache break is
+defined. The session-detail divider, the tokenscape event track and the
+cost-overview panel all read it; before this there were two rules with
+different thresholds (300s vs 270s, different secondary conditions) that
+could disagree about the same session.
+
+**Gap semantics.** Measured from the end of the previous response (the last
+logged block of that `message.id`) to whatever triggered the next request —
+a human prompt *or* a tool result. A tool that runs for six minutes expires
+the cache exactly like a coffee break does. Anthropic's TTL refreshes on
+every hit, so the gap since the previous *request* is the right clock, not
+the gap since the cache was first written.
+
+**Ordering** is by wall-clock timestamp within `(session_id, is_sidechain)`.
+`parent_uuid` would be the more principled chain, but real transcripts break
+it — parallel tool calls and harness rewrites leave dangling parents.
+
+**The counterfactual.** For `T ∈ {300, 3600}`, independent of what was
+observed:
+
+```
+warm(T) = gap_seconds <= T AND NOT structural_invalidation AND seq > 1
+warm : read = common_prefix;  write = prefix_total - read
+cold : read = 0;              write = prefix_total
+cost(T) = read*rate_read + write*rate_write(T) + input*rate_in + output*rate_out
+```
+
+Assumptions, stated so they can be argued with:
+
+- **Prefix invariance.** `prefix_total = cache_read + cache_creation` is a
+  property of the conversation, not the TTL — the same messages get re-sent
+  either way. Only the read/write split moves. This is what makes the
+  comparison honest.
+- **Common prefix.** A request that was observed *warm* reports its reusable
+  overlap directly as `cache_read_tokens` (cache-breakpoint granularity
+  included). A request that *missed* reports only whatever residue survived,
+  so it falls back to `min(prev_prefix_total, prefix_total)` — exact for the
+  ordinary append-only case.
+- **Structural invalidations are excluded.** Reading back ~nothing after a
+  sub-5-minute gap means the prefix changed (model or effort switch,
+  `/compact`, a tool-set change), not that time ran out. Identical cost under
+  both policies, so attributing it to pausing would be wrong.
+- **Gaps over an hour are breaks, not waste.** No TTL Claude Code offers
+  recovers them; counting them inflates the apparent upside of switching, so
+  they are reported separately.
+- **Subscription dollars are API-equivalent.** Costs are list API prices; no
+  plan coefficient is recorded in the transcripts, so treat the margin as a
+  ratio as much as a dollar figure.
+- **Sidechains never merge into the main verdict.** Subagents carry their own
+  `subagentPromptCacheTtl`, and concurrent subagents interleave in wall-clock
+  order, so their gaps are noisier. Scored separately, always.
+- **One TTL bucket per request.** Mixed-TTL billing positions inside a single
+  request are not modelled.
+
+**The gate.** `introspy cache-ttl --verify` replays the TTL each uniform-TTL
+session was *actually* billed at and compares against the observed bill. Any
+non-zero residual means the gap definition misclassified a request's warmth,
+and nothing built on the simulation is trustworthy until it is explained. The
+same command reports 5m/1h split coverage by month.
+
+Surfaces: the cost-overview portfolio panel, `introspy cache-ttl`, the
+`Prompt-cache TTL` line in `introspy stats`, and the `cache_ttl_choice`
+query template / MCP tool.
 
 ## Pricing (`pricing.py`)
 

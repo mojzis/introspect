@@ -181,6 +181,7 @@ _SAMPLE_PARAMS: dict[str, dict[str, object]] = {
     "session_cost_tail": {"session_id": SID},
     "topic_to_cost": {"query": SEARCH_WORD, "limit": 5},
     "first_prompt_triggers": {"limit": 5, "project": None},
+    "cache_ttl_choice": {"limit": 5, "since": None, "sidechain": False},
 }
 _MIN_EXPECTED_ROWS: dict[str, int] = {
     "expensive_sessions": 1,  # fixture session has cost
@@ -188,6 +189,7 @@ _MIN_EXPECTED_ROWS: dict[str, int] = {
     "session_cost_tail": 2,  # two cost-bearing assistant messages
     "topic_to_cost": 1,  # SEARCH_WORD appears in the fixture's first prompt
     "first_prompt_triggers": 1,  # fixture session has a first prompt
+    "cache_ttl_choice": 1,  # fixture session has priced API requests
 }
 
 

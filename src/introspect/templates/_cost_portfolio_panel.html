@@ -48,6 +48,41 @@
         </div>
         {% endif %}
     </div>
+    {% if ttl_verdict and ttl_verdict.n_requests %}
+    <div style="margin-top:0.9rem;padding:0.7rem 0.9rem;background:#fafafa;
+                border:1px solid #e4e4e4;border-radius:4px;font-size:0.88rem;">
+        <div style="font-weight:600;margin-bottom:0.3rem;">Prompt-cache TTL</div>
+        {% if ttl_verdict.decisive %}
+        <p style="margin:0 0 0.35rem;">
+            <strong>{{ ttl_verdict.recommendation }}</strong> would have been
+            cheaper here — about <strong>{{ ttl_verdict.savings }}</strong>
+            ({{ "%.1f"|format(ttl_verdict.margin_pct) }}%) over these
+            {{ "{:,}".format(ttl_verdict.n_requests) }} requests.
+        </p>
+        {% else %}
+        <p style="margin:0 0 0.35rem;">
+            The two settings land within
+            {{ "%.1f"|format(ttl_verdict.margin_pct) }}% of each other over
+            these {{ "{:,}".format(ttl_verdict.n_requests) }} requests — too
+            close to call. Leave it alone.
+        </p>
+        {% endif %}
+        <p style="margin:0;color:#777;">
+            Replayed at 5m: {{ ttl_verdict.cost_5m }} · at 1h:
+            {{ ttl_verdict.cost_1h }}{% if ttl_verdict.ttl_observed %} ·
+            currently billed at {{ ttl_verdict.ttl_observed }}{% endif %}.
+            {{ ttl_verdict.n_gaps_recoverable }} gap(s) a longer TTL would
+            rescue, {{ ttl_verdict.n_gaps_unrecoverable }} break(s) past
+            {{ ttl_verdict.max_ttl_minutes }} min that nothing recovers, and
+            {{ ttl_verdict.n_structural }} structural invalidation(s) that
+            cost the same either way. 1h charges 2&times; input on every
+            incremental cache write, not just the rebuilds it avoids — which
+            is why the waste figure above cannot decide this on its own.
+            Subagents are excluded; they have their own
+            <code>subagentPromptCacheTtl</code>.
+        </p>
+    </div>
+    {% endif %}
     <p style="margin-top:0.8rem;">
         These <strong>{{ pareto.pareto_session_count }}</strong> sessions
         represent 80% of <strong>{{ pareto.total_cost }}</strong> total cost

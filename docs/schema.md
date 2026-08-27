@@ -46,8 +46,27 @@ Model responses.
 - `id` — API message ID
 - `role` — "assistant"
 - `stop_reason` — "end_turn" | "tool_use" | null (streaming)
-- `usage` — token counts (`input_tokens`, `output_tokens`, `cache_creation_input_tokens`, `cache_read_input_tokens`)
+- `usage` — token counts (`input_tokens`, `output_tokens`, `cache_creation_input_tokens`, `cache_read_input_tokens`), plus the nested `cache_creation` split described below
 - `content` — array of content blocks
+
+**`usage.cache_creation` (nested):**
+```json
+"cache_creation": {
+  "ephemeral_5m_input_tokens": 0,
+  "ephemeral_1h_input_tokens": 4396
+}
+```
+Which bucket is filled says which prompt-cache TTL the request was actually
+billed under — Claude Code hands out 1h on subscription-within-plan for the
+main conversation and 5m otherwise, and the two are priced differently
+(1.25x input for a 5m write, 2x for 1h). `assistant_message_costs` surfaces
+this as `ttl_observed` (`'5m'` / `'1h'` / `'mixed'` / `'unknown'`).
+
+Where the split is present the two buckets sum to
+`cache_creation_input_tokens`. Older records omit the nested object
+entirely; those bill at the 5m rate and report `ttl_observed = 'unknown'`.
+Subagent (sidechain) requests are governed by a separate
+`subagentPromptCacheTtl`, 5m by default for everyone.
 
 **Content block types:**
 - `text`: `{ type: "text", text: "..." }`

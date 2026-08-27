@@ -7,6 +7,7 @@ Explore Claude Code conversation logs via CLI, web UI, MCP server.
 - `db.py` — DuckDB schema over `~/.claude/projects/**/*.jsonl`; materialized at server startup, lazy views as fallback
 - `refresh.py` — background rebuild loop + window picker (`1`/`7`/`30`/`month`)
 - `pricing.py` — model pricing as Python rates + DuckDB `CASE` SQL
+- `cache_ttl.py` — the single prompt-cache-break detection rule (`cache_requests` view) plus the 5m-vs-1h counterfactual and its rollups; verify with `introspy cache-ttl --verify`
 - `sql_fragments.py` — shared SQL building blocks (cost / tool / file / command rollups)
 - `projects.py` — git worktree-aware `cwd` → canonical project
 - `search.py` — FTS via BM25, ILIKE fallback
@@ -24,9 +25,10 @@ Explore Claude Code conversation logs via CLI, web UI, MCP server.
 - **Pagination**: 1-based, fetch `size+1` to detect next page
 - **HTMX**: `parent(request)` selects `base.html` (full) vs `partial.html` (fragment)
 - **Charts**: build `plotly.graph_objects.Figure` server-side, style with `nolegend.activate()`, embed JSON for `Plotly.newPlot` (see `/python-review` skill `nolegend`)
+- **Cache breaks**: never re-derive a TTL threshold — read `cache_requests` (`cache_miss`, `gap_recoverable`, `gap_unrecoverable`). Waste is capped at 1h gaps; anything longer is a break no setting recovers
 - **Cost SQL**: reuse `SESSION_COST_SUBQUERY` / `session_cost_subquery_filtered()` from `sql_fragments.py` — never hand-roll cost math in handlers
 - **Materialization**: `materialize_views()` runs on web startup and rebuilds derived tables (incl. `session_stats`, `assistant_message_costs`, `session_messages_enriched`); CLI commands call `ensure_materialized()` so they share the on-disk DB
-- **Views/tables** (`db.py`): `raw_data`, `raw_messages`, `project_map`, `logical_sessions`, `assistant_message_costs`, `tool_calls`, `session_messages_enriched`, `conversation_turns`, `session_titles`, `message_commands`, `file_reads`, `file_writes`, `session_stats`, `search_corpus`, `materialize_meta`
+- **Views/tables** (`db.py`): `raw_data`, `raw_messages`, `project_map`, `logical_sessions`, `assistant_message_costs`, `tool_calls`, `session_messages_enriched`, `conversation_turns`, `session_titles`, `message_commands`, `file_reads`, `file_writes`, `session_stats`, `cache_requests`, `session_cache_ttl`, `search_corpus`, `materialize_meta`
 
 ## Test Fixtures (`conftest.py`)
 

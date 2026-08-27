@@ -7,10 +7,22 @@ from typing import TYPE_CHECKING
 if TYPE_CHECKING:
     import subprocess
 
+    import duckdb
+
 import typer
 from rich.console import Console
 from rich.table import Table
 
+from introspect.cache_ttl import (
+    MAX_RECOVERABLE_GAP_SECONDS,
+    TTL_5M_SECONDS,
+    TtlComparison,
+    gap_histogram,
+    global_ttl_comparison,
+    parity_residuals,
+    project_ttl_comparisons,
+    split_coverage,
+)
 from introspect.db import (
     DEFAULT_CODEX_GLOB,
     DEFAULT_DB_PATH,
@@ -26,6 +38,9 @@ from introspect.sql_query import is_loopback_host
 from introspect.version_check import maybe_notify_update
 
 SID_TRUNCATE = 12
+
+# Rows shown per section in ``stats`` before it collapses to a count.
+_STATS_TOP_N = 10
 
 app = typer.Typer(help="Explore Claude Code conversation logs.")
 console = Console()
@@ -368,7 +383,200 @@ def stats():
             table.add_row(name or "?", str(cnt))
         console.print(table)
 
+    ttl_rows = project_ttl_comparisons(conn)
+    if ttl_rows:
+        console.print(
+            "\n[bold]Prompt-cache TTL[/bold] "
+            "[dim](introspy cache-ttl for the detail)[/dim]"
+        )
+        # Capped like the tool breakdown above — this is a summary, and a
+        # machine with fifty projects shouldn't turn it into a wall.
+        for project, verdict in ttl_rows[:_STATS_TOP_N]:
+            console.print(f"  {project}: {_format_verdict(verdict)}")
+        if len(ttl_rows) > _STATS_TOP_N:
+            console.print(f"  [dim]… {len(ttl_rows) - _STATS_TOP_N} more[/dim]")
+
     conn.close()
+
+
+def _format_verdict(verdict: TtlComparison) -> str:
+    """One-line recommendation with its margin, or an honest shrug."""
+    if verdict.n_requests == 0:
+        return "[dim]no requests[/dim]"
+    if not verdict.decisive:
+        return (
+            f"[dim]either ({verdict.margin_pct:.1f}% apart — inside "
+            f"modelling error)[/dim]"
+        )
+    colour = "green" if verdict.recommendation == "1h" else "cyan"
+    return (
+        f"[{colour}]{verdict.recommendation}[/{colour}] saves "
+        f"${verdict.savings:.2f} ({verdict.margin_pct:.1f}%)"
+    )
+
+
+def _ttl_table(rows: list[tuple[str, TtlComparison]]) -> Table:
+    """Per-project recommendation table."""
+    table = Table()
+    table.add_column("Project")
+    table.add_column("Reqs", justify="right")
+    table.add_column("Recoverable", justify="right")
+    table.add_column("Breaks", justify="right")
+    table.add_column("5m", justify="right")
+    table.add_column("1h", justify="right")
+    table.add_column("Observed TTL")
+    table.add_column("Recommendation")
+    for project, verdict in rows:
+        table.add_row(
+            project,
+            str(verdict.n_requests),
+            str(verdict.n_gaps_recoverable),
+            str(verdict.n_gaps_unrecoverable),
+            f"${verdict.cost_5m:.2f}",
+            f"${verdict.cost_1h:.2f}",
+            verdict.ttl_observed_dominant or "?",
+            _format_verdict(verdict),
+        )
+    return table
+
+
+@app.command(name="cache-ttl")
+def cache_ttl(
+    verify: bool = typer.Option(
+        False,
+        "--verify",
+        help="Show the simulation's parity residuals and 5m/1h split coverage "
+        "instead of the recommendation.",
+    ),
+    subagents: bool = typer.Option(
+        False,
+        "--subagents",
+        help="Score sidechain traffic (subagentPromptCacheTtl) instead of the "
+        "main conversation. Never merged with the main-chain verdict.",
+    ),
+):
+    """Would a 1h or 5m prompt-cache TTL have been cheaper?
+
+    Replays every API request under both policies. The prefix a request
+    re-sends is the same either way; only the read/write split moves, so the
+    comparison turns on one thing — which gaps each TTL would have kept warm.
+    """
+    conn = _db()
+    try:
+        if verify:
+            _print_ttl_verification(conn)
+            return
+
+        overall = global_ttl_comparison(conn, sidechain=subagents)
+        scope = "Subagents" if subagents else "Main conversation"
+        console.print(f"\n[bold]{scope}[/bold] — {overall.n_requests} requests")
+        if overall.n_requests == 0:
+            console.print("[dim]No cache data.[/dim]")
+            return
+
+        console.print(f"  5m: [bold]${overall.cost_5m:.2f}[/bold]")
+        console.print(f"  1h: [bold]${overall.cost_1h:.2f}[/bold]")
+        console.print(f"  → {_format_verdict(overall)}")
+        console.print(
+            f"  [dim]{overall.n_gaps_recoverable} recoverable gap(s), "
+            f"{overall.n_gaps_unrecoverable} break(s) over "
+            f"{MAX_RECOVERABLE_GAP_SECONDS // 60} min (no TTL recovers those), "
+            f"{overall.n_structural} structural invalidation(s).[/dim]"
+        )
+
+        rows = project_ttl_comparisons(conn, sidechain=subagents)
+        if rows:
+            console.print("\n[bold]By project[/bold] (the setting is per project):")
+            console.print(_ttl_table(rows))
+
+        console.print("\n[bold]Gaps between requests:[/bold]")
+        hist = Table()
+        hist.add_column("Gap")
+        hist.add_column("Requests", justify="right")
+        hist.add_column("Prefix tokens at stake", justify="right")
+        hist.add_column("Recoverable")
+        for bucket in gap_histogram(conn, sidechain=subagents):
+            hist.add_row(
+                bucket["bucket"],
+                str(bucket["count"]),
+                f"{bucket['prefix_tokens']:,}",
+                "yes" if bucket["recoverable"] else "no",
+            )
+        console.print(hist)
+        console.print(
+            "\n[dim]Costs are list API prices; subscription dollars are "
+            "treated as API-equivalent.[/dim]"
+        )
+    finally:
+        conn.close()
+
+
+def _print_ttl_verification(conn: "duckdb.DuckDBPyConnection") -> None:
+    """Parity residuals + split coverage — the gate on the simulation.
+
+    Simulating the TTL a session was *actually* billed at has to reproduce
+    its bill. A non-zero residual means the gap definition misclassified a
+    request's warmth, and nothing built on the counterfactual is trustworthy
+    until it is explained.
+    """
+    coverage = split_coverage(conn)
+    console.print("\n[bold]cache_creation 5m/1h split coverage by month[/bold]")
+    table = Table()
+    table.add_column("Month")
+    table.add_column("Requests", justify="right")
+    table.add_column("With writes", justify="right")
+    table.add_column("Missing split", justify="right")
+    table.add_column("Sum mismatch", justify="right")
+    for row in coverage:
+        table.add_row(
+            row["month"],
+            str(row["n_requests"]),
+            str(row["n_with_writes"]),
+            f"{row['n_missing_split']} ({row['pct_missing_split']:.1f}%)",
+            str(row["n_split_mismatch"]),
+        )
+    console.print(table)
+    if any(row["n_split_mismatch"] for row in coverage):
+        console.print(
+            "[red]Split does not sum to cache_creation_tokens on some rows — "
+            "prefix_total is unreliable there.[/red]"
+        )
+
+    residuals = parity_residuals(conn)
+    console.print(
+        f"\n[bold]Parity: simulated vs observed[/bold] "
+        f"({len(residuals)} uniform-TTL session(s))"
+    )
+    if not residuals:
+        console.print(
+            "[dim]No session has a single observed TTL throughout — nothing "
+            "to reproduce.[/dim]"
+        )
+        return
+    worst = residuals[:10]
+    table = Table()
+    table.add_column("Session")
+    table.add_column("TTL")
+    table.add_column("Reqs", justify="right")
+    table.add_column("Observed", justify="right")
+    table.add_column("Simulated", justify="right")
+    table.add_column("Residual", justify="right")
+    for row in worst:
+        table.add_row(
+            _truncate_sid(row["session_id"]),
+            row["ttl_observed"],
+            str(row["n_requests"]),
+            f"${row['observed_usd']:.4f}",
+            f"${row['simulated_usd']:.4f}",
+            f"{row['residual_pct']:+.2f}%",
+        )
+    console.print(table)
+    max_residual = max(abs(row["residual_pct"]) for row in residuals)
+    console.print(
+        f"Worst residual: [bold]{max_residual:.3f}%[/bold] "
+        f"(gap threshold {TTL_5M_SECONDS}s / "
+        f"{MAX_RECOVERABLE_GAP_SECONDS}s)"
+    )
 
 
 @app.command()
@@ -880,11 +1088,14 @@ INTROSPECT_SESSION_INSTRUCTIONS = (
     "via the `introspect` MCP server. Prefer the mcp__introspect__* tools "
     "(run_sql, describe_schema, search_conversations, get_session, "
     "recent_sessions, tool_failures, tool_failure_rate, refresh_data, "
-    "expensive_sessions, list_query_templates) over reading "
+    "expensive_sessions, cache_ttl_choice, list_query_templates) over reading "
     "~/.claude/projects JSONL files directly — the views already handle "
     "session stitching, cost attribution, and project resolution. For "
     "ranked expensive sessions with cost split and Pareto analysis, call "
-    "expensive_sessions. Call describe_schema before writing SQL, and "
+    "expensive_sessions. For the prompt-cache TTL question — would 1h or 5m "
+    "have been cheaper — call cache_ttl_choice rather than deriving it "
+    "from cache-miss waste, which cannot answer it. Call describe_schema "
+    "before writing SQL, and "
     "list_query_templates for curated starting-point queries to adapt."
 )
 
