@@ -70,6 +70,12 @@ _TOOL_ALIAS_CALL_SITE = re.compile(r"tools\.([a-zA-Z0-9_]+)\s*\(")
 _SHELL_READ_CMD = re.compile(r"^\s*(sed -n|cat|head|tail)\b")
 _SHELL_OPERATOR_SPLIT = re.compile(r"\||&&|;|>>|>")
 _PATH_LIKE = re.compile(r"/|\.[A-Za-z0-9]{1,10}$")
+_AGENT_HISTORY_FIRST_REQUEST = re.compile(
+    r"^The following is the Codex agent history whose request action you are "
+    r"assessing\..*?\n>>> TRANSCRIPT START\s*\n"
+    r"\[\d+\]\s+user:\s*(.+?)(?=\n\s*\[\d+\]\s+|\n>>> TRANSCRIPT END|\Z)",
+    re.DOTALL,
+)
 
 
 def _derive_harness(originator: str, source: str) -> str:
@@ -287,6 +293,7 @@ class _FileState:
         self.last_total_tokens: int | None = None
         self.read_ordinal: int = 0
         self.processed_patch_call_ids: set[str] = set()
+        self.session_metadata: dict[str, dict[str, str]] = {}
         self.rows: list[dict[str, Any]] = []
 
     def next_uuid(self, line_index: int, sub_index: int = 0) -> str:
@@ -297,6 +304,19 @@ class _FileState:
         """Distinct uuid for each read-enrichment row emitted from one line."""
         self.read_ordinal += 1
         return f"{self.next_uuid(line_index)}:read{self.read_ordinal}"
+
+    def current_session_metadata(self) -> dict[str, str]:
+        """Return the mutable metadata record for the active logical session."""
+        return self.session_metadata.setdefault(
+            self.session_id,
+            {
+                "session_id": self.session_id,
+                "agent_path": "",
+                "agent_nickname": "",
+                "parent_thread_id": "",
+                "title": "",
+            },
+        )
 
     def resolve_model(self, turn_id: str | None) -> str | None:
         if turn_id and turn_id in self.turn_model:
@@ -373,6 +393,11 @@ def _handle_session_meta(state: _FileState, payload: dict[str, Any]) -> None:
     state.is_sidechain = payload.get("thread_source") == "subagent"
     state.provider = payload.get("model_provider") or _DEFAULT_PROVIDER
     state.harness = _derive_harness(state.entrypoint, payload.get("source", ""))
+    if state.session_id:
+        metadata = state.current_session_metadata()
+        for key in ("agent_path", "agent_nickname", "parent_thread_id"):
+            if value := payload.get(key):
+                metadata[key] = value
 
 
 def _handle_turn_context(state: _FileState, payload: dict[str, Any]) -> None:
@@ -683,6 +708,13 @@ def _handle_user_message(
     state: _FileState, payload: dict[str, Any], timestamp: str, line_index: int
 ) -> None:
     text = payload.get("message", "")
+    if state.session_id and (match := _AGENT_HISTORY_FIRST_REQUEST.match(text)):
+        # Approval-review sidecars receive the parent transcript in one
+        # synthetic user message. Its first human turn is the useful title;
+        # the envelope itself is not a user request.
+        metadata = state.current_session_metadata()
+        if not metadata["title"]:
+            metadata["title"] = match.group(1).strip()
     command = None
     for elem in payload.get("text_elements") or []:
         placeholder = elem.get("placeholder", "") if isinstance(elem, dict) else ""
@@ -740,12 +772,13 @@ _TOP_LEVEL_HANDLERS = {
 }
 
 
-def transcode_rollout(path: str | Path) -> list[dict[str, Any]]:
+def transcode_rollout_with_metadata(
+    path: str | Path,
+) -> tuple[list[dict[str, Any]], list[dict[str, str]]]:
     """Transcode one Codex rollout JSONL file into ``raw_messages``-shaped rows.
 
-    Single pass over the file; no whole-corpus buffering. Returns a list of
-    dicts with the 15 keys of ``db._RAW_MESSAGES_COLUMNS`` plus ``provider``
-    and ``harness``.
+    Single pass over the file; no whole-corpus buffering. Returns rows shaped
+    for ``raw_messages`` plus per-session display metadata from ``session_meta``.
     """
     path = Path(path)
     state = _FileState(str(path))
@@ -764,4 +797,10 @@ def transcode_rollout(path: str | Path) -> list[dict[str, Any]]:
                 _handle_response_item(state, payload, timestamp, line_index)
             elif record_type == "event_msg":
                 _handle_event_msg(state, payload, timestamp, line_index)
-    return state.rows
+    return state.rows, list(state.session_metadata.values())
+
+
+def transcode_rollout(path: str | Path) -> list[dict[str, Any]]:
+    """Transcode one rollout, returning only ``raw_messages``-shaped rows."""
+    rows, _metadata = transcode_rollout_with_metadata(path)
+    return rows

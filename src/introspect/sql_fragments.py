@@ -136,9 +136,12 @@ CACHE_WRITE_COST_SQL: str = (
 # Output-token dollar cost for one assistant message row (pre /1e6 division).
 OUTPUT_COST_SQL: str = f"output_tokens * ({PRICING_OUTPUT_RATE_SQL})"
 
+# Fresh (uncached) input-token dollar cost for one row (pre /1e6 division).
+INPUT_COST_SQL: str = f"input_tokens * ({PRICING_INPUT_RATE_SQL})"
+
 # Total per-row dollar cost (pre /1e6 division).
 COST_EXPR_SQL: str = (
-    f"input_tokens * ({PRICING_INPUT_RATE_SQL})"
+    f"{INPUT_COST_SQL}"
     f" + {OUTPUT_COST_SQL}"
     f" + {CACHE_READ_COST_SQL}"
     f" + {CACHE_WRITE_COST_SQL}"
@@ -153,11 +156,13 @@ def _build_session_cost_subquery(timestamp_where: str = "") -> str:
     rather than Python so the sessions list can ``ORDER BY cost_usd`` without
     materializing every assistant message.
 
-    The ``cc_fallback`` term covers the legacy schema where
-    ``usage.cache_creation_input_tokens`` is set but the
-    ``cache_creation.{ephemeral_5m,ephemeral_1h}_input_tokens`` sub-fields
-    are zero — bill those tokens at the 5m write rate (Anthropic's older
-    default).  Mirrors the Python fallback in ``fetch_token_usage``.
+    The ``CACHE_WRITE_FALLBACK_SQL`` term inside ``COST_EXPR_SQL`` covers
+    the legacy schema where ``usage.cache_creation_input_tokens`` is set but
+    the ``cache_creation.{ephemeral_5m,ephemeral_1h}_input_tokens``
+    sub-fields are zero — bill those tokens at the 5m write rate
+    (Anthropic's older default).  Every cost surface shares that one
+    expression, so the fallback is applied per row and cannot drift between
+    them.
 
     ``timestamp_where`` is spliced into the inner SELECT as a WHERE clause
     when non-empty. Trust contract: callers must pass only validated SQL

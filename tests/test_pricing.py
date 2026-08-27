@@ -5,6 +5,7 @@ from __future__ import annotations
 import pytest
 
 from introspect.pricing import (
+    LONG_CONTEXT_INPUT_TOKENS,
     PRICING_CACHE_READ_RATE_SQL,
     PRICING_CACHE_WRITE_1H_RATE_SQL,
     PRICING_CACHE_WRITE_5M_RATE_SQL,
@@ -31,7 +32,7 @@ _RATE_CASES = [
     ("claude-sonnet-3-7", Rates(3, 3.75, 6, 0.30, 15)),
     ("claude-haiku-4-5-20251001", Rates(1, 1.25, 2, 0.10, 5)),
     ("claude-haiku-3-5", Rates(0.80, 1, 1.60, 0.08, 4)),
-    ("gpt-5.6-sol", Rates(5.00, 6.25, 10.00, 0.50, 30.00)),
+    ("gpt-5.6-sol", Rates(4.00, 5.00, 8.00, 0.40, 20.00)),
     ("gpt-5.6-terra", Rates(2.00, 2.50, 4.00, 0.20, 12.00)),
     ("gpt-5.6-luna", Rates(0.20, 0.25, 0.40, 0.02, 1.20)),
     ("<synthetic>", Rates(0, 0, 0, 0, 0)),
@@ -94,15 +95,42 @@ def test_compute_cost_usd_haiku():
 
 
 def test_compute_cost_usd_codex():
-    """Per-1M math works for a Codex/OpenAI model."""
+    """Short-context Codex requests use the current OpenAI list prices."""
     cost = compute_cost_usd(
         model="gpt-5.6-terra",
-        input_tokens=2_000_000,
-        output_tokens=500_000,
-        cache_read_tokens=1_000_000,
+        input_tokens=200_000,
+        output_tokens=50_000,
+        cache_read_tokens=100_000,
     )
-    # 2 * 2.0 input + 0.5 * 12.0 output + 1 * 0.2 cache_read
-    assert cost == pytest.approx(4 + 6 + 0.2)
+    # 0.2 * 2.0 input + 0.05 * 12.0 output + 0.1 * 0.2 cache_read
+    assert cost == pytest.approx(0.4 + 0.6 + 0.02)
+
+
+@pytest.mark.parametrize(
+    ("model", "expected"),
+    [
+        ("gpt-5.6-sol", Rates(8.00, 10.00, 16.00, 0.80, 30.00)),
+        ("gpt-5.6-terra", Rates(4.00, 5.00, 8.00, 0.40, 18.00)),
+        ("gpt-5.6-luna", Rates(0.40, 0.50, 0.80, 0.04, 1.80)),
+    ],
+)
+def test_rates_for_uses_long_context_codex_rates(model, expected):
+    """Codex requests switch to the long-context table at the published boundary."""
+    assert rates_for(model, input_tokens=LONG_CONTEXT_INPUT_TOKENS) != expected
+    assert rates_for(model, input_tokens=LONG_CONTEXT_INPUT_TOKENS + 1) == expected
+
+
+def test_compute_cost_usd_codex_long_context():
+    """All Codex token classes use long-context rates above 272K input tokens."""
+    cost = compute_cost_usd(
+        model="gpt-5.6-sol",
+        input_tokens=LONG_CONTEXT_INPUT_TOKENS + 1,
+        output_tokens=1_000_000,
+        cache_read_tokens=1_000_000,
+        cache_creation_5m=1_000_000,
+        cache_creation_1h=1_000_000,
+    )
+    assert cost == pytest.approx(2.176008 + 30 + 0.80 + 10 + 16)
 
 
 def test_compute_cost_usd_synthetic_is_zero():
@@ -154,18 +182,23 @@ _SQL_TEST_MODELS = [
 ]
 
 
+@pytest.mark.parametrize(
+    "input_tokens", [0, LONG_CONTEXT_INPUT_TOKENS, LONG_CONTEXT_INPUT_TOKENS + 1]
+)
 @pytest.mark.parametrize("model", _SQL_TEST_MODELS)
 @pytest.mark.parametrize(("attr", "sql"), _SQL_RATE_PAIRS)
-def test_pricing_sql_matches_python(model, attr, sql):
+def test_pricing_sql_matches_python(model, attr, sql, input_tokens):
     """Each SQL CASE rate must agree with the Python ``Rates`` attribute."""
     import duckdb  # noqa: PLC0415
 
     conn = duckdb.connect(":memory:")
     row = conn.execute(
-        f"SELECT {sql} FROM (SELECT ? AS model)",
-        [model],
+        f"SELECT {sql} FROM (SELECT ? AS model, ? AS input_tokens)",
+        [model, input_tokens],
     ).fetchone()
     assert row is not None, model
     # DuckDB returns Decimal for fractional CASE-derived numerics; coerce to
     # float so the equality check is value-based.
-    assert float(row[0]) == pytest.approx(getattr(rates_for(model), attr))
+    assert float(row[0]) == pytest.approx(
+        getattr(rates_for(model, input_tokens=input_tokens), attr)
+    )

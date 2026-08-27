@@ -20,13 +20,7 @@ import plotly.graph_objects as go
 from fastapi import HTTPException, Request
 from fastapi.responses import HTMLResponse
 
-from introspect.pricing import (
-    PRICING_CACHE_READ_RATE_SQL,
-    PRICING_CACHE_WRITE_1H_RATE_SQL,
-    PRICING_CACHE_WRITE_5M_RATE_SQL,
-    PRICING_INPUT_RATE_SQL,
-    PRICING_OUTPUT_RATE_SQL,
-)
+from introspect.sql_fragments import COST_EXPR_SQL
 
 from ._helpers import (
     conn,
@@ -63,29 +57,6 @@ def _normalise_breakdown(value: str) -> str:
     return value if value in ALLOWED_BREAKDOWNS else DEFAULT_BREAKDOWN
 
 
-def _per_message_cost_expr() -> str:
-    """Per-row USD cost expression for use inside a CTE over assistant_message_costs.
-
-    Unqualified — the inner CTE selects from ``assistant_message_costs`` only
-    so the bare ``model`` reference in :data:`PRICING_*_RATE_SQL` is
-    unambiguous. Mirrors :func:`_helpers._build_session_cost_subquery` (same
-    rate columns, same legacy cache-creation fallback) so daily/hourly
-    totals match the sessions-list cost column to the cent.
-    """
-    cc_fallback = (
-        "(CASE WHEN cache_creation_5m = 0 AND cache_creation_1h = 0 "
-        "THEN cache_creation_tokens ELSE 0 END)"
-    )
-    return (
-        f"input_tokens * ({PRICING_INPUT_RATE_SQL})"
-        f" + output_tokens * ({PRICING_OUTPUT_RATE_SQL})"
-        f" + cache_read_tokens * ({PRICING_CACHE_READ_RATE_SQL})"
-        f" + cache_creation_5m * ({PRICING_CACHE_WRITE_5M_RATE_SQL})"
-        f" + cache_creation_1h * ({PRICING_CACHE_WRITE_1H_RATE_SQL})"
-        f" + {cc_fallback} * ({PRICING_CACHE_WRITE_5M_RATE_SQL})"
-    )
-
-
 def _fetch_aggregated(
     db: duckdb.DuckDBPyConnection,
     *,
@@ -101,7 +72,7 @@ def _fetch_aggregated(
     ``strftime(date_trunc('hour', timestamp::TIMESTAMP), '%H:00')`` for the
     hourly view). User input never reaches this string.
     """
-    cost_expr = _per_message_cost_expr()
+    cost_expr = COST_EXPR_SQL
     sql = f"""
         WITH per_msg AS (
             SELECT

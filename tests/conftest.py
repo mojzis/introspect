@@ -179,10 +179,21 @@ def glob_pattern(tmp_dir: Path) -> str:
     return str(tmp_dir / "projects" / "**" / "*.jsonl")
 
 
-def write_codex_rollout(tmp_dir: Path, session_id: str, lines: list[dict]) -> Path:
-    """Write Codex rollout JSONL records (Codex's directory layout, not Claude's)."""
+def write_codex_rollout(
+    tmp_dir: Path,
+    session_id: str,
+    lines: list[dict],
+    *,
+    filename: str | None = None,
+) -> Path:
+    """Write Codex rollout JSONL records, optionally under a custom filename."""
     jsonl_path = (
-        tmp_dir / "sessions" / "2026" / "08" / "20" / f"rollout-{session_id}.jsonl"
+        tmp_dir
+        / "sessions"
+        / "2026"
+        / "08"
+        / "20"
+        / f"rollout-{filename or session_id}.jsonl"
     )
     jsonl_path.parent.mkdir(parents=True, exist_ok=True)
     with jsonl_path.open("w") as f:
@@ -243,6 +254,62 @@ def write_codex_session(tmp_dir: Path, session_id: str) -> Path:
         ),
     ]
     return write_codex_rollout(tmp_dir, session_id, lines)
+
+
+def write_codex_parent_nested_replay(tmp_dir: Path, session_id: str) -> None:
+    """Write parent and nested rollouts sharing one replayed response."""
+    parent_lines = [
+        codex_record("session_meta", codex_session_meta(session_id)),
+        codex_record("turn_context", codex_turn_context("turn-parent")),
+        codex_record(
+            "event_msg",
+            {"type": "user_message", "message": "parent prompt", "text_elements": []},
+        ),
+        codex_record(
+            "response_item",
+            {
+                "type": "message",
+                "role": "assistant",
+                "id": "msg-parent",
+                "content": [{"type": "output_text", "text": "parent answer"}],
+            },
+        ),
+    ]
+    nested_lines = [
+        codex_record(
+            "session_meta",
+            codex_session_meta(session_id, thread_source="subagent"),
+        ),
+        codex_record("turn_context", codex_turn_context("turn-child")),
+        codex_record(
+            "event_msg",
+            {
+                "type": "user_message",
+                "message": "subagent prompt",
+                "text_elements": [],
+            },
+        ),
+        codex_record(
+            "response_item",
+            {
+                "type": "message",
+                "role": "assistant",
+                "id": "msg-parent",
+                "content": [{"type": "output_text", "text": "parent answer"}],
+            },
+        ),
+        codex_record(
+            "response_item",
+            {
+                "type": "message",
+                "role": "assistant",
+                "id": "msg-child",
+                "content": [{"type": "output_text", "text": "subagent answer"}],
+            },
+        ),
+    ]
+    write_codex_rollout(tmp_dir, session_id, parent_lines, filename="01-parent")
+    write_codex_rollout(tmp_dir, session_id, nested_lines, filename="02-nested")
 
 
 # ---------------------------------------------------------------------------

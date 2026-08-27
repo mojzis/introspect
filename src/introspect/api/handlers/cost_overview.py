@@ -798,7 +798,7 @@ def _build_huge_reads_split(
             _timestamp,
             _is_side,
             model,
-            _in_tok,
+            in_tok,
             _out_tok,
             _cr_tok,
             cc_total,
@@ -827,6 +827,7 @@ def _build_huge_reads_split(
         )
         read_cc_cost = compute_cost_usd(
             model=model,
+            input_tokens=int(in_tok or 0),
             cache_creation_5m=eff_5m,
             cache_creation_1h=cc_1h_i,
         )

@@ -28,7 +28,7 @@ If the target port is busy, the server falls forward to the next free port.
 |---|---|---|
 | `/` | Dashboard | Session count, recent sessions, headline token/cost stats. |
 | `/sessions` | Sessions | Every session, filterable by model, project, branch, command, provider, and free text; sortable by start, duration, message counts, tool calls, model, project, branch, provider, title, file counts, or cost. |
-| `/sessions/{session_id}` | Session detail | One session across five tabs — see [below](#session-detail-tabs). |
+| `/sessions/{session_id}` | Session detail | One session across five tabs, with its resolved title above the metadata — see [below](#session-detail-tabs). |
 | `/search` | Search | Full-text search across all message types (BM25, ILIKE fallback). |
 | `/tools` | Tools | Tool-call statistics; filter by name, session, project, or failures only. |
 | `/bash` | Bash | Bash invocations grouped by command prefix, with failure counts. |
@@ -95,6 +95,10 @@ Both are omitted (em-dash) when there is nothing to draw.
 | Tokenscape | Which piece of content burned the money, and for how long. |
 | Trajectory | How the session behaved — the tool-call sequence as a glyph strip. |
 | Subagents | Which agent spent what (only shown when the session used subagents). |
+
+The title is normally the opening human prompt. Codex approval-review sidecars
+instead show the original request embedded in their agent-history envelope; if
+that is unavailable, Codex's recorded subagent path or nickname is used.
 
 ### Messages tab
 
@@ -329,5 +333,8 @@ notice and the page stays a 200.
 - It has no authentication. Binding it to a non-loopback host exposes every
   conversation on your machine to that network.
 - Cost figures are computed from a hardcoded price snapshot and exclude
-  request-level modifiers (fast mode, US-pinned inference, OpenAI's
-  long-context tier) — see [Architecture](../architecture.md#pricing-pricingpy).
+  request-level modifiers (fast mode and US-pinned inference). OpenAI
+  `gpt-5.6-*` long-context pricing is included when a recorded request has more
+  than 272K input tokens — see [Architecture](../architecture.md#pricing-pricingpy).
+- Sessions that contain one of those requests carry a **long context** badge beside
+  their estimated cost.

@@ -116,6 +116,54 @@ def _dup_jsonl(tmp_dir: Path, session_id: str) -> Path:
     return write_jsonl(tmp_dir, session_id, lines)
 
 
+def _legacy_and_modern_jsonl(tmp_dir: Path, session_id: str) -> Path:
+    """One model, one modern cache_creation record and one legacy record.
+
+    The legacy record predates the 5m/1h split: it carries only
+    ``cache_creation_input_tokens``. Billing has to fall back to the 5m rate
+    for it, and that decision has to be made per row — a per-model aggregate
+    sees a non-zero 5m sum from the modern record and skips the fallback,
+    dropping the legacy tokens from the bill entirely.
+    """
+    lines = [
+        make_user_message(
+            session_id,
+            "u1",
+            None,
+            "2026-04-21T10:00:00.000Z",
+            "hi",
+            tool_use_result={"content": "seed"},
+        ),
+        make_assistant_message(
+            session_id,
+            "a1",
+            "u1",
+            "2026-04-21T10:00:01.000Z",
+            [{"type": "text", "text": "modern"}],
+            model="claude-opus-4-7",
+            msg_id="msg-modern",
+            usage={
+                "cache_creation_input_tokens": 100,
+                "cache_creation": {
+                    "ephemeral_5m_input_tokens": 100,
+                    "ephemeral_1h_input_tokens": 0,
+                },
+            },
+        ),
+        make_assistant_message(
+            session_id,
+            "a2",
+            "a1",
+            "2026-04-21T10:00:02.000Z",
+            [{"type": "text", "text": "legacy"}],
+            model="claude-opus-4-7",
+            msg_id="msg-legacy",
+            usage={"cache_creation_input_tokens": 1_000_000},
+        ),
+    ]
+    return write_jsonl(tmp_dir, session_id, lines)
+
+
 def _subagent_jsonl(tmp_dir: Path, session_id: str) -> Path:
     """Build a JSONL where a sidechain assistant message has cache_creation."""
     lines = [
