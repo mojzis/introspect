@@ -128,6 +128,14 @@ The background refresh writes to a separate sidecar file and swaps it in with
 * The existing gates still apply: the SQL API is exposed only on a loopback
   bind, and `INTROSPECT_SQL_API=off` disables it outright. See
   [Configuration](configuration.md#sql-api-gating).
+* **Error responses never leak internals by default.** A failed request gets
+  its real status code and a short message — see
+  [Error handling](usage/web-ui.md#error-handling). The traceback, which
+  carries file paths, SQL text and DuckDB internals, is written to the server
+  log on every unhandled exception but reaches the browser only when
+  `INTROSPECT_DEBUG` is truthy **and** the bind is loopback. `devserve` sets
+  the variable; `serve` never does, and on `serve --host 0.0.0.0` the variable
+  is inert — the same gate, for the same reason, as the SQL API.
 
 ### Resource bounds
 

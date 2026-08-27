@@ -43,7 +43,10 @@ access disabled, so those are refused by the engine too.
 8 MB of total output, 4 000 characters per cell, 32 KB of SQL text, and a 30 s
 wall clock. When a cap stops the read, `truncated` is `true` and
 `truncation_reason` names which one. A timeout, an out-of-memory, and a SQL
-error all return 400 with `{"error": ...}`.
+error all return 400 with `{"error": ...}`. An unexpected server fault returns
+500 in the same `{"error": ...}` shape — the browser-facing
+[error handling](web-ui.md#error-handling) never applies to `/api/*`, which
+always answers JSON.
 
 The same validator and the same bounded executor back the MCP `run_sql` tool —
 see [the SQL guard](../architecture.md#read-only-sql-guard-sql_querypy) and

@@ -17,6 +17,7 @@ Explore Claude Code (and Codex) conversation logs via CLI, web UI, MCP server.
 - `projects.py` — git worktree-aware `cwd` → canonical project
 - `search.py` — FTS via BM25, ILIKE fallback
 - `api/handlers/query.py` — local-only `POST /api/query` + `GET /api/schema` JSON SQL API; gated on `app.state.sql_api_enabled` (loopback bind only, set in `main.py` lifespan from `INTROSPECT_HOST`, fails closed)
+- `api/errors.py` — the single error-response policy: `HTTPException`, validation errors and unhandled exceptions become an HTMX fragment, a full page, or JSON, always with the real status code
 - `api/main.py` — three middlewares: `db_middleware` (per-request hardened read connection), `host_guard` (loopback `Host` allowlist `ALLOWED_HOSTS`, enforced only when `host_allowlist_applies(bind_host)` — hand-rolled, *not* Starlette's `TrustedHostMiddleware`, because the allowlist depends on the bind host the lifespan reads), `local_api_guard` (`Origin` + `X-Introspect-Client` on `/api/query` / `/api/schema` / `/mcp`). **Never** add `CORSMiddleware`
 - `api/routes.py` → `api/handlers/<name>.py` → `templates/<name>.html`
 - `api/handlers/_helpers.py` — shared: `parent(request)`, `conn(request)`, pagination, sort allowlists; re-exports SQL fragments
@@ -28,7 +29,8 @@ Explore Claude Code (and Codex) conversation logs via CLI, web UI, MCP server.
 - **Adding a page**: handler in `handlers/`, route in `routes.py`, template, tests in `tests/routes/`
 - **DB access**: `request.state.conn` (read-only, per-request), `json_extract()` for JSON fields, `# noqa: S608` for dynamic SQL
 - **Pagination**: 1-based, fetch `size+1` to detect next page. The session-detail Messages tab is the exception: it windows in SQL by block ordinal via `MessageWindow` / `_resolve_message_window()` (`handlers/sessions.py`), and deep links pass `?focus=<uuid|tool_use_id>` so the page holding an anchor renders
-- **HTMX**: `parent(request)` selects `base.html` (full) vs `partial.html` (fragment)
+- **HTMX**: `parent(request)` selects `base.html` (full) vs `partial.html` (fragment); both go through `is_htmx(request)` — the one place `HX-Request` is read
+- **Errors**: never return 200 for a failure. `api/errors.py` holds the whole policy — an HTMX request gets `_error.html` retargeted to `#errors` (`HX-Reswap: beforeend`, so the original target survives), a plain request gets `error.html`, `/api/*` and `/mcp` keep their JSON. Tracebacks are always logged, and only rendered under `INTROSPECT_DEBUG` on a loopback bind. `base.html` refuses to swap any error response lacking `X-Introspect-Error-Rendered`. A panel that degrades to an inline notice (`chart_error`, the tokenscape/trajectory/subagents tab fallbacks) is a successful request, not a failure — leave those at 200
 - **Charts**: build `plotly.graph_objects.Figure` server-side, style with `nolegend.activate()`, embed JSON for `Plotly.newPlot` (see `/python-review` skill `nolegend`)
 - **Cache breaks**: never re-derive a TTL threshold — read `cache_requests` (`cache_miss`, `gap_recoverable`, `gap_unrecoverable`). Waste is capped at 1h gaps; anything longer is a break no setting recovers
 - **Ad-hoc SQL**: never hand-roll validation or execution for `run_sql` / `/api/query` — both go through `validate_read_only_sql` then `execute_bounded`, and the API wraps the latter in `asyncio.to_thread` (blocking `db.execute` on the event loop freezes the UI, MCP and refresh together)

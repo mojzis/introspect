@@ -28,6 +28,7 @@ src/introspect/
 ├── api/
 │   ├── main.py             # FastAPI app, lifespan, middleware, SQL-API gating
 │   ├── routes.py           # Route definitions
+│   ├── errors.py           # Exception handlers: the one error-response policy
 │   └── handlers/
 │       ├── _helpers.py     # Shared utilities (pagination, SQL fragments, templates)
 │       ├── dashboard.py    # Landing page
@@ -58,7 +59,9 @@ src/introspect/
     ├── dashboard.html, sessions.html, session_detail.html, search.html,
     ├── tools.html, bash.html, mcps.html, stats.html, triggers.html,
     ├── cost_overview.html, raw.html
+    ├── error.html          # Full-page error (non-HTMX requests)
     └── _*.html             # HTMX partials and macros:
+                            #   _error (error fragment appended to #errors),
                             #   _refresh_indicator, _daily_cost_panel,
                             #   _hourly_cost_panel, _cost_portfolio_panel,
                             #   _spend_shapes (split/spark macros),
@@ -76,7 +79,8 @@ Built with Typer, output formatted with Rich. See the
 [CLI reference](usage/cli-reference.md) for every command and option.
 
 `serve` and `devserve` share an internal `_run_web_ui` launcher; `devserve`
-adds uvicorn auto-reload and a per-branch dev database. Both probe the
+adds uvicorn auto-reload, a per-branch dev database, and `INTROSPECT_DEBUG=1`
+so failures render their traceback in the browser. Both probe the
 configured port and fall forward to the next free one if it's busy, and export
 `INTROSPECT_HOST` so the app knows whether it is loopback-bound. Read commands
 call `ensure_materialized()` before opening a read connection, so the CLI
@@ -121,8 +125,12 @@ A FastAPI application launched via `introspy serve`.
   `SESSION_COST_SUBQUERY` from `sql_fragments.py` rather than hand-rolling cost
   math.
 - **HTMX integration**: `parent(request)` returns `"base.html"` for full page
-  loads or `"partial.html"` for HTMX fragment requests. The refresh indicator,
-  cost panels, and drill-downs are HTMX-swapped fragments.
+  loads or `"partial.html"` for HTMX fragment requests — both off the single
+  `is_htmx(request)` header test. The refresh indicator, cost panels, and
+  drill-downs are HTMX-swapped fragments.
+- **Error responses** (`api/errors.py`): three exception handlers give every
+  failure a visible, honest representation. See
+  [Error handling](usage/web-ui.md#error-handling).
 - **Charts**: built server-side as `plotly.graph_objects.Figure` objects styled
   with the [`nolegend`](https://github.com/mojzis/nolegend) Tufte template and
   embedded as JSON for `Plotly.newPlot` to render client-side.

@@ -73,6 +73,14 @@ The web app follows a consistent handler → route → template pattern:
 All user-facing features must have tests. See the
 [Architecture](architecture.md) reference for the full layout.
 
+Signal failures by raising `HTTPException` — never by returning a 200 whose
+body says something went wrong. `api/errors.py` turns anything raised into an
+error fragment, a full page, or JSON, picked from the request, so a handler
+needs no error markup and no per-element `hx-` attributes of its own. See
+[Error handling](usage/web-ui.md#error-handling) for what the user sees. A
+panel that degrades to a partial result — a chart that could not be built, a
+tab with no data — is a successful request and stays a 200.
+
 ## Database connections
 
 There is exactly one way to open a read-only connection to the main database:

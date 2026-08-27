@@ -928,6 +928,10 @@ def devserve(
     """
     import os  # noqa: PLC0415
 
+    # Dev servers show tracebacks in the browser error surface; `serve` never
+    # does. An explicit setting wins either way.
+    os.environ.setdefault("INTROSPECT_DEBUG", "1")
+
     if "INTROSPECT_DB_PATH" not in os.environ:
         branch = _current_git_branch()
         if branch is not None:

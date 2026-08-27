@@ -1,0 +1,29 @@
+{#
+  Error fragment for a failed HTMX request.
+
+  Rendered by introspect.api.errors with the real 4xx/5xx status
+  code. The response carries HX-Retarget: #errors and HX-Reswap: beforeend, so
+  this markup is appended to the fixed error container in base.html rather than
+  replacing whatever the request was originally aimed at.
+
+  Dismissal is handled by the delegated click listener in base.html, which
+  looks for [data-error-dismiss] — no per-toast script, and it works for the
+  toasts the client builds itself too. That listener's showErrorToast() builds
+  the same structure in JS for errors the server never formatted; keep the two
+  in step.
+#}
+<div class="error-toast" role="alert">
+    <div class="error-toast-head">
+        <strong>{{ status_code }} {{ reason }}</strong>
+        <button type="button" class="error-toast-dismiss"
+                data-error-dismiss aria-label="Dismiss">&times;</button>
+    </div>
+    <p class="error-toast-detail">{{ message }}</p>
+    <p class="error-toast-meta">Request {{ request_id }}</p>
+    {% if traceback %}
+    <details class="error-toast-trace">
+        <summary>Traceback</summary>
+        <pre>{{ traceback }}</pre>
+    </details>
+    {% endif %}
+</div>
