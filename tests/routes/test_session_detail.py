@@ -6,13 +6,17 @@ from contextlib import contextmanager
 from pathlib import Path
 from unittest.mock import patch
 
+import duckdb
+
 from introspect.api.main import app
 
 from ..conftest import (
+    codex_glob_pattern,
     glob_pattern,
     local_client,
     make_assistant_message,
     make_user_message,
+    write_codex_parent_nested_replay,
     write_jsonl,
 )
 from .conftest import SID, _patched_client
@@ -21,6 +25,8 @@ from .cost_helpers import _cache_loss_session_lines
 _TWEAK_SID = "01234567-abcd-abcd-abcd-fedcba987654"
 
 _CACHE_LOSS_SID = "deadbeef-aaaa-bbbb-cccc-fedcba987654"
+
+_CODEX_REPLAY_SID = "codex-replay-route"
 
 
 def _cache_loss_session_jsonl(tmp_dir: Path, *, gap_minutes: int = 6) -> Path:
@@ -180,12 +186,44 @@ def test_session_detail_returns_200():
         assert response.status_code == 200
 
 
+def test_session_detail_tolerates_a_database_missing_cache_requests():
+    """Older materialized databases should not turn every detail page into a 500."""
+    with tempfile.TemporaryDirectory() as tmp, _patched_client(Path(tmp)) as client:
+        with duckdb.connect(str(app.state.db_path)) as db:
+            db.execute("DROP TABLE cache_requests")
+
+        response = client.get(f"/sessions/{SID}")
+
+        assert response.status_code == 200
+        assert "Cache losses" not in response.text
+
+
 def test_session_detail_shows_user_messages():
     """Session detail page displays user messages."""
     with tempfile.TemporaryDirectory() as tmp, _patched_client(Path(tmp)) as client:
         response = client.get(f"/sessions/{SID}")
         assert response.status_code == 200
         assert "Hello, help me with tests" in response.text
+        assert (
+            '<span class="meta-label">Title</span> Hello, help me with tests'
+            in response.text
+        )
+
+
+def test_session_detail_omits_codex_parent_replay_but_keeps_subagent():
+    """Messages renders one parent response and the unique nested response."""
+    with tempfile.TemporaryDirectory() as tmp_str:
+        tmp = Path(tmp_str)
+        write_codex_parent_nested_replay(tmp, _CODEX_REPLAY_SID)
+        with _patched_client(
+            tmp, {"INTROSPECT_CODEX_GLOB": codex_glob_pattern(tmp)}
+        ) as client:
+            response = client.get(f"/sessions/{_CODEX_REPLAY_SID}?tab=messages")
+            assert response.status_code == 200
+            text = response.text
+            assert text.count("parent answer") == 1
+            assert text.count("subagent answer") == 1
+            assert "kind-subagent_prompt" in text
 
 
 def test_session_detail_shows_tool_results():

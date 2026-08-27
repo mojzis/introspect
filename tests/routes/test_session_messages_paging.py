@@ -4,12 +4,12 @@ import os
 from unittest.mock import patch
 
 import pytest
-from fastapi.testclient import TestClient
 
 from introspect.api.main import app
 
 from ..conftest import (
     glob_pattern,
+    local_client,
     make_assistant_message,
     make_user_message,
     write_jsonl,
@@ -98,7 +98,7 @@ def big_client(tmp_path_factory):
                 "INTROSPECT_HOST": "127.0.0.1",
             },
         ),
-        TestClient(app) as client,
+        local_client(app) as client,
     ):
         yield client
 

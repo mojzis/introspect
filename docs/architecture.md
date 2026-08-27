@@ -189,6 +189,11 @@ tagged by `provider` (`anthropic` / `openai`) and `harness` (`claude-code` /
 no-op, mirroring the empty-Claude-home guard. `provider` / `harness` propagate
 through `logical_sessions` and `session_stats` via `ANY_VALUE`.
 
+`session_meta` also carries Codex subagent paths and generated nicknames. For
+approval-review sidecars, the recorded user message is an agent-history
+envelope; `codex_session_metadata` extracts its original first user request for
+the display title rather than using the envelope boilerplate.
+
 ### Relations
 
 The drop-list at the top of `materialize_views()` is the canonical list of
@@ -198,17 +203,19 @@ relations; every entry appears below. `search_corpus` is built separately by
 | Name | Key columns | What it is |
 |---|---|---|
 | `raw_data` | `filename`, `type`, `timestamp`, `sessionId`, `uuid`, `parentUuid`, `message`, `toolUseResult`, `attachment` | Direct JSONL records with an added `filename`, camelCase field names preserved. Claude only — Codex rows never appear here. The only relation that keeps `type='attachment'` records. |
-| `codex_raw_messages` | same shape as `raw_messages` | Transcoded Codex rollout messages. Always created; zero rows when Codex isn't requested or its glob matches nothing. |
+| `codex_raw_messages` | same shape as `raw_messages` | Transcoded Codex rollout messages. Native response-item IDs are deduplicated per logical session so parent-transcript replays do not repeat; rows without a native ID (including synthesized enrichment) are preserved. Always created; zero rows when Codex isn't requested or its glob matches nothing. |
+| `codex_session_metadata` | `session_id`, `title`, `agent_path`, `agent_nickname`, `parent_thread_id` | One row per Codex logical session carrying session-meta naming/context. `title` is the original human request extracted from an approval-review envelope when available. |
 | `raw_messages` | `file_path`, `type`, `timestamp`, `session_id`, `uuid`, `parent_uuid`, `is_sidechain`, `cwd`, `role`, `model`, `message`, `tool_use_result`, `provider`, `harness` | User/assistant messages only (`type IN ('user','assistant')`), snake_cased, with `role`/`model` extracted. Claude `UNION ALL` Codex. Every derived relation except `session_context_loads` builds on this. |
 | `project_map` | `cwd`, `canonical_path`, `project_name` | `cwd` → canonical project, worktree-aware via `projects.py`. Empty in lazy-view mode. |
 | `logical_sessions` | `session_id`, `started_at`, `ended_at`, `duration`, `user_messages`, `assistant_messages`, `model`, `cwd`, `project`, `git_branch`, `entrypoint`, `provider`, `harness` | One row per session: timestamps, duration, message counts, provenance. |
 | `assistant_message_costs` | `session_id`, `uuid`, `timestamp`, `is_sidechain`, `model`, `message_id`, `input_tokens`, `output_tokens`, `cache_read_tokens`, `cache_creation_tokens`, `cache_creation_5m`, `cache_creation_1h`, `ttl_observed` | Per-assistant-message token usage, deduplicated by API `message.id` (`raw_messages` can hold duplicate copies of one response). The base for every cost figure. `ttl_observed` (`5m` / `1h` / `mixed` / `unknown`) records which prompt-cache TTL the row was actually billed at. |
+| `session_stats` | session metadata, activity counts, `cost_usd`, `has_long_context` | Materialized summary for the session list and quick lookups. `has_long_context` marks a session containing a `gpt-5.6-*` request above 272K input tokens. |
 | `cache_requests` | `session_id`, `uuid`, `message_id`, `timestamp`, `trigger_ts`, `response_end_ts`, `is_sidechain`, `model`, `seq`, `prefix_total`, `prev_prefix_total`, `common_prefix`, `gap_seconds`, `gap_bucket`, `ttl_observed`, `structural_invalidation`, `prefix_shrank`, `cache_miss`, `gap_recoverable`, `gap_unrecoverable`, `miss_premium_usd`, `warm_5m`, `warm_1h`, `cost_5m_usd`, `cost_1h_usd`, `cost_observed_usd` | One row per API request, chain-ordered by timestamp within `(session_id, is_sidechain)`. The **only** definition of a prompt-cache break — the session divider, the tokenscape event track and the cost-overview panel all read it — plus both TTL policies replayed over the same requests. See [Cache TTL](#cache-ttl-cache_ttlpy). |
 | `session_cache_ttl` | `session_id`, `is_sidechain`, `cost_5m`, `cost_1h`, `delta`, `cost_observed`, `n_requests`, `n_gaps_recoverable`, `n_gaps_unrecoverable`, `n_structural`, `ttl_observed_dominant`, `recoverable_waste_usd`, `unrecoverable_break_usd`, `recoverable_prefix_tokens` | Per-session rollup of `cache_requests`, for ad-hoc SQL. Diagnostics only: `promptCacheTtl` is set per user/project, so act on the project/global rollups, not on this. |
 | `tool_calls` | `session_id`, `called_at`, `tool_name`, `tool_use_id`, `tool_input`, `is_error`, `tool_use_result`, `result_at`, `execution_time` | Tool invocations joined with their results. `is_error` is the string `'true'`, not a SQL boolean. |
 | `session_messages_enriched` | `session_id`, `uuid`, `parent_uuid`, `timestamp`, `block_idx`, `is_sidechain`, `model`, `kind`, `text`, `thinking_text`, `tool_name`, `tool_use_id`, `tool_input` | One row per content block, classified into a `kind` (`agent_text`, `agent_thinking`, `agent_tool_call`, `tool_result`, `slash_command`, `human_prompt`, `subagent_prompt`). Backs the session detail page. |
 | `conversation_turns` | `session_id`, `timestamp`, `type`, `role`, `uuid`, `turn_order`, `content_text` | Ordered user/assistant text turns per session. |
-| `session_titles` | `session_id`, `first_prompt` | First meaningful user prompt per session (drops `/clear` and command tags). |
+| `session_titles` | `session_id`, `first_prompt` | Display title per session: the extracted original request for a Codex approval sidecar when available; otherwise the first meaningful main-conversation user prompt (dropping `/clear`, command tags, context wrappers, and subagent boilerplate). Codex agent path/nickname is a final fallback. |
 | `message_commands` | `session_id`, `uuid`, `timestamp`, `command` | `<command-name>` tags extracted from user messages. |
 | `session_context_loads` | `session_id`, `timestamp`, `load_kind`, `name`, `char_len` | Harness-injected context, one row per load: `load_kind` is `claude_md` \| `file_ref` \| `skill_listing` \| `mcp` \| `hook`. Reads `raw_data` attachments directly, since `raw_messages` drops them. Listing/reminder chatter is filtered out. The *root* and global `CLAUDE.md` arrive inline as a first-message `<system-reminder>`, not as attachments, so they are not counted here. |
 | `file_reads` | `session_id`, `tool_use_id`, `called_at`, `file_path` | One row per `Read` tool call. |
@@ -435,7 +442,10 @@ That's the cheaper of the two, so a legacy record is never over-billed.
 
 Other exports:
 
-- `rates_for(model)` and `compute_cost_usd(...)` — Python per-row cost.
+- `rates_for(model, input_tokens=...)` and `compute_cost_usd(...)` — Python
+  per-row cost. `gpt-5.6-*` rows above 272K input tokens use OpenAI's
+  long-context table; the threshold is applied before every token class is
+  priced, including output.
 - `PRICING_INPUT_RATE_SQL`, `PRICING_OUTPUT_RATE_SQL`,
   `PRICING_CACHE_READ_RATE_SQL`, `PRICING_CACHE_WRITE_5M_RATE_SQL`,
   `PRICING_CACHE_WRITE_1H_RATE_SQL` — DuckDB `CASE` expressions, so mixed-model
@@ -455,9 +465,10 @@ guessing.
 **Known understatements.** Rates are list prices with no request-level
 modifiers. Anthropic records `usage.speed == 'fast'` (2× on Opus 5 / Opus 4.8)
 and `usage.inference_geo == 'us'` (1.1×); neither is modelled, so a session that
-used either is understated by that multiplier. OpenAI's long-context tier (2×
-input) isn't recorded in Codex logs at all, so every `gpt-5.6-*` call is billed
-at the standard rate.
+used either is understated by that multiplier. OpenAI's `gpt-5.6-*` long-context
+tier is selected from the recorded per-request input count: above 272K input
+tokens, input, cached input, and cache writes are 2× their short-context
+prices, while output is 1.5×.
 
 ## Search (`search.py`)
 
