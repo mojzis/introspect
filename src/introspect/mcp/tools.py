@@ -2,7 +2,8 @@
 
 from __future__ import annotations
 
-from dataclasses import replace
+import logging
+from dataclasses import dataclass, fields, replace
 from datetime import datetime
 from typing import cast, get_args
 
@@ -17,6 +18,7 @@ from introspect.db import (
     get_read_connection,
 )
 from introspect.mcp import refresh_bridge
+from introspect.pricing import is_priced
 from introspect.query_templates import (
     QUERY_TEMPLATES,
     Param,
@@ -30,7 +32,9 @@ from introspect.search import ensure_search_corpus, fts_search
 from introspect.sql_fragments import (
     CACHE_READ_COST_SQL,
     CACHE_WRITE_COST_SQL,
+    CACHE_WRITE_FALLBACK_SQL,
     COST_EXPR_SQL,
+    INPUT_COST_SQL,
     OUTPUT_COST_SQL,
     SESSION_COST_SUBQUERY,
     session_cost_subquery_filtered,
@@ -45,6 +49,8 @@ from introspect.sql_query import (
     execute_bounded,
     validate_read_only_sql,
 )
+
+log = logging.getLogger(__name__)
 
 _VALID_ROLES = {"user", "assistant"}
 # Derived from the QueryTemplate.kind Literal so the two can't drift.
@@ -160,10 +166,202 @@ def search_conversations(  # noqa: PLR0913
         conn.close()
 
 
+# Column aliases of ``_SESSION_COST_SQL``, in SELECT order.
+_SESSION_COST_COLUMNS = (
+    "model",
+    "requests",
+    "sidechain_requests",
+    "input_tokens",
+    "output_tokens",
+    "cache_read_tokens",
+    "cache_write_5m",
+    "cache_write_1h",
+    "input_usd",
+    "output_usd",
+    "cache_read_usd",
+    "cache_write_usd",
+)
+
+
+# Per-session token + $ rollup, grouped by model so a mixed-model session
+# bills each message at its own rates. Reads the deduped
+# ``assistant_message_costs`` view and applies the legacy cache_creation
+# fallback per row, exactly like ``SESSION_COST_SUBQUERY`` — so this figure
+# and the sessions list agree. (``fetch_token_usage``, which the web
+# session-detail page uses, applies that fallback to per-model *aggregates*
+# instead; the two differ only for a model whose session mixes legacy and
+# modern usage records.) ``<synthetic>`` messages are Claude Code's local
+# placeholders, not API calls — excluded here as in ``cache_ttl.py``.
+_SESSION_COST_SQL = f"""
+    SELECT
+        model,
+        COUNT(*)                                        AS requests,
+        COUNT(*) FILTER (WHERE is_sidechain)            AS sidechain_requests,
+        COALESCE(SUM(input_tokens), 0)                  AS input_tokens,
+        COALESCE(SUM(output_tokens), 0)                 AS output_tokens,
+        COALESCE(SUM(cache_read_tokens), 0)             AS cache_read_tokens,
+        COALESCE(SUM(
+            cache_creation_5m + {CACHE_WRITE_FALLBACK_SQL}
+        ), 0)                                           AS cache_write_5m,
+        COALESCE(SUM(cache_creation_1h), 0)             AS cache_write_1h,
+        COALESCE(SUM({INPUT_COST_SQL}), 0) / 1e6        AS input_usd,
+        COALESCE(SUM({OUTPUT_COST_SQL}), 0) / 1e6       AS output_usd,
+        COALESCE(SUM({CACHE_READ_COST_SQL}), 0) / 1e6   AS cache_read_usd,
+        COALESCE(SUM({CACHE_WRITE_COST_SQL}), 0) / 1e6  AS cache_write_usd
+    FROM assistant_message_costs
+    WHERE session_id = ?
+      AND model IS DISTINCT FROM '<synthetic>'
+    GROUP BY model
+    ORDER BY (input_usd + output_usd + cache_read_usd + cache_write_usd) DESC,
+             model
+"""  # noqa: S608
+
+
+@dataclass
+class _ModelSpend:
+    """One model's slice of a session's token + $ usage."""
+
+    model: str
+    requests: int = 0
+    sidechain_requests: int = 0
+    input_tokens: int = 0
+    output_tokens: int = 0
+    cache_read_tokens: int = 0
+    cache_write_5m: int = 0
+    cache_write_1h: int = 0
+    input_usd: float = 0.0
+    output_usd: float = 0.0
+    cache_read_usd: float = 0.0
+    cache_write_usd: float = 0.0
+
+    @property
+    def cache_write_tokens(self) -> int:
+        return self.cache_write_5m + self.cache_write_1h
+
+    @property
+    def total_tokens(self) -> int:
+        return (
+            self.input_tokens
+            + self.output_tokens
+            + self.cache_read_tokens
+            + self.cache_write_tokens
+        )
+
+    @property
+    def total_usd(self) -> float:
+        return (
+            self.input_usd
+            + self.output_usd
+            + self.cache_read_usd
+            + self.cache_write_usd
+        )
+
+    def add(self, other: _ModelSpend) -> None:
+        """Fold ``other``'s counters into this one (model name untouched)."""
+        for f in fields(self):
+            if f.name == "model":
+                continue
+            setattr(self, f.name, getattr(self, f.name) + getattr(other, f.name))
+
+
+def _fetch_model_spend(
+    conn: duckdb.DuckDBPyConnection, session_id: str
+) -> list[_ModelSpend]:
+    """Read one session's per-model token + $ usage, highest spend first.
+
+    Returns an empty list when the derived view is missing — lazy-mode read
+    connections may predate it, and a cost block that can't be computed
+    should cost the caller the block, not the whole session dump.
+    """
+    try:
+        rows = conn.execute(_SESSION_COST_SQL, [session_id]).fetchall()
+    except duckdb.CatalogException:
+        log.warning("assistant_message_costs view missing", exc_info=True)
+        return []
+    # Bound by name, not position, so neither the SELECT list nor the
+    # dataclass field order can be reshuffled into a silent mis-assignment.
+    return [
+        _ModelSpend(
+            model=r["model"] or "?",
+            requests=int(r["requests"] or 0),
+            sidechain_requests=int(r["sidechain_requests"] or 0),
+            input_tokens=int(r["input_tokens"] or 0),
+            output_tokens=int(r["output_tokens"] or 0),
+            cache_read_tokens=int(r["cache_read_tokens"] or 0),
+            cache_write_5m=int(r["cache_write_5m"] or 0),
+            cache_write_1h=int(r["cache_write_1h"] or 0),
+            input_usd=float(r["input_usd"] or 0.0),
+            output_usd=float(r["output_usd"] or 0.0),
+            cache_read_usd=float(r["cache_read_usd"] or 0.0),
+            cache_write_usd=float(r["cache_write_usd"] or 0.0),
+        )
+        for r in (dict(zip(_SESSION_COST_COLUMNS, row, strict=True)) for row in rows)
+    ]
+
+
+def _render_cost_lines(per_model: list[_ModelSpend]) -> list[str]:
+    """Format a per-model spend rollup as the ``get_session`` cost block.
+
+    Returns an empty list when there is nothing worth printing — no
+    assistant messages, or none carrying ``usage`` (older logs, some
+    harnesses), where a block of zeros would read as "this was free".
+    """
+    total = _ModelSpend("all")
+    for spend in per_model:
+        total.add(spend)
+    if total.total_tokens == 0:
+        return []
+
+    # Lazy import: `_helpers` pulls in the FastAPI/web stack, which the stdio
+    # MCP server has no reason to load at startup. Same pattern as
+    # `expensive_sessions`' `clean_title` import.
+    from introspect.api.handlers._helpers import format_cost  # noqa: PLC0415
+
+    lines = [
+        "",
+        "--- Tokens & cost ---",
+        f"Cost: {format_cost(total.total_usd)}"
+        f"  (input {format_cost(total.input_usd)}"
+        f" · output {format_cost(total.output_usd)}"
+        f" · cache write {format_cost(total.cache_write_usd)}"
+        f" · cache read {format_cost(total.cache_read_usd)})",
+        f"Tokens: {total.total_tokens:,} total"
+        f"  (input {total.input_tokens:,}"
+        f" · output {total.output_tokens:,}"
+        f" · cache read {total.cache_read_tokens:,}"
+        f" · cache write {total.cache_write_tokens:,}"
+        f" [5m {total.cache_write_5m:,} / 1h {total.cache_write_1h:,}])",
+        f"API requests: {total.requests}"
+        f" (main {total.requests - total.sidechain_requests}"
+        f" · subagent {total.sidechain_requests})",
+    ]
+
+    # An unpriced model bills $0 — always name it, so the reader doesn't
+    # mistake "no rates for this model" for "this session was cheap".
+    unpriced = {s.model for s in per_model if not is_priced(s.model)}
+    if len(per_model) > 1 or unpriced:
+        lines.append(
+            "By model: "
+            + " · ".join(
+                f"{s.model} {format_cost(s.total_usd)}/{s.requests} req"
+                + (" [unpriced]" if s.model in unpriced else "")
+                for s in per_model
+            )
+        )
+    return lines
+
+
+def _session_cost_lines(conn: duckdb.DuckDBPyConnection, session_id: str) -> list[str]:
+    """Render the token-breakdown / cost block for one session."""
+    return _render_cost_lines(_fetch_model_spend(conn, session_id))
+
+
 def get_session(session_id: str) -> str:
     """Get full session content by session ID.
 
-    Returns all messages as structured data.
+    Returns session metadata, a token breakdown with the estimated $ cost
+    (total, per cost component, and per model), then all messages as
+    structured data.
     """
     conn = _get_read_connection()
     try:
@@ -191,9 +389,9 @@ def get_session(session_id: str) -> str:
             f"Model: {meta[6]}",
             f"CWD: {meta[7]}",
             f"Branch: {meta[8]}",
-            "",
-            "--- Messages ---",
         ]
+        lines.extend(_session_cost_lines(conn, session_id))
+        lines.extend(["", "--- Messages ---"])
 
         turns = conn.execute(
             """

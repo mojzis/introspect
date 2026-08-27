@@ -162,6 +162,17 @@ def rates_for(model: str | None, *, input_tokens: int = 0) -> Rates:
     return _ZERO_RATES
 
 
+def is_priced(model: str | None) -> bool:
+    """Is ``model`` in the pricing table?
+
+    ``rates_for`` bills anything it doesn't recognize at $0, which is
+    indistinguishable from a genuinely cheap model in a rendered report.
+    Callers that surface dollar figures use this to label the difference.
+    ``Rates`` is a NamedTuple, so an all-zero lookup is falsy in every field.
+    """
+    return any(rates_for(model))
+
+
 # Anthropic's default ephemeral cache TTL. A pause longer than this between
 # two API requests means the 5m cache entry is gone and the next call has to
 # rebuild the prefix at the write rate. ``cache_ttl.py`` owns the detection
