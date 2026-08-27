@@ -9,6 +9,7 @@ import pytest
 from .cost_helpers import (
     _cost_overview_setup,
     _dup_jsonl,
+    _legacy_and_modern_jsonl,
     _materialize_and_run,
     _multi_day_specs,
     _multi_model_specs,
@@ -368,6 +369,58 @@ def test_cost_breakdown_collapses_groups_above_cap():
     capped = _cap_groups(bucketed)
     assert "Other" in capped["2026-04-21"]
     assert len(capped["2026-04-21"]) == MAX_GROUPS
+
+
+@pytest.fixture(scope="module")
+def legacy_and_modern_costs() -> tuple[dict, float]:
+    """(session-detail usage, sessions-list cost) for one legacy+modern session.
+
+    Materialized once — both figures come from the same DB so the agreement
+    assertion is meaningful, and the fixture build isn't paid twice.
+    """
+    from introspect.api.handlers._helpers import fetch_token_usage  # noqa: PLC0415
+    from introspect.sql_fragments import SESSION_COST_SUBQUERY  # noqa: PLC0415
+
+    sid = "ftu-legacy-session-0000-0000-000000000001"
+
+    def _read(conn) -> tuple[dict, float]:
+        listed = conn.execute(
+            f"SELECT cost_usd FROM {SESSION_COST_SUBQUERY} WHERE session_id = ?",
+            [sid],
+        ).fetchone()
+        assert listed is not None
+        return fetch_token_usage(conn, session_id=sid), float(listed[0])
+
+    with tempfile.TemporaryDirectory() as tmp_str:
+        tmp = Path(tmp_str)
+        _legacy_and_modern_jsonl(tmp, sid)
+        return _materialize_and_run(tmp, _read)
+
+
+def test_fetch_token_usage_bills_legacy_cache_creation_per_row(
+    legacy_and_modern_costs: tuple[dict, float],
+):
+    """A legacy record still bills when the same model logged a modern one."""
+    usage, _listed = legacy_and_modern_costs
+
+    # 1,000,100 cache-write tokens @ $6.25/M (opus-4-7 5m rate) = $6.250625.
+    # Folding the fallback into the per-model aggregate bills only the 100
+    # modern tokens instead — $0.000625, four orders of magnitude low.
+    assert usage["cache_creation"] == 1_000_100
+    assert usage["cost_usd"] == pytest.approx(6.250625)
+    assert usage["cost"] == "$6.25"
+
+
+def test_fetch_token_usage_matches_the_sessions_list_cost(
+    legacy_and_modern_costs: tuple[dict, float],
+):
+    """The session-detail figure equals SESSION_COST_SUBQUERY's for one session."""
+    usage, listed = legacy_and_modern_costs
+
+    # Pin the shared value too — two surfaces agreeing on $0 would otherwise
+    # pass this test while pricing had stopped matching the model at all.
+    assert listed == pytest.approx(6.250625)
+    assert usage["cost_usd"] == pytest.approx(listed)
 
 
 def test_fetch_token_usage_dedup():

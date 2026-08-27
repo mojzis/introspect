@@ -732,7 +732,7 @@ def _allocate_costs(bands: list[_Band], turns: list[_Turn]) -> list[float]:
     """
     generation_costs = [0.0] * len(turns)
     for turn in turns:
-        rates = rates_for(turn.model)
+        rates = rates_for(turn.model, input_tokens=turn.inp)
         write_cost = _cache_write_cost(turn, rates)
         input_total = (
             turn.inp * rates.input / _PER_MILLION
@@ -949,7 +949,9 @@ def _render_figure(  # noqa: PLR0912, PLR0913, PLR0915
             color = "#555"
         else:
             fig.add_vline(x=x, line_dash="dot", line_color="#c0a000", line_width=1)
-            rebuild = _cache_write_cost(turn, rates_for(turn.model))
+            rebuild = _cache_write_cost(
+                turn, rates_for(turn.model, input_tokens=turn.inp)
+            )
             label = f"gap · cache rebuilt ${rebuild:,.2f}"
             color = "#a08000"
         annotations.append(
@@ -1024,7 +1026,7 @@ def _bill_split(
     """Dollars by billing type — answers "how much of this is cache reads?"."""
     read = write = uncached = 0.0
     for turn in turns:
-        rates = rates_for(turn.model)
+        rates = rates_for(turn.model, input_tokens=turn.inp)
         read += turn.cache_read * rates.cache_read / _PER_MILLION
         write += _cache_write_cost(turn, rates)
         uncached += turn.inp * rates.input / _PER_MILLION

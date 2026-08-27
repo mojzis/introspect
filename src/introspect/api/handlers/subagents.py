@@ -101,7 +101,7 @@ def _row_cost_components(
 
     # Compute all sub-costs from a single rate lookup so the split bar and
     # row total are derived from the same rates and can never drift apart.
-    r = rates_for(model)
+    r = rates_for(model, input_tokens=input_tokens)
     input_usd = input_tokens * r.input / 1_000_000
     read_usd = cache_read_tokens * r.cache_read / 1_000_000
     write_usd = (eff_5m * r.cache_write_5m + cc_1h * r.cache_write_1h) / 1_000_000

@@ -36,7 +36,7 @@ Nine hand-built tools, plus the ones generated per deterministic
 | Tool | Parameters | What it does |
 |---|---|---|
 | `search_conversations` | `query`, `limit`, `offset`, `cwd_prefix`, `role`, `since`, `session_id`, `require_all` | Full-text search across sessions (BM25 when available), with filters and pagination. |
-| `get_session` | `session_id` | Fetch the full content of one session. |
+| `get_session` | `session_id` | Fetch one session: metadata, a token breakdown with the estimated $ cost (total, split across input / output / cache write / cache read, and per model when the session used more than one), then the full conversation. A model with no entry in the pricing table bills $0 and is marked `[unpriced]`, so a missing rate doesn't read as a cheap session. |
 | `recent_sessions` | `n` | List the most recent N sessions with metadata. |
 | `tool_failures` | `command_prefix`, `limit` | List failed tool calls, optionally filtered by tool-name prefix. |
 | `tool_failure_rate` | `limit`, `since`, `min_calls` | Rank tools by failure *rate* and count. `min_calls` suppresses low-N noise. Generated from the query-template registry. |
