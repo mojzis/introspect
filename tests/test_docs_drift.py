@@ -19,7 +19,10 @@ import ast
 import asyncio
 import importlib.util
 import re
+from collections.abc import Callable
+from functools import cache
 from pathlib import Path
+from types import ModuleType
 
 import pytest
 import yaml
@@ -48,16 +51,48 @@ def _doc_text(rel_path: str) -> str:
     return (DOCS_ROOT / rel_path).read_text()
 
 
-def _assert_mentioned(items: set[str], rel_path: str, kind: str) -> None:
-    """Fail naming every `items` entry absent from the doc at `rel_path`."""
+def _assert_mentioned(
+    items: set[str],
+    rel_path: str,
+    kind: str,
+    *,
+    pattern: Callable[[str], str] = re.escape,
+) -> None:
+    """Fail naming every `items` entry absent from the doc at `rel_path`.
+
+    `pattern` turns an item into the regex that counts as mentioning it.
+    The default is a plain substring, which is fine for distinctive names
+    (relations, MCP tools, templates). Short names that are substrings of
+    other prose need a delimited form — see `_BACKTICKED` and `_PATH_TOKEN`.
+    """
     text = _doc_text(rel_path)
-    missing = sorted(item for item in items if item not in text)
+    missing = sorted(item for item in items if not re.search(pattern(item), text))
     if missing:
         pytest.fail(
             f"docs/{rel_path} does not mention {len(missing)} {kind}: "
             f"{', '.join(missing)}. Document them there (or, if one is not "
             f"user-facing, add it to the allowlist in {Path(__file__).name})."
         )
+
+
+def _backticked(item: str) -> str:
+    """Match `item` only as a backticked token.
+
+    Without this, `serve` is "mentioned" by the word `devserve` and `stats`
+    by `session_stats`, so deleting a row from the command table would go
+    unnoticed.
+    """
+    return re.escape(f"`{item}`")
+
+
+def _path_token(item: str) -> str:
+    """Match a route path only where it is not the prefix of a longer path.
+
+    `/sessions` must not be satisfied by `/sessions/{session_id}`. (The root
+    route `/` is inherently unenforceable this way; it is checked in name
+    only.)
+    """
+    return re.escape(item) + r"(?![\w/{-])"
 
 
 # --- CLI commands -------------------------------------------------------------
@@ -74,10 +109,15 @@ def _typer_command_names() -> set[str]:
 
 def test_every_cli_command_is_documented() -> None:
     """Each Typer command appears in the hand-written CLI page."""
-    _assert_mentioned(_typer_command_names(), "usage/cli.md", "CLI command(s)")
+    _assert_mentioned(
+        _typer_command_names(),
+        "usage/cli.md",
+        "CLI command(s)",
+        pattern=_backticked,
+    )
 
 
-def _load_cli_doc_generator():
+def _load_cli_doc_generator() -> ModuleType:
     """Load scripts/gen_cli_docs.py by path.
 
     `scripts/` is not an importable package, so this goes through importlib
@@ -140,7 +180,9 @@ def test_env_vars_are_documented_only_in_configuration() -> None:
     majority of them, which is what a duplicated table looks like.
     """
     names = _introspect_env_names()
-    threshold = len(names) // 2
+    # Floor so the check stays a duplication detector rather than a ban on
+    # mentioning a variable at all, if the count ever shrinks.
+    threshold = max(3, len(names) // 2)
     for rel_path, text in _published_docs().items():
         if rel_path == "configuration.md":
             continue
@@ -193,7 +235,8 @@ def test_every_relation_is_documented() -> None:
 # --- MCP tools and prompts ----------------------------------------------------
 
 
-def _registered_mcp_names() -> tuple[set[str], set[str]]:
+@cache
+def _registered_mcp_names() -> tuple[frozenset[str], frozenset[str]]:
     """(tool names, prompt names) as actually registered on a FastMCP server.
 
     Introspected from a live server instance rather than grepped, so tools
@@ -204,10 +247,13 @@ def _registered_mcp_names() -> tuple[set[str], set[str]]:
 
     server = create_mcp_server()
 
-    async def _collect() -> tuple[set[str], set[str]]:
+    async def _collect() -> tuple[frozenset[str], frozenset[str]]:
         tools = await server.list_tools()
         prompts = await server.list_prompts()
-        return {t.name for t in tools}, {p.name for p in prompts}
+        return (
+            frozenset(t.name for t in tools),
+            frozenset(p.name for p in prompts),
+        )
 
     return asyncio.run(_collect())
 
@@ -215,13 +261,13 @@ def _registered_mcp_names() -> tuple[set[str], set[str]]:
 def test_every_mcp_tool_is_documented() -> None:
     """Each registered MCP tool, generated ones included, is in the MCP page."""
     tools, _ = _registered_mcp_names()
-    _assert_mentioned(tools, "usage/mcp.md", "MCP tool(s)")
+    _assert_mentioned(set(tools), "usage/mcp.md", "MCP tool(s)")
 
 
 def test_every_mcp_prompt_is_documented() -> None:
     """Each registered MCP prompt is in the MCP page."""
     _, prompts = _registered_mcp_names()
-    _assert_mentioned(prompts, "usage/mcp.md", "MCP prompt(s)")
+    _assert_mentioned(set(prompts), "usage/mcp.md", "MCP prompt(s)")
 
 
 # --- Query templates ----------------------------------------------------------
@@ -257,16 +303,12 @@ ROUTE_DOC_OVERRIDES: dict[str, str] = {
     "/api/schema": "usage/sql-api.md",
 }
 
-_ROUTE_DECORATOR_RE = re.compile(
-    r"@router\.(?:get|post|put|patch|delete)\(\s*\"([^\"]+)\""
-)
-
 
 def _route_paths() -> set[str]:
-    """Every path registered in routes.py."""
-    return set(
-        _ROUTE_DECORATOR_RE.findall((SRC_ROOT / "api" / "routes.py").read_text())
-    )
+    """Every path on the router itself, so no decorator style can hide one."""
+    from introspect.api.routes import router  # noqa: PLC0415
+
+    return {route.path for route in router.routes}  # ty: ignore[unresolved-attribute]
 
 
 def test_every_route_is_documented() -> None:
@@ -276,15 +318,21 @@ def test_every_route_is_documented() -> None:
         rel_path = ROUTE_DOC_OVERRIDES.get(path, "usage/web-ui.md")
         by_doc.setdefault(rel_path, set()).add(path)
     for rel_path, paths in sorted(by_doc.items()):
-        _assert_mentioned(paths, rel_path, "route(s)")
+        _assert_mentioned(paths, rel_path, "route(s)", pattern=_path_token)
 
 
-def test_fragment_route_allowlist_is_current() -> None:
-    """The fragment allowlist names only routes that still exist."""
-    stale = sorted(FRAGMENT_ROUTES - _route_paths())
-    assert not stale, (
-        f"FRAGMENT_ROUTES lists routes that no longer exist in routes.py: "
-        f"{', '.join(stale)}. Remove them."
+def test_route_allowlists_are_current() -> None:
+    """Neither route allowlist names a path that no longer exists."""
+    paths = _route_paths()
+    stale_fragments = sorted(FRAGMENT_ROUTES - paths)
+    assert not stale_fragments, (
+        f"FRAGMENT_ROUTES lists routes that no longer exist: "
+        f"{', '.join(stale_fragments)}. Remove them."
+    )
+    stale_overrides = sorted(set(ROUTE_DOC_OVERRIDES) - paths)
+    assert not stale_overrides, (
+        f"ROUTE_DOC_OVERRIDES lists routes that no longer exist: "
+        f"{', '.join(stale_overrides)}. Remove them."
     )
 
 

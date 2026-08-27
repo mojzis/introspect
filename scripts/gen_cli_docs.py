@@ -2,26 +2,33 @@
 
 Run via `uv run poe docs-cli`. `tests/test_docs_drift.py` regenerates the page
 in-memory and fails if the committed file differs, so per-command options can
-never drift from the code.
+never drift from the code — that test is the enforcement point; this script
+only writes.
 
 Rich's boxed help renderer is disabled (`rich_markup_mode = None`) so the
 captured text is plain Click help: no box-drawing characters, no ANSI, no
 trailing padding. `COLUMNS` is pinned so wrapping is reproducible on any
-terminal.
+terminal. Both are scoped to the render, because the drift test calls
+`render()` inside the pytest process, where a leaked `COLUMNS` or a
+permanently de-riched `app` would change what other CLI tests see.
 """
 
 from __future__ import annotations
 
-import os
 import sys
 from pathlib import Path
+
+from typer.main import get_group
+from typer.testing import CliRunner
+
+from introspect.cli import app
 
 REPO_ROOT = Path(__file__).resolve().parent.parent
 OUTPUT_PATH = REPO_ROOT / "docs" / "usage" / "cli-reference.md"
 
-# Pinned so the generated wrapping is identical everywhere. Must be set before
-# Click builds a formatter.
+# Pinned so the generated wrapping is identical everywhere.
 HELP_COLUMNS = "88"
+HELP_ENV = {"COLUMNS": HELP_COLUMNS, "TERM": "dumb", "NO_COLOR": "1"}
 
 PROG_NAME = "introspy"
 
@@ -40,52 +47,37 @@ the commands are *for*, see [CLI](cli.md).
 
 def render() -> str:
     """Render the full reference page as Markdown."""
-    os.environ["COLUMNS"] = HELP_COLUMNS
-    os.environ["TERM"] = "dumb"
-    os.environ["NO_COLOR"] = "1"
-
-    from typer.testing import CliRunner  # noqa: PLC0415
-
-    from introspect.cli import app  # noqa: PLC0415
-
-    # Plain Click help instead of Rich's boxed panels.
-    app.rich_markup_mode = None
     runner = CliRunner()
 
     def help_for(args: list[str]) -> str:
-        result = runner.invoke(app, [*args, "--help"], prog_name=PROG_NAME)
+        result = runner.invoke(
+            app, [*args, "--help"], prog_name=PROG_NAME, env=HELP_ENV
+        )
         if result.exit_code != 0:  # pragma: no cover - defensive
             msg = f"`{PROG_NAME} {' '.join(args)} --help` exited {result.exit_code}"
             raise RuntimeError(msg)
         return result.output.strip("\n")
 
-    from typer.main import get_group  # noqa: PLC0415
-
     # get_group (not get_command) so the multi-command app types as a
     # click.Group and `.commands` resolves.
     command_names = sorted(get_group(app).commands)
 
-    parts = [HEADER, "## `introspy`\n\n```\n", help_for([]), "\n```\n"]
-    for name in command_names:
-        parts.append(f"\n## `introspy {name}`\n\n```\n")
-        parts.append(help_for([name]))
-        parts.append("\n```\n")
+    previous_markup = app.rich_markup_mode
+    app.rich_markup_mode = None  # plain Click help instead of Rich's panels
+    try:
+        parts = [HEADER, "## `introspy`\n\n```\n", help_for([]), "\n```\n"]
+        for name in command_names:
+            parts.append(f"\n## `introspy {name}`\n\n```\n")
+            parts.append(help_for([name]))
+            parts.append("\n```\n")
+    finally:
+        app.rich_markup_mode = previous_markup
     return "".join(parts)
 
 
 def main() -> int:
-    """Write the reference page; `--check` verifies it is up to date instead."""
-    rendered = render()
-    if "--check" in sys.argv:
-        current = OUTPUT_PATH.read_text() if OUTPUT_PATH.exists() else ""
-        if current != rendered:
-            sys.stderr.write(
-                f"{OUTPUT_PATH.relative_to(REPO_ROOT)} is stale — "
-                "run `uv run poe docs-cli`.\n"
-            )
-            return 1
-        return 0
-    OUTPUT_PATH.write_text(rendered)
+    """Write the reference page."""
+    OUTPUT_PATH.write_text(render())
     sys.stdout.write(f"wrote {OUTPUT_PATH.relative_to(REPO_ROOT)}\n")
     return 0
 
