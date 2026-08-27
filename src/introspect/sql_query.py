@@ -21,10 +21,12 @@ See ``docs/security.md`` for the threat model.
 from __future__ import annotations
 
 import ipaddress
+import math
 import os
 import re
 import threading
 from dataclasses import dataclass
+from decimal import Decimal
 from typing import TYPE_CHECKING, Any
 
 import duckdb
@@ -140,9 +142,10 @@ def resolve_timeout(budget: SqlBudget) -> float:
 
 # Rows pulled per ``fetchmany`` while enforcing the byte cap.
 _FETCH_BATCH = 1_000
-# Flat byte estimate for a non-string cell (numbers, dates, booleans, NULL).
-# Only used to keep the aggregate estimate honest; strings are measured.
-_NON_STRING_CELL_BYTES = 16
+# Flat byte estimate for a scalar cell (numbers, booleans, NULL) once
+# :func:`normalize_cell` has run. Every non-scalar is a string by then and is
+# measured exactly; this only keeps the aggregate estimate honest for the rest.
+_SCALAR_CELL_BYTES = 16
 
 _SQL_COMMENT_BLOCK = re.compile(r"/\*.*?\*/", re.DOTALL)
 _SQL_COMMENT_LINE = re.compile(r"--[^\n]*")
@@ -211,9 +214,14 @@ class BoundedResult:
     """What :func:`execute_bounded` managed to read within its budgets."""
 
     columns: list[str]
+    #: Cells are already normalized (:func:`normalize_cell`) and clipped, so
+    #: every value is ``None``/``bool``/``int``/``float``/``str``.
     rows: list[tuple[Any, ...]]
     truncated: bool
-    #: Human-readable cap that stopped the read, or None when nothing did.
+    #: Human-readable cap(s) that shortened the result, ``"; "``-joined, or
+    #: None when none did. The row and byte caps stop the read; the cell cap
+    #: only shortens values. All of them are reported — a result can hit the
+    #: row cap *and* have had wide cells clipped, and the caller wants both.
     truncation_reason: str | None = None
 
 
@@ -295,17 +303,69 @@ def wrap_with_row_cap(sql: str, capped_limit: int) -> str:
     return f"SELECT * FROM (\n{inner}\n) AS _introspect_q LIMIT {capped_limit}"  # noqa: S608
 
 
-def _clip_cell(value: Any, cell_cap: int) -> Any:
-    """Clip an over-wide string cell, leaving other types untouched."""
-    if isinstance(value, str) and len(value) > cell_cap:
-        return value[:cell_cap] + CELL_TRUNCATION_MARKER
-    return value
+def normalize_cell(value: Any) -> Any:
+    """Coerce a DuckDB cell to the JSON-serializable form callers send on.
+
+    This runs *before* the per-cell and byte caps, and that ordering is the
+    whole point. DuckDB hands back ``list`` for LIST, ``dict`` for STRUCT and
+    MAP, ``bytes`` for BLOB — none of which have a width the caps could see,
+    so ``SELECT list(repeat('x', 1000000)) FROM range(300)`` used to be
+    counted as one 16-byte cell and shipped in full. Normalizing first means
+    every cell reaching the cell cap is a scalar or a ``str``, so the caps
+    apply to what actually goes on the wire.
+
+    ints/floats/bools/None/str pass through unchanged; ``Decimal`` (e.g. cost
+    columns) becomes ``float`` so notebooks get a number to compute on;
+    everything else DuckDB may hand back (UUID, datetime, date, bytes,
+    interval, list, dict) is stringified — lossless enough for analysis and
+    always serializable.
+
+    ``nan`` / ``inf`` / ``-inf`` are the exception among floats: JSON has no
+    spelling for them, and Starlette renders with ``allow_nan=False``, so
+    passing one through raises inside the response constructor — past the
+    handler's error handling, i.e. a 500 with no error envelope. They are
+    stringified like any other non-JSON value. DuckDB produces them from
+    ordinary arithmetic (``1.0 / 0.0``), not just from literals.
+    """
+    if isinstance(value, float) and not math.isfinite(value):
+        return str(value)
+    if value is None or isinstance(value, (bool, int, float, str)):
+        return value
+    if isinstance(value, Decimal):
+        return float(value)
+    return str(value)
+
+
+def _clip_row(row: Sequence[Any], cell_cap: int) -> tuple[tuple[Any, ...], bool]:
+    """Normalize and clip one row; the flag says whether a cell was clipped.
+
+    The flag is what lets the result report the cell cap as a truncation
+    reason. Unlike the row and byte caps it does not stop the read — the rest
+    of the result is still worth returning — but silently handing back a
+    shortened value would be the same bug the byte cap exists to prevent.
+    """
+    clipped = False
+    values: list[Any] = []
+    for value in row:
+        normalized = normalize_cell(value)
+        if isinstance(normalized, str) and len(normalized) > cell_cap:
+            normalized = normalized[:cell_cap] + CELL_TRUNCATION_MARKER
+            clipped = True
+        values.append(normalized)
+    return tuple(values), clipped
 
 
 def _row_bytes(row: Sequence[Any]) -> int:
-    """Cheap serialized-size estimate for one already-clipped row."""
+    """Serialized-size estimate, in UTF-8 bytes, for one clipped row.
+
+    Encoding rather than taking ``len`` matters on this corpus: cell caps are
+    in characters, and a 4 000-character cell of CJK or emoji is four times
+    that on the wire. Counting characters would let an 8 MB budget ship a
+    32 MB response. The encode is bounded — cells are clipped to ``cell_cap``
+    before they get here.
+    """
     return sum(
-        len(value) if isinstance(value, str) else _NON_STRING_CELL_BYTES
+        len(value.encode("utf-8")) if isinstance(value, str) else _SCALAR_CELL_BYTES
         for value in row
     )
 
@@ -340,7 +400,11 @@ def execute_bounded(
       DuckDB doesn't materialize more than the cap, then re-checked while
       fetching. Callers narrowing it for one request (an explicit ``limit``
       argument) should hand in a ``replace()``d budget.
-    * ``budget.cell_cap`` — per-cell clip, applied before the byte accounting.
+    * ``budget.cell_cap`` — per-cell clip, applied to the *normalized* cell
+      (see :func:`normalize_cell`) and before the byte accounting, so a LIST,
+      STRUCT, MAP or BLOB is measured at the width it will be serialized to
+      rather than waved through as an opaque object. Clipping shortens values
+      without stopping the read, but still marks the result truncated.
     * ``budget.byte_cap`` — aggregate estimate across rows. ``LIMIT`` cannot
       bound this (a single ``string_agg`` row is unbounded), and ``fetchall``
       would build the Python objects outside DuckDB's memory accounting.
@@ -361,21 +425,27 @@ def execute_bounded(
         columns = [d[0] for d in (cursor.description or [])]
         rows: list[tuple[Any, ...]] = []
         total_bytes = 0
-        reason: str | None = None
-        while reason is None:
+        stopped_by: str | None = None
+        cells_clipped = False
+        while stopped_by is None:
             batch = cursor.fetchmany(_FETCH_BATCH)
             if not batch:
                 break
             for row in batch:
                 if len(rows) >= row_cap:
-                    reason = f"row cap ({row_cap})"
+                    stopped_by = f"row cap ({row_cap})"
                     break
-                clipped = tuple(_clip_cell(value, cell_cap) for value in row)
-                total_bytes += _row_bytes(clipped)
-                rows.append(clipped)
+                clipped_row, had_clip = _clip_row(row, cell_cap)
+                cells_clipped = cells_clipped or had_clip
+                total_bytes += _row_bytes(clipped_row)
+                rows.append(clipped_row)
                 if total_bytes > byte_cap:
-                    reason = f"byte cap ({byte_cap} bytes)"
+                    stopped_by = f"byte cap ({byte_cap} bytes)"
                     break
+        caps = [stopped_by] if stopped_by else []
+        if cells_clipped:
+            caps.append(f"cell cap ({cell_cap} chars)")
+        reason = "; ".join(caps) or None
     except duckdb.InterruptException as exc:
         raise SqlTimeoutError(timeout_s) from exc
     finally:

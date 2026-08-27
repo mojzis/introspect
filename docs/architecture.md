@@ -269,7 +269,9 @@ fails loudly.
 both callers, taking a frozen `SqlBudget` (`MCP_BUDGET` / `API_BUDGET`) rather
 than five loose limits: an outer `LIMIT` for rows, `fetchmany` batching for a
 byte cap, per-cell clipping, and a `threading.Timer` calling
-`conn.interrupt()` for wall clock. Narrow one limit for a single request with
+`conn.interrupt()` for wall clock. Cells go through `normalize_cell()` first —
+LIST, STRUCT, MAP and BLOB become strings there — which is what gives the cell
+and byte caps a width to measure instead of an opaque Python object. Narrow one limit for a single request with
 `dataclasses.replace()`. `interrupt()` is per connection or cursor, so the object handed to
 `execute_bounded` must be the one executing. The API handler calls it through
 `asyncio.to_thread` — `db.execute` is blocking, and on the event loop one slow

@@ -51,11 +51,10 @@ _VALID_ROLES = {"user", "assistant"}
 _VALID_TEMPLATE_KINDS: frozenset[str] = frozenset(get_args(TemplateKind))
 
 # Max characters per rendered cell in run_sql output. Deliberately one marker
-# wider than ``MCP_SQL_CELL_CAP``: ``execute_bounded`` has already clipped
-# every over-long *string* to ``cell_cap`` + CELL_TRUNCATION_MARKER, and a
-# ceiling equal to ``cell_cap`` would re-clip all of them and eat the marker.
-# What is left for this clip is everything ``str()`` widens on the way to the
-# table — lists, structs, blobs, timestamps.
+# wider than ``MCP_SQL_CELL_CAP``: ``execute_bounded`` normalizes and clips
+# every cell to ``cell_cap`` + CELL_TRUNCATION_MARKER, and a ceiling equal to
+# ``cell_cap`` would re-clip all of them and eat the marker. Nothing should
+# exceed this by the time rows get here — it is a backstop, not the bound.
 _SQL_CELL_MAX = MCP_SQL_CELL_CAP + len(CELL_TRUNCATION_MARKER)
 # Hard cap on run_sql rows regardless of caller's `limit` argument.
 # Re-exported alias for tests/back-compat — canonical value lives in sql_query.
@@ -254,9 +253,9 @@ def _format_rows(
 ) -> str:
     """Format a result set as an aligned text table with truncated cells.
 
-    String cells are already clipped by :func:`execute_bounded`; the clip here
-    is the backstop for everything else DuckDB hands back (lists, structs,
-    blobs) once ``str()`` has widened it.
+    Cells are already normalized and clipped by :func:`execute_bounded` —
+    lists, structs, maps and blobs are stringified there, under the cell cap,
+    so this clip is a backstop rather than the thing that bounds the output.
     """
     if not rows:
         return f"(0 rows)\ncolumns: {', '.join(columns)}"
@@ -313,8 +312,11 @@ def run_sql(sql: str, limit: int = 100) -> str:
 
     Bounded on five axes: `limit` rows (max 500, pushed into the planner as an
     outer LIMIT), 64 KB of total output, 200 characters per cell, 8 KB of SQL
-    text, and a 20 s wall clock. A result stopped by one of those says so on
-    the last line. Returns an aligned text table.
+    text, and a 20 s wall clock. The last line names every cap that fired. The
+    cell cap only shortens values — seeing it there means the rows are all
+    here but some were too wide, so re-running with a smaller `limit` will not
+    help; select narrower columns or `substr()` instead. Returns an aligned
+    text table.
     """
     error = validate_read_only_sql(sql, max_bytes=MCP_BUDGET.max_sql_bytes)
     if error:
