@@ -584,17 +584,66 @@ def test_hardened_connection_is_locked_and_external_access_is_off(hardened_conn)
 
 
 def test_fts_still_works_on_a_hardened_connection(hardened_conn):
-    """LOAD-before-lock keeps BM25 search alive with external access off."""
-    from introspect.search import _fts_cache, fts_available  # noqa: PLC0415
+    """LOAD-before-lock keeps BM25 search alive with external access off.
 
-    _fts_cache.clear()
-    if not fts_available(hardened_conn):
-        pytest.skip("FTS extension not installed on this machine")
+    Skips on the index, not on ``fts_available``. Those are different facts:
+    the session-scoped ``_prewarm_fts_cache`` fixture may have decided FTS was
+    unavailable (so ``build_search_corpus`` never created the index) on a
+    machine where the extension nonetheless loads. Asking ``fts_available``
+    here would then say "yes" and the query would die on a missing index —
+    which is exactly how this failed in CI. Reading the cache is also not
+    free: clearing it re-enables the ~80s offline INSTALL probe the fixture
+    exists to avoid, for this test and every one after it in the process.
+    """
+    index_exists = hardened_conn.execute(
+        "SELECT count(*) FROM information_schema.schemata "
+        "WHERE schema_name = 'fts_main_search_corpus'"
+    ).fetchone()
+    if not (index_exists and index_exists[0]):
+        pytest.skip("no BM25 index on search_corpus (FTS unavailable at build time)")
     rows = hardened_conn.execute(
         "SELECT fts_main_search_corpus.match_bm25(rowid, 'needle') AS score "
         "FROM search_corpus"
     ).fetchall()
     assert any(row[0] is not None for row in rows)
+
+
+def test_fts_install_is_attempted_at_most_once_per_process(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+):
+    """A missing extension must not cost a network INSTALL on every request.
+
+    Connections are per-request and DuckDB drops an instance when its last
+    connection closes, so ``_load_fts`` runs again on every request. Without
+    the once-per-process latch, an offline machine with no FTS extension
+    would pay the DNS timeout on each page load.
+    """
+    from introspect import db as db_module  # noqa: PLC0415
+
+    installs: list[str] = []
+
+    def no_extension_on_disk(conn):
+        return False
+
+    real_execute = duckdb.DuckDBPyConnection.execute
+    offline = duckdb.IOException("simulated: no network")
+
+    def counting_execute(self, sql, *args, **kwargs):
+        if isinstance(sql, str) and sql.strip().upper().startswith("INSTALL"):
+            installs.append(sql)
+            raise offline
+        return real_execute(self, sql, *args, **kwargs)
+
+    monkeypatch.setattr(db_module, "_try_load_fts", no_extension_on_disk)
+    monkeypatch.setattr(duckdb.DuckDBPyConnection, "execute", counting_execute)
+    monkeypatch.setattr(db_module, "_fts_install_failed", [False])
+
+    db = tmp_path / "no_fts.duckdb"
+    duckdb.connect(str(db)).close()
+    for _ in range(3):
+        connect_read_hardened(db).close()
+
+    assert len(installs) == 1, f"INSTALL ran {len(installs)} times, want 1"
 
 
 def _read_only_connect_sites(path: Path) -> list[int]:

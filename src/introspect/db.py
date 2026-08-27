@@ -469,6 +469,23 @@ def _temp_directory(db_path_str: str) -> str:
     return str(Path(db_path_str).parent / "duckdb-tmp")
 
 
+# Set once a network ``INSTALL fts`` has been tried and failed. Connections
+# are per-request and DuckDB drops an instance once its last connection
+# closes, so ``_load_fts`` runs again on the next request — without this flag
+# a machine with no extension and no network would pay the DNS timeout
+# (~80s) on *every* page load, not once.
+_fts_install_failed: list[bool] = [False]
+
+
+def _try_load_fts(conn: duckdb.DuckDBPyConnection) -> bool:
+    """``LOAD fts`` if the extension is already on disk. Never touches network."""
+    try:
+        conn.execute("LOAD fts")
+    except duckdb.Error:
+        return False
+    return True
+
+
 def _load_fts(conn: duckdb.DuckDBPyConnection) -> None:
     """Load the FTS extension while external access is still permitted.
 
@@ -482,18 +499,19 @@ def _load_fts(conn: duckdb.DuckDBPyConnection) -> None:
     keeps :func:`introspect.search.fts_available` working.
 
     Best effort: a machine with no FTS extension and no network simply falls
-    back to the ILIKE search path.
+    back to the ILIKE search path, and only pays for discovering that once
+    per process (see :data:`_fts_install_failed`).
     """
+    if _try_load_fts(conn) or _fts_install_failed[0]:
+        return
+    # Not on disk — fetch it. Still permitted at this point, which is the
+    # whole reason this runs before the SETs below.
     try:
+        conn.execute("INSTALL fts")
         conn.execute("LOAD fts")
-    except duckdb.Error:
-        # Not installed yet — try to fetch it. Still allowed at this point,
-        # which is the whole reason this runs before the SETs below.
-        try:
-            conn.execute("INSTALL fts")
-            conn.execute("LOAD fts")
-        except duckdb.Error as exc:
-            log.debug("FTS extension unavailable; search falls back to ILIKE: %s", exc)
+    except duckdb.Error as exc:
+        _fts_install_failed[0] = True
+        log.debug("FTS extension unavailable; search falls back to ILIKE: %s", exc)
 
 
 def _configuration_locked(conn: duckdb.DuckDBPyConnection) -> bool:
