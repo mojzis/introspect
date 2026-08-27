@@ -15,8 +15,12 @@ reads is listed below; `tests/test_docs_drift.py` fails if `src/` grows an
 | `INTROSPECT_REFRESH_WINDOW` | `30` | web app | Window-picker token: `1`, `7`, `30`, or `month` (calendar-month-to-date). An unrecognized value logs a warning and falls back to the default. |
 | `INTROSPECT_REFRESH_INTERVAL_SECONDS` | `600` | web app | Background refresh poll interval; `0` disables auto-refresh. |
 | `INTROSPECT_RESOLVE_PROJECTS` | `1` | web app | When `0`, skip git worktree resolution for project names. Set by `serve --no-resolve-projects`. |
-| `INTROSPECT_HOST` | unset | set by `serve`, read by the web app | The address the server bound to. Gates the [SQL API](usage/sql-api.md) — see below. |
+| `INTROSPECT_HOST` | unset | set by `serve`, read by the web app | The address the server bound to. Gates the [SQL API](usage/sql-api.md) and the loopback `Host` allowlist — see below. |
 | `INTROSPECT_SQL_API` | unset (on, loopback only) | web app | Set to `off` to force-disable the SQL API even on loopback. |
+| `INTROSPECT_DB_MEMORY_LIMIT` | ~25% of available RAM, capped at 2 GB | every read connection | DuckDB `memory_limit` for the hardened read connection (e.g. `1GB`). See [Security](security.md#resource-bounds). |
+| `INTROSPECT_DB_THREADS` | half the CPU cores (min 1) | every read connection | DuckDB `threads` for the hardened read connection. |
+| `INTROSPECT_SQL_TIMEOUT_SECONDS` | `30` | `POST /api/query` | Wall-clock budget per HTTP SQL API query. Non-numeric or non-positive falls back to the default — the timeout cannot be switched off. |
+| `INTROSPECT_MCP_SQL_TIMEOUT_SECONDS` | `20` | MCP `run_sql` | Wall-clock budget per `run_sql` call. Same fallback rule. |
 | `INTROSPECT_VERSION_CHECK` | unset (on) | update check | Set to `off` (or `0` / `false` / `no`) to disable the [update check](#update-check) — the network call and the nag. |
 | `INTROSPECT_VERSION_CHECK_INTERVAL` | `86400` | update check | Seconds between PyPI checks. Escape hatch for testing; a non-numeric or non-positive value falls back to the default. |
 
@@ -36,6 +40,16 @@ The check fails closed: if `INTROSPECT_HOST` is unset — for example when the
 app is launched under bare `uvicorn` instead of `introspy serve` — the host is
 not *known* to be loopback, so the API stays disabled and `/api/query` and
 `/api/schema` return 404.
+
+A loopback bind is only the first of several layers. `Host` and `Origin`
+checks, a required `X-Introspect-Client` header, and a locked-down DuckDB
+engine sit behind it — see [Security](security.md).
+
+`INTROSPECT_HOST` also decides whether the loopback `Host` allowlist is
+enforced. On a loopback bind it is, which is what blocks DNS rebinding. On a
+deliberate non-loopback bind (`serve --host 0.0.0.0`) it is not — the UI has
+to answer to whatever hostname a colleague types — and the SQL API is disabled
+there anyway.
 
 ## Update check
 
@@ -59,6 +73,31 @@ Introspect ever makes, and it is informational only — Introspect never
 self-updates. The result is cached under `~/.introspect/version_check.json` and
 re-checked at most once a day. Set `INTROSPECT_VERSION_CHECK=off` to disable the
 check, the network call, and the nag entirely.
+
+## Resource limits
+
+Read connections open with a `memory_limit`, a `threads` cap, and a bounded
+temp directory under `~/.introspect/duckdb-tmp`, then lock the configuration so
+a query cannot raise them with `SET`. The memory limit is derived from
+available RAM at startup (about 25%, never more than 2 GB) and is fixed for the
+process lifetime — DuckDB refuses a second connection to a file whose instance
+was opened with different settings, so the value cannot be recomputed
+per-request.
+
+Set `INTROSPECT_DB_MEMORY_LIMIT` / `INTROSPECT_DB_THREADS` to override. An
+unusable value logs a warning and falls back to the derived default rather
+than failing every request — these are applied in the request middleware, so a
+typo would otherwise 500 the whole UI.
+
+Exceeding the memory limit surfaces as a normal error naming the budget; it
+does not take the server down.
+
+Read connections also set `preserve_insertion_order = false`, which saves
+memory the read path has no use for. Every relation the UI shows is explicitly
+ordered, but it does mean an ad-hoc query of your own — through
+[`introspy query`](usage/cli.md), the [SQL API](usage/sql-api.md), or MCP
+`run_sql` — is not guaranteed to return rows in input order unless you write an
+`ORDER BY`.
 
 ## Refresh behaviour
 

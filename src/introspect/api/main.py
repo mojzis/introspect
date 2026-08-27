@@ -8,10 +8,15 @@ import uuid
 from contextlib import asynccontextmanager
 from datetime import UTC, datetime
 from pathlib import Path
+from urllib.parse import urlsplit
 
-import duckdb
 from fastapi import FastAPI, Request
-from fastapi.responses import FileResponse, HTMLResponse, JSONResponse
+from fastapi.responses import (
+    FileResponse,
+    HTMLResponse,
+    JSONResponse,
+    PlainTextResponse,
+)
 from fastapi.staticfiles import StaticFiles
 
 from introspect.api.routes import router
@@ -19,6 +24,7 @@ from introspect.db import (
     DEFAULT_CODEX_GLOB,
     DEFAULT_DB_PATH,
     DEFAULT_JSONL_GLOB,
+    connect_read_hardened,
     connect_writable,
     materialize_views,
 )
@@ -34,6 +40,11 @@ from introspect.search import build_search_corpus
 from introspect.sql_query import is_loopback_host
 
 log = logging.getLogger(__name__)
+
+# ``Host`` values a loopback-bound server answers to, port already stripped.
+# Enforced by ``host_guard`` — but only when the bind is loopback; see
+# ``host_allowlist_applies``.
+ALLOWED_HOSTS = ("localhost", "127.0.0.1", "[::1]")
 
 
 def _configure_sql_api(app: FastAPI) -> None:
@@ -122,7 +133,7 @@ async def lifespan(app: FastAPI):
         )
 
     # Create a fresh MCP server and replace the placeholder mount
-    mcp_server = create_mcp_server()
+    mcp_server = create_mcp_server(app.state.bind_host)
     mcp_app = mcp_server.streamable_http_app()
     for route in app.routes:
         if getattr(route, "path", None) == "/mcp":
@@ -147,19 +158,148 @@ app = FastAPI(title="Introspect", lifespan=lifespan)
 
 @app.middleware("http")
 async def db_middleware(request: Request, call_next):
-    """Open a fresh read-only DuckDB connection per request.
+    """Open a fresh hardened read-only DuckDB connection per request.
 
     Per-request connections decouple in-flight queries from the background
     refresh: ``_swap_in`` is now just ``os.replace`` and never closes a
     connection out from under a live cursor. ``contextlib.closing`` makes
     the ownership structural — if anything below the ``with`` raises, the
     connection still closes deterministically.
+
+    ``connect_read_hardened`` is not optional here: DuckDB refuses a second
+    connection to a file whose instance was opened with a different config,
+    so a bare ``duckdb.connect`` in this middleware would break the MCP
+    ``run_sql`` tool running in the same process (and vice versa).
     """
     db_path = getattr(request.app.state, "db_path", DEFAULT_DB_PATH)
-    with contextlib.closing(duckdb.connect(str(db_path), read_only=True)) as conn:
+    with contextlib.closing(connect_read_hardened(db_path)) as conn:
         request.state.conn = conn
         return await call_next(request)
 
+
+# Paths that a hostile web page could usefully reach: they read the user's
+# conversation logs, or (for /mcp) drive a tool-calling session.
+_ORIGIN_GUARDED_PREFIXES = ("/api/query", "/api/schema", "/mcp")
+
+# Custom header required on POST /api/query. Its only job is to force a CORS
+# preflight — a cross-origin `fetch` cannot send an unrecognized header
+# without one, and with no CORS middleware registered the preflight has no
+# Access-Control-Allow-* response to satisfy it, so the request never
+# happens. Documented in docs/usage/sql-api.md; notebooks just set it.
+CLIENT_HEADER = "X-Introspect-Client"
+
+
+@app.middleware("http")
+async def local_api_guard(request: Request, call_next):
+    """Reject cross-origin and drive-by requests to the data endpoints.
+
+    Binding to loopback stops *remote* clients; it does nothing about a page
+    the user has open in a browser, which can reach ``127.0.0.1`` directly or
+    via DNS rebinding. Two cheap checks close that:
+
+    * an ``Origin`` header whose host is not loopback is refused outright.
+      Requests without ``Origin`` (curl, httpx, notebooks) are unaffected —
+      browsers always send it on cross-origin requests.
+    * ``POST /api/query`` additionally requires ``X-Introspect-Client``,
+      which a cross-origin ``fetch`` cannot set without a successful CORS
+      preflight.
+
+    ``Host`` is handled separately by :func:`host_guard`.
+    """
+    path = request.url.path
+    if path.startswith(_ORIGIN_GUARDED_PREFIXES):
+        origin = request.headers.get("origin")
+        if origin and not _is_loopback_origin(origin):
+            return JSONResponse(
+                {"error": "Cross-origin requests are not allowed."},
+                status_code=403,
+            )
+        if (
+            request.method == "POST"
+            and path == "/api/query"
+            and CLIENT_HEADER not in request.headers
+        ):
+            return JSONResponse(
+                {"error": f"Missing required {CLIENT_HEADER} header."},
+                status_code=403,
+            )
+    return await call_next(request)
+
+
+def _is_loopback_origin(origin: str) -> bool:
+    """True when an ``Origin`` header names a loopback host.
+
+    ``Origin: null`` (sandboxed iframes, some file:// contexts) is not
+    loopback and is refused along with everything else.
+    """
+    host = urlsplit(origin).hostname
+    return bool(host) and is_loopback_host(host)
+
+
+def host_allowlist_applies(bind_host: str) -> bool:
+    """Should the loopback ``Host`` allowlist be enforced for this bind?
+
+    Yes for a loopback bind — that is the DNS-rebinding case, and no
+    legitimate request can carry any other ``Host``.
+
+    No for a deliberate non-loopback bind. ``serve --host 0.0.0.0`` is a
+    supported way to reach the UI from another machine, and we cannot know
+    which hostnames or LAN addresses that user will type. Enforcing a
+    loopback allowlist there would 400 every page, not merely narrow the SQL
+    API — which is already disabled on such a bind, along with everything
+    else that reads logs (see ``_configure_sql_api``).
+
+    An unset ``INTROSPECT_HOST`` (bare ``uvicorn``, whose own default is
+    ``127.0.0.1``) fails closed *into* enforcement, matching how the SQL API
+    gate fails closed in the other direction. Set ``INTROSPECT_HOST`` to the
+    real bind address if you launch the app yourself on a routable one.
+    """
+    return not bind_host or is_loopback_host(bind_host)
+
+
+@app.middleware("http")
+async def host_guard(request: Request, call_next):
+    """Refuse a request whose ``Host`` is not one this server answers to.
+
+    A DNS-rebinding attack works by pointing a hostname the browser already
+    trusts at 127.0.0.1; the request then arrives here carrying that
+    attacker-controlled hostname. Matching ``Host`` against a loopback
+    allowlist rejects it before it reaches a route — or a database
+    connection.
+
+    Written as a middleware rather than Starlette's ``TrustedHostMiddleware``
+    because the allowlist has to depend on the bind host, which is only known
+    once the lifespan has read the environment; ``TrustedHostMiddleware``
+    fixes its ``allowed_hosts`` at construction. The comparison is otherwise
+    the same: the port is stripped before matching.
+    """
+    if (
+        host_allowlist_applies(getattr(request.app.state, "bind_host", ""))
+        and _host_without_port(request.headers.get("host", "")) not in ALLOWED_HOSTS
+    ):
+        return PlainTextResponse("Invalid host header", status_code=400)
+    return await call_next(request)
+
+
+def _host_without_port(header: str) -> str:
+    """Lowercase the ``Host`` header and drop its port.
+
+    IPv6 literals are bracketed (``[::1]:8347``) and full of colons, so a
+    plain ``split(":")`` yields ``"["``. The brackets are kept — that is how
+    the host appears in a URL authority, and how ``ALLOWED_HOSTS`` spells it.
+    """
+    host = header.strip().lower()
+    if host.startswith("["):
+        end = host.find("]")
+        return host[: end + 1] if end != -1 else host
+    return host.split(":")[0]
+
+
+# NOTE: CORSMiddleware must never be added to this app — certainly not with
+# ``allow_origins=["*"]``. The SQL API has no authentication; permissive CORS
+# would let any web page the user visits read their entire conversation
+# history out of localhost. ``tests/e2e/test_sql_hardening.py`` asserts it is
+# absent.
 
 app.include_router(router)
 

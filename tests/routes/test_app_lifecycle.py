@@ -7,11 +7,10 @@ from pathlib import Path
 from unittest.mock import patch
 
 import duckdb
-from fastapi.testclient import TestClient
 
 from introspect.api.main import app
 
-from ..conftest import glob_pattern
+from ..conftest import glob_pattern, local_client
 from .conftest import _patched_client, _write_sample_jsonl
 
 
@@ -148,7 +147,7 @@ def test_lifespan_rejects_invalid_refresh_window_env(caplog):
                 },
             ),
             caplog.at_level(logging.WARNING, logger="introspect.api.main"),
-            TestClient(app) as client,
+            local_client(app) as client,
         ):
             assert client.get("/sessions").status_code == 200
             assert app.state.refresh_window == DEFAULT_WINDOW

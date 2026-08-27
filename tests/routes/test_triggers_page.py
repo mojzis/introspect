@@ -6,12 +6,11 @@ from contextlib import contextmanager
 from pathlib import Path
 from unittest.mock import patch
 
-from fastapi.testclient import TestClient
-
 from introspect.api.main import app
 
 from ..conftest import (
     glob_pattern,
+    local_client,
     make_attachment_message,
     make_user_message,
     write_jsonl,
@@ -110,7 +109,7 @@ def _client_with_attachments(tmp_path: Path):
         "INTROSPECT_DAYS": "0",
         "INTROSPECT_HOST": "127.0.0.1",
     }
-    with patch.dict(os.environ, env), TestClient(app) as client:
+    with patch.dict(os.environ, env), local_client(app) as client:
         yield client
 
 

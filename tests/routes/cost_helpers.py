@@ -3,7 +3,12 @@
 from datetime import datetime, timedelta
 from pathlib import Path
 
-from ..conftest import make_assistant_message, make_user_message, write_jsonl
+from ..conftest import (
+    local_client,
+    make_assistant_message,
+    make_user_message,
+    write_jsonl,
+)
 
 
 def _cache_loss_session_lines(
@@ -203,8 +208,6 @@ def _run_with_client(tmp: Path, fn):
     import os  # noqa: PLC0415
     from unittest.mock import patch  # noqa: PLC0415
 
-    from fastapi.testclient import TestClient  # noqa: PLC0415
-
     from introspect.api.main import app  # noqa: PLC0415
 
     from ..conftest import glob_pattern  # noqa: PLC0415
@@ -220,7 +223,7 @@ def _run_with_client(tmp: Path, fn):
                 "INTROSPECT_DAYS": "0",
             },
         ),
-        TestClient(app) as client,
+        local_client(app) as client,
     ):
         return fn(client)
 

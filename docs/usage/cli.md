@@ -98,12 +98,20 @@ introspy query "SELECT project, cost_usd FROM session_stats ORDER BY cost_usd DE
 [Architecture](../architecture.md) for what each one contains and
 [JSONL schema](../schema.md) for the raw records underneath.
 
+`query` runs on the same hardened DuckDB connection as the web UI and the MCP
+server: filesystem, network and extension access are disabled and the
+configuration is locked, so `read_csv`, `glob`, `ATTACH` and `COPY ... TO` are
+refused. Memory and thread limits apply too — see
+[Configuration](../configuration.md#resource-limits).
+
 ## What the CLI does not do
 
 - It never writes to your conversation logs. It only ever writes the derived
   DuckDB — read commands query it read-only, but will build it on first use
   if no server has materialized it yet.
-- `query` accepts a single `SELECT` / `WITH` statement only; it is not a
-  DuckDB shell.
+- `query` cannot reach outside the database. Unlike the [SQL API](sql-api.md)
+  and the MCP `run_sql` tool it does not run the single-statement validator —
+  it is your own shell — but the connection is equally locked down, and it
+  applies no row cap or timeout of its own. See [Security](../security.md).
 - Only one process can hold the write lock. If a server is already running,
   write commands report that instead of failing with a traceback.

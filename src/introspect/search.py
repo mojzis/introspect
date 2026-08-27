@@ -43,19 +43,29 @@ def _windowed_snippet(text: str | None, terms: list[str]) -> str:
 
 
 def fts_available(conn: duckdb.DuckDBPyConnection) -> bool:
-    """Check if the FTS extension can be installed and loaded.
+    """Check if the FTS extension is loadable on ``conn``.
 
-    Attempts INSTALL (downloads if needed) then LOAD.
+    Tries LOAD first and only falls back to INSTALL (which downloads) when
+    that fails. The order matters: on a hardened read connection
+    (:func:`introspect.db.connect_read_hardened`) the extension is already
+    loaded and external access is off, so ``LOAD`` is a no-op that succeeds
+    while ``INSTALL`` would raise ``PermissionException`` and wrongly demote
+    search to the ILIKE fallback.
+
     Result is cached for the process lifetime. Clear ``_fts_cache`` to reset.
     """
     if "available" in _fts_cache:
         return _fts_cache["available"]
     try:
-        conn.execute("INSTALL fts")
         conn.execute("LOAD fts")
         _fts_cache["available"] = True
-    except (duckdb.IOException, duckdb.CatalogException, duckdb.HTTPException):
-        _fts_cache["available"] = False
+    except duckdb.Error:
+        try:
+            conn.execute("INSTALL fts")
+            conn.execute("LOAD fts")
+            _fts_cache["available"] = True
+        except duckdb.Error:
+            _fts_cache["available"] = False
     return _fts_cache["available"]
 
 

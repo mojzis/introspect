@@ -73,6 +73,22 @@ The web app follows a consistent handler → route → template pattern:
 All user-facing features must have tests. See the
 [Architecture](architecture.md) reference for the full layout.
 
+## Database connections
+
+There is exactly one way to open a read-only connection to the main database:
+`db.connect_read_hardened()`. It applies the resource caps, loads FTS, disables
+external access, and locks the configuration — see
+[Security](security.md#engine-configuration-the-real-boundary). Calling
+`duckdb.connect(..., read_only=True)` anywhere else is a build failure:
+`tests/e2e/test_sql_hardening.py` parses `src/` and fails on any such call
+outside `db.py`. It is also a runtime problem, not just a policy one — DuckDB
+refuses a second connection to a file whose instance was opened with a
+different configuration, so an unhardened caller breaks every hardened one in
+the same process.
+
+Run that test after any DuckDB upgrade; it is what says whether the boundary
+still holds.
+
 ## Building these docs
 
 The documentation site is built with [MkDocs](https://www.mkdocs.org/) and the

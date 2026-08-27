@@ -5,12 +5,11 @@ from contextlib import contextmanager
 from pathlib import Path
 from unittest.mock import patch
 
-from fastapi.testclient import TestClient
-
 from introspect.api.main import app
 
 from ..conftest import (
     glob_pattern,
+    local_client,
     make_assistant_message,
     make_user_message,
     write_jsonl,
@@ -245,6 +244,6 @@ def _patched_client(tmp_path: Path, extra_env: dict[str, str] | None = None):
     }
     with (
         patch.dict(os.environ, env),
-        TestClient(app) as client,
+        local_client(app) as client,
     ):
         yield client

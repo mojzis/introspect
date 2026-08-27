@@ -36,15 +36,24 @@ Nine hand-built tools, plus the ones generated per deterministic
 | `tool_failure_rate` | `limit`, `since`, `min_calls` | Rank tools by failure *rate* and count. `min_calls` suppresses low-N noise. Generated from the query-template registry. |
 | `cache_ttl_choice` | `limit`, `since`, `sidechain` | Would a 1h or 5m prompt-cache TTL have been cheaper, per project? Replays every request under both policies and reports the margin — a thin margin comes back as "either" rather than a recommendation. Ask this here rather than inferring it from cache-miss waste, which cannot answer it. Generated from the query-template registry. |
 | `expensive_sessions` | `limit`, `since` | Sessions ranked by cost with a `[pareto]` marker on the rows that together make 80% of spend, plus cost split, spend shape, subagent flag, and commands used. Mirrors the web Cost Overview Pareto table. |
-| `run_sql` | `sql`, `limit` | Execute one read-only `SELECT` / `WITH` query. Capped at 500 rows. |
+| `run_sql` | `sql`, `limit` | Execute one read-only `SELECT` query. Capped at 500 rows / 64 KB / 20 s. |
 | `describe_schema` | — | List relations available to `run_sql` with their columns. Call it before writing SQL. |
 | `list_query_templates` | `kind` | Render the curated SQL cookbook — see [below](#query-templates). |
 | `refresh_data` | — | Wake the refresh loop and wait for the rebuild. Only available when running embedded in `introspy serve`; the stdio server returns "unavailable". |
 
-`run_sql` rejects writes, `ATTACH`, `INSTALL`, `LOAD`, `PRAGMA`, `COPY`, and
-multi-statement scripts. The validator — not the read-only connection — is the
-actual boundary; see
-[the SQL guard](../architecture.md#read-only-sql-guard-sql_querypy).
+`run_sql` accepts exactly one `SELECT` statement (`WITH` and DuckDB's
+FROM-first form count as one). Writes, `ATTACH`, `INSTALL`, `LOAD`, `PRAGMA`,
+`SET`, `COPY`, multi-statement scripts, and functions that read outside the
+database (`read_csv`, `read_text`, `glob`, `sqlite_scan`, …) are rejected. Its
+connection has filesystem, network and extension access disabled and its
+configuration locked, so the engine refuses those independently of the
+validator — which matters here, because the logs `run_sql` reads are full of
+untrusted text that could ask a model to try exactly that.
+
+Every call is bounded at 500 rows, 64 KB of output, 200 characters per cell,
+8 KB of SQL text, and a 20 s wall clock; a truncated result says so on its
+last line. See [the SQL guard](../architecture.md#read-only-sql-guard-sql_querypy)
+and [Security](../security.md).
 
 ## Query templates
 
@@ -136,9 +145,9 @@ ones meant for the agent.
 
 - It cannot modify your logs. Every tool is read-only, and `refresh_data` only
   rebuilds the derived DuckDB.
-- `run_sql` is not a DuckDB shell — one `SELECT` / `WITH` statement, 500 rows
-  maximum. For larger result sets from a notebook, use the
-  [SQL API](sql-api.md).
+- `run_sql` is not a DuckDB shell — one `SELECT` statement, 500 rows maximum,
+  no filesystem or network access, 20 s of wall clock. For larger result sets
+  from a notebook, use the [SQL API](sql-api.md).
 - It serves no data over the network beyond the loopback interface it is bound
   to, and makes no outbound calls.
 
