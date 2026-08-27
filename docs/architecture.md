@@ -229,7 +229,7 @@ the FastAPI handlers, and `query_templates.py`:
 | `COMMAND_LIST_SUBQUERY` | Slash commands per session, with the `OBVIOUS_COMMANDS` filter for built-ins. |
 | `SKILLS_INVOKED_ROLLUP_SQL` | `Skill` tool calls per session — covers both typed `/name` and model-triggered skills. |
 | `CONTEXT_LOADS_ROLLUP_SQL` | `session_context_loads` rolled up per session (`auto_loaded_claude_md`, `n_auto_loaded_files`, `skill_menu_loaded`). |
-| `CACHE_READ_COST_SQL`, `CACHE_WRITE_COST_SQL`, `OUTPUT_COST_SQL`, `COST_EXPR_SQL` | Per-row cost expressions built from `pricing.py`'s CASE expressions. |
+| `INPUT_COST_SQL`, `OUTPUT_COST_SQL`, `CACHE_READ_COST_SQL`, `CACHE_WRITE_COST_SQL`, `COST_EXPR_SQL` | Per-row cost expressions built from `pricing.py`'s CASE expressions — one per component, plus their sum. `CACHE_WRITE_FALLBACK_SQL` supplies the legacy-record fallback the last two apply. |
 | `SESSION_COST_SUBQUERY`, `session_cost_subquery_filtered(timestamp_where)` | Per-session cost, optionally windowed by timestamp. |
 
 Keeping these in a leaf module avoids inverting the layering — `db.py` would
@@ -436,6 +436,9 @@ That's the cheaper of the two, so a legacy record is never over-billed.
 Other exports:
 
 - `rates_for(model)` and `compute_cost_usd(...)` — Python per-row cost.
+- `is_priced(model)` — whether the model is in the table at all, so a surface
+  showing dollars can distinguish "no rates for this model" from "cheap". The
+  MCP `get_session` cost block uses it to append `[unpriced]`.
 - `PRICING_INPUT_RATE_SQL`, `PRICING_OUTPUT_RATE_SQL`,
   `PRICING_CACHE_READ_RATE_SQL`, `PRICING_CACHE_WRITE_5M_RATE_SQL`,
   `PRICING_CACHE_WRITE_1H_RATE_SQL` — DuckDB `CASE` expressions, so mixed-model
@@ -449,8 +452,9 @@ Other exports:
 **Unknown models bill at $0.** `rates_for()` returns zero rates for `None`, the
 empty string, `<synthetic>`, and any unrecognized model, logging once per name
 at WARNING (LRU-bounded). The SQL `CASE` expressions end in `ELSE 0`. So an
-unpriced model silently contributes nothing to cost totals rather than
-guessing.
+unpriced model contributes nothing to cost totals rather than guessing — silently
+everywhere except the MCP `get_session` cost block, which names it via
+`is_priced()`.
 
 **Known understatements.** Rates are list prices with no request-level
 modifiers. Anthropic records `usage.speed == 'fast'` (2× on Opus 5 / Opus 4.8)

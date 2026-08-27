@@ -136,9 +136,12 @@ CACHE_WRITE_COST_SQL: str = (
 # Output-token dollar cost for one assistant message row (pre /1e6 division).
 OUTPUT_COST_SQL: str = f"output_tokens * ({PRICING_OUTPUT_RATE_SQL})"
 
+# Fresh (uncached) input-token dollar cost for one row (pre /1e6 division).
+INPUT_COST_SQL: str = f"input_tokens * ({PRICING_INPUT_RATE_SQL})"
+
 # Total per-row dollar cost (pre /1e6 division).
 COST_EXPR_SQL: str = (
-    f"input_tokens * ({PRICING_INPUT_RATE_SQL})"
+    f"{INPUT_COST_SQL}"
     f" + {OUTPUT_COST_SQL}"
     f" + {CACHE_READ_COST_SQL}"
     f" + {CACHE_WRITE_COST_SQL}"
