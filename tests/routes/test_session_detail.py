@@ -65,9 +65,27 @@ def test_session_detail_marks_cache_loss_event():
             # Header chip on session_detail.html.
             assert "Cache losses" in text
             assert "1 ·" in text
-            # opus-4-6 5m write premium is (6.25 - 0.50)/1M per token,
-            # * 8500 ≈ $0.04887 → format_cost rounds to "$0.05".
+            # opus-4-6 5m write premium is (6.25 - 0.50)/1M per token, over
+            # the 8000-token prefix the warm cache would have read (not the
+            # 8500 written — the 500 the new prompt added get written under
+            # any TTL) ≈ $0.046 → format_cost rounds to "$0.05".
             assert "~$0.05 wasted" in text
+
+
+def test_session_detail_marks_long_gap_as_unrecoverable_break():
+    """A 90-min gap is labelled a break, not waste — no TTL recovers it."""
+    with tempfile.TemporaryDirectory() as tmp_str:
+        tmp = Path(tmp_str)
+        with _cache_loss_client(tmp, gap_minutes=90) as client:
+            response = client.get(f"/sessions/{_CACHE_LOSS_SID}?tab=messages")
+            assert response.status_code == 200
+            text = response.text
+            assert 'class="cache-loss-divider"' in text
+            assert "no TTL recovers this" in text
+            assert "cache lost" not in text
+            # Header splits the two counts apart.
+            assert "Cache breaks" in text
+            assert "Cache losses" not in text
 
 
 def test_session_detail_no_cache_loss_under_threshold():
