@@ -312,7 +312,8 @@ SESSION_INFO_SELECT = """
     ss.files_read_only,
     ss.files_outside,
     ss.commands,
-    ss.cost_usd
+    ss.cost_usd,
+    ss.has_long_context
 """
 
 _EMPTY_SESSION_INFO: dict[str, object] = {
@@ -335,6 +336,7 @@ _EMPTY_SESSION_INFO: dict[str, object] = {
     "commands": "",
     "cost_usd": None,
     "cost": "—",
+    "has_long_context": False,
 }
 
 
@@ -377,6 +379,7 @@ def session_row_to_dict(row: tuple) -> dict:
         files_outside,
         commands,
         cost_usd,
+        has_long_context,
     ) = row
     dur_str = format_duration(duration.total_seconds()) if duration else ""
     cost_value = float(cost_usd) if cost_usd is not None else None
@@ -401,6 +404,7 @@ def session_row_to_dict(row: tuple) -> dict:
         "commands": commands or "",
         "cost_usd": cost_value,
         "cost": format_cost(cost_value),
+        "has_long_context": bool(has_long_context),
     }
 
 

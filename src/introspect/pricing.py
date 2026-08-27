@@ -1,7 +1,7 @@
 """Hardcoded multi-provider API pricing (USD per 1M tokens).
 
 Anthropic snapshot fetched 2026-08-13 from Anthropic's pricing page. OpenAI
-(Codex/`gpt-5.6-*`) snapshot confirmed 2026-08-20 against OpenAI's own pricing
+(Codex/`gpt-5.6-*`) snapshot confirmed 2026-08-27 against OpenAI's own pricing
 page. No live fetch for either provider.
 
 The module exposes both:
@@ -26,9 +26,10 @@ Both are constant across the transcripts observed so far (``standard`` /
 would be understated by the corresponding multiplier. These modifiers don't
 apply to OpenAI/Codex.
 
-OpenAI also publishes a long-context tier (2x input) above a token threshold,
-but Codex session logs don't record which tier a call landed in, so it can't
-be distinguished here — every `gpt-5.6-*` call is billed at the standard rate.
+OpenAI bills `gpt-5.6-*` requests with more than 272K input tokens using its
+long-context tier. Codex logs expose the input-token count, so this module
+selects that rate table per request. Long-context prices double input, cached
+input, and cache writes; output is 1.5x the short-context rate.
 Codex cache-write tokens are always reported as zero, so the cache-write
 entries for `gpt-5.6-*` are inert but present so ``_build_case_sql`` emits
 complete branches.
@@ -83,10 +84,25 @@ _PRICING: dict[str, Rates] = {
     "claude-haiku-4-5": Rates(1, 1.25, 2, 0.10, 5),
     "claude-haiku-3-5": Rates(0.80, 1, 1.60, 0.08, 4),
     # OpenAI / Codex
-    "gpt-5.6-sol": Rates(5.00, 6.25, 10.00, 0.50, 30.00),
+    "gpt-5.6-sol": Rates(4.00, 5.00, 8.00, 0.40, 20.00),
     "gpt-5.6-terra": Rates(2.00, 2.50, 4.00, 0.20, 12.00),
     "gpt-5.6-luna": Rates(0.20, 0.25, 0.40, 0.02, 1.20),
 }
+
+# OpenAI's long-context tier applies above 272K input tokens. It is deliberately
+# a separate table: only Codex models participate, and output is 1.5x rather
+# than the 2x multiplier applied to the other token classes.
+LONG_CONTEXT_INPUT_TOKENS = 272_000
+_LONG_CONTEXT_PRICING: dict[str, Rates] = {
+    "gpt-5.6-sol": Rates(8.00, 10.00, 16.00, 0.80, 30.00),
+    "gpt-5.6-terra": Rates(4.00, 5.00, 8.00, 0.40, 18.00),
+    "gpt-5.6-luna": Rates(0.40, 0.50, 0.80, 0.04, 1.80),
+}
+LONG_CONTEXT_REQUEST_SQL = (
+    f"(input_tokens > {LONG_CONTEXT_INPUT_TOKENS} AND ("
+    + " OR ".join(f"model LIKE '{prefix}%'" for prefix in _LONG_CONTEXT_PRICING)
+    + "))"
+)
 
 _ZERO_RATES = Rates(0, 0, 0, 0, 0)
 _SYNTHETIC = "<synthetic>"
@@ -99,6 +115,9 @@ _SYNTHETIC = "<synthetic>"
 _PRICING_BY_PREFIX_LEN = sorted(
     _PRICING.items(), key=lambda item: len(item[0]), reverse=True
 )
+_LONG_CONTEXT_PRICING_BY_PREFIX_LEN = sorted(
+    _LONG_CONTEXT_PRICING.items(), key=lambda item: len(item[0]), reverse=True
+)
 
 # Defensive: every prefix is interpolated into a SQL LIKE literal in
 # ``_build_case_sql``.  Fail loud at module load if a key contains a single
@@ -106,7 +125,7 @@ _PRICING_BY_PREFIX_LEN = sorted(
 # CASE branch silently).  Today's keys are clean; this exists so a future
 # contributor adding e.g. ``"claude-foo'bar"`` gets a clear error instead of
 # a SQL syntax exception thousands of lines away.
-for _prefix in _PRICING:
+for _prefix in (*_PRICING, *_LONG_CONTEXT_PRICING):
     if "'" in _prefix or "%" in _prefix:
         msg = f"_PRICING key {_prefix!r} contains a SQL-unsafe character"
         raise ValueError(msg)
@@ -118,16 +137,21 @@ def _warn_unknown_model_once(model: str) -> None:
     log.warning("unknown model for pricing: %r — billing as $0", model)
 
 
-def rates_for(model: str | None) -> Rates:
+def rates_for(model: str | None, *, input_tokens: int = 0) -> Rates:
     """Look up rates for a model, matching by prefix.
 
-    Returns zero rates for ``<synthetic>``, ``None``, the empty string, or any
-    unrecognized model. Unknown models are logged once at WARNING level
-    (bounded by an LRU cache so a flood of distinct unknown names can't grow
-    memory unboundedly).
+    Codex requests above ``LONG_CONTEXT_INPUT_TOKENS`` use OpenAI's
+    long-context table. Returns zero rates for ``<synthetic>``, ``None``, the
+    empty string, or an unrecognized model. Unknown models are logged once at
+    WARNING level (bounded by an LRU cache so a flood of distinct unknown names
+    can't grow memory unboundedly).
     """
     if not model or model == _SYNTHETIC:
         return _ZERO_RATES
+    if input_tokens > LONG_CONTEXT_INPUT_TOKENS:
+        for prefix, rates in _LONG_CONTEXT_PRICING_BY_PREFIX_LEN:
+            if model.startswith(prefix):
+                return rates
     # Prefer the longest matching prefix (so "claude-opus-4-1" beats
     # "claude-opus-4" if both are present).  Reuse the same sorted list the
     # SQL builder uses to keep the two lookup strategies consistent.
@@ -169,7 +193,7 @@ def compute_cost_usd(  # noqa: PLR0913
 
     Tokens are token counts; rates are USD per 1M tokens.
     """
-    r = rates_for(model)
+    r = rates_for(model, input_tokens=input_tokens)
     return (
         (input_tokens or 0) * r.input
         + (output_tokens or 0) * r.output
@@ -179,6 +203,15 @@ def compute_cost_usd(  # noqa: PLR0913
     ) / _PER_MILLION
 
 
+def _case_sql(rate_attr: str, pricing: list[tuple[str, Rates]]) -> str:
+    """Build a CASE expression mapping model prefixes to one rate dimension."""
+    branches = [
+        f"WHEN model LIKE '{prefix}%' THEN {getattr(rates, rate_attr)}"
+        for prefix, rates in pricing
+    ]
+    return "CASE " + " ".join(branches) + " ELSE 0 END"
+
+
 def _build_case_sql(rate_attr: str) -> str:
     """Build a DuckDB CASE expression that returns the per-1M rate for a model.
 
@@ -186,15 +219,16 @@ def _build_case_sql(rate_attr: str) -> str:
     (avoids materializing every assistant message in Python just to sort the
     sessions table).
     """
-    branches = [
-        f"WHEN model LIKE '{prefix}%' THEN {getattr(rates, rate_attr)}"
-        for prefix, rates in _PRICING_BY_PREFIX_LEN
-    ]
-    return "CASE " + " ".join(branches) + " ELSE 0 END"
+    short_context = _case_sql(rate_attr, _PRICING_BY_PREFIX_LEN)
+    long_context = _case_sql(rate_attr, _LONG_CONTEXT_PRICING_BY_PREFIX_LEN)
+    return (
+        f"CASE WHEN {LONG_CONTEXT_REQUEST_SQL} THEN ({long_context}) "
+        f"ELSE ({short_context}) END"
+    )
 
 
 # SQL CASE expressions for per-row pricing in DuckDB. Keep in lockstep with
-# _PRICING — the test suite checks SQL totals match Python totals.
+# both pricing tables — the test suite checks SQL totals match Python totals.
 PRICING_INPUT_RATE_SQL = _build_case_sql("input")
 PRICING_OUTPUT_RATE_SQL = _build_case_sql("output")
 PRICING_CACHE_READ_RATE_SQL = _build_case_sql("cache_read")

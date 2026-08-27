@@ -1,0 +1,91 @@
+# Albert repository configuration template
+#
+# Copy this file to the root of the repository that Albert will orchestrate:
+#
+#   cp /path/to/albert/templates/albert.toml /path/to/repo/albert.toml
+#
+# It is valid as written. With `default_scenario` left commented, Albert uses
+# its packaged role defaults. `albert setup` updates only `commit_hooks` below
+# after inspecting the repository; it preserves these comments and all scenario
+# tables.
+#
+# Albert is the single resolver for this file. The resolved role table is
+# recorded in the run log and manifest, but it is not passed into agent briefs.
+# Unknown settings, roles, harnesses, efforts, and difficulty levels fail before
+# a run begins. Keep future ideas as comments until Albert supports them.
+
+# Select a named table below for every run that does not pass `--scenario`.
+# Command-line `--scenario NAME` wins over this value. Omit this key to retain
+# Albert's packaged per-role defaults.
+default_scenario = "codex"
+
+[settings]
+# Whether planners should include Functional QA (`check`) guidance. Default: true.
+checks = true
+# `albert setup` detects a pre-commit hook or `.pre-commit-config.yaml` and
+# writes the observed value here. Default when absent: true (legacy-compatible).
+# Albert never installs, changes, or runs a hook as part of this detection.
+commit_hooks = false
+# Pause for explicit human confirmation between completed numeric phases, except
+# after the last phase. Default: false.
+human_review = false
+
+# A scenario overrides any subset of Albert's packaged role defaults. A scenario
+# may name one role or all of them. Valid roles are planner, dev, check, review,
+# learnings, and decider. Each role entry accepts only:
+#
+#   harness = "claude" | "codex"
+#   model = "non-empty model name"
+#   effort = "none" | a level supported by the chosen harness
+#
+# `effort = "none"` clears the packaged effort so no effort flag is sent. Omit
+# any field you do not intend to override. Claude accepts low, medium, high,
+# xhigh, and max; Codex accepts low, medium, and high. Model names below are
+# examples from Albert's own configuration: choose values available to your CLI.
+
+[scenario.codex]
+# A Codex-first example. Select it with `--scenario codex`, or uncomment
+# `default_scenario = "codex"` above once Codex is available to every operator.
+planner   = { harness = "codex", model = "gpt-5.6-terra", effort = "medium" }
+dev       = { harness = "codex", model = "gpt-5.6-luna",  effort = "high" }
+check     = { harness = "codex", model = "gpt-5.6-terra", effort = "medium" }
+review    = { harness = "codex", model = "gpt-5.6-terra", effort = "medium" }
+learnings = { harness = "codex", model = "gpt-5.6-terra", effort = "medium" }
+decider   = { harness = "codex", model = "gpt-5.6-terra", effort = "medium" }
+
+[scenario.claude]
+# A Claude-first example. Select it with `--scenario claude`. The models mirror
+# Albert's packaged role intent while making the harness choice explicit.
+planner   = { harness = "claude", model = "opus",             effort = "high" }
+dev       = { harness = "claude", model = "claude-sonnet-5", effort = "medium" }
+check     = { harness = "claude", model = "claude-sonnet-5", effort = "medium" }
+review    = { harness = "claude", model = "opus",             effort = "high" }
+learnings = { harness = "claude", model = "opus",             effort = "medium" }
+decider   = { harness = "claude", model = "haiku",            effort = "none" }
+
+# Difficulty overlays are optional. The planner reports only easy, standard, or
+# hard for each phase; Albert applies the matching table after resolving the
+# selected scenario. An overlay may set model and/or effort, but never harness.
+# Roles not named in a difficulty table keep their selected scenario values.
+#
+# [difficulty.easy]
+# dev   = { model = "gpt-5.6-luna", effort = "low" }
+# check = { effort = "low" }
+#
+# [difficulty.standard]
+# # Leave this table absent when the selected scenario is already appropriate.
+#
+# [difficulty.hard]
+# dev    = { model = "gpt-5.6-terra", effort = "high" }
+# review = { effort = "high" }
+#
+# Precedence, from lowest to highest:
+# 1. packaged role frontmatter;
+# 2. the selected [scenario.<name>] table;
+# 3. repeatable `albert run --role-model role=model` overrides;
+# 4. the planner-selected [difficulty.<level>] overlay for that phase.
+#
+# Intended extension point: add more named scenarios for durable operational
+# profiles (for example, `ci`, `local`, or `high-assurance`). Do not add extra
+# [settings] keys or role fields until Albert documents them; strict validation
+# deliberately rejects unknown configuration rather than silently ignoring it.
