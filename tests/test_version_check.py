@@ -289,7 +289,7 @@ def test_unknown_latest_cache_does_not_nag(clean_env):
 
 def test_maybe_notify_defers_emit_when_behind(clean_env, monkeypatch, capsys):
     _write_cache(clean_env, checked_at=NOW, latest="1.2.0")
-    monkeypatch.setattr(vc, "_stderr_is_tty", lambda: True)
+    monkeypatch.setattr(vc, "stderr_is_tty", lambda: True)
     monkeypatch.setattr(vc.time, "time", lambda: NOW)
     deferred = []
     vc.maybe_notify_update("stats", deferred.append)
@@ -304,7 +304,7 @@ def test_maybe_notify_defers_emit_when_behind(clean_env, monkeypatch, capsys):
 
 def test_maybe_notify_no_defer_when_up_to_date(clean_env, monkeypatch):
     _write_cache(clean_env, checked_at=NOW, latest="1.0.0")
-    monkeypatch.setattr(vc, "_stderr_is_tty", lambda: True)
+    monkeypatch.setattr(vc, "stderr_is_tty", lambda: True)
     monkeypatch.setattr(vc.time, "time", lambda: NOW)
     deferred = []
     vc.maybe_notify_update("stats", deferred.append)

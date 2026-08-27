@@ -3,9 +3,12 @@
 import asyncio
 import contextlib
 import json
+import os
+import signal
 import socket
 import subprocess
 import tempfile
+from collections.abc import Callable
 from datetime import timedelta
 from pathlib import Path
 from typing import cast
@@ -20,6 +23,7 @@ from introspect.cli import (
     _branch_db_path,
     _find_available_port,
     _finish_connected_session,
+    _is_interrupt,
     _prune_stale_branch_dbs,
     _sanitize_branch,
     _stop_server,
@@ -182,7 +186,7 @@ def _stub_behind_cache(monkeypatch, tmp, *, latest="9.9.9", current="0.0.1"):
         monkeypatch.delenv(name, raising=False)
     monkeypatch.setattr(vc, "_current_version", lambda: current)
     monkeypatch.setattr(vc, "_is_editable_install", lambda: False)
-    monkeypatch.setattr(vc, "_stderr_is_tty", lambda: True)
+    monkeypatch.setattr(vc, "stderr_is_tty", lambda: True)
     # Far-future timestamp keeps the cache "fresh" without coupling to the clock.
     vc._write_cache(
         Path(tmp) / "version_check.json",
@@ -244,6 +248,146 @@ def test_mcp_command_never_nags(monkeypatch):
         assert result.exit_code == 0, result.output
         assert "is available" not in result.stderr
         assert "is available" not in result.stdout
+
+
+def _stub_mcp_server(monkeypatch, run=lambda: None) -> None:
+    """Replace the real MCP server with a stub whose ``run`` body is *run*."""
+
+    class _StubServer:
+        def run(self, transport):
+            assert transport == "stdio"
+            return run()
+
+    monkeypatch.setattr("introspect.mcp.server.create_mcp_server", _StubServer)
+
+
+def test_mcp_announces_startup_on_a_terminal(monkeypatch):
+    """A human running `introspy mcp` by hand gets told the server is up."""
+    monkeypatch.setattr("introspect.cli.stderr_is_tty", lambda: True)
+    _stub_mcp_server(monkeypatch)
+
+    result = runner.invoke(app, ["mcp"])
+
+    assert result.exit_code == 0, result.output
+    assert "ready on stdio" in result.stderr
+    assert "Ctrl-C" in result.stderr
+    # stdout is the JSON-RPC channel and must stay empty.
+    assert result.stdout == ""
+
+
+def test_mcp_stays_silent_when_stderr_is_not_a_terminal(monkeypatch):
+    """A client-spawned server logs nothing extra on either stream."""
+    monkeypatch.setattr("introspect.cli.stderr_is_tty", lambda: False)
+    _stub_mcp_server(monkeypatch)
+
+    result = runner.invoke(app, ["mcp"])
+
+    assert result.exit_code == 0, result.output
+    assert result.stderr == ""
+    assert result.stdout == ""
+
+
+def test_mcp_stops_via_its_signal_handler(monkeypatch, capfd):
+    """The installed SIGINT handler is what really ends a Ctrl-C'd server.
+
+    asyncio's runner leaves our handler in place (it only claims SIGINT from
+    ``default_int_handler``), so this path — not the ``except`` guard — is what
+    runs in production.
+    """
+    monkeypatch.setattr("introspect.cli.stderr_is_tty", lambda: True)
+    exits: list[int] = []
+    monkeypatch.setattr(os, "_exit", exits.append)
+
+    def _interrupt_self():
+        installed = signal.getsignal(signal.SIGINT)
+        assert callable(installed), "mcp should install a SIGINT handler"
+        cast("Callable[[int, object], None]", installed)(signal.SIGINT, None)
+
+    _stub_mcp_server(monkeypatch, _interrupt_self)
+
+    runner.invoke(app, ["mcp"])
+
+    assert exits == [130]
+    # The handler writes to fd 2 directly, so its line lands in capfd rather
+    # than in the CliRunner's captured stream.
+    assert "stopped" in capfd.readouterr().err
+
+
+@pytest.mark.parametrize(
+    "raised",
+    [
+        KeyboardInterrupt(),
+        asyncio.CancelledError(),
+        # anyio cancels the transport's task group, which re-raises as a group,
+        # and the interrupt can arrive already converted to a cancellation.
+        BaseExceptionGroup("stdio", [KeyboardInterrupt()]),
+        BaseExceptionGroup("stdio", [asyncio.CancelledError()]),
+    ],
+    ids=["bare", "cancelled", "group", "cancelled-group"],
+)
+def test_mcp_stops_cleanly_on_interrupt(monkeypatch, raised):
+    """An interrupt reaching the guard still ends in one line and exit 130."""
+    monkeypatch.setattr("introspect.cli.stderr_is_tty", lambda: True)
+
+    def _raise():
+        raise raised
+
+    _stub_mcp_server(monkeypatch, _raise)
+
+    result = runner.invoke(app, ["mcp"])
+
+    assert result.exit_code == 130
+    assert "stopped" in result.stderr
+
+
+def test_mcp_reraises_real_failures(monkeypatch):
+    """A genuine error still surfaces — the interrupt guard is not a catch-all."""
+    monkeypatch.setattr("introspect.cli.stderr_is_tty", lambda: True)
+
+    def _raise():
+        raise RuntimeError("boom")
+
+    _stub_mcp_server(monkeypatch, _raise)
+
+    result = runner.invoke(app, ["mcp"])
+
+    assert result.exit_code != 0
+    assert isinstance(result.exception, RuntimeError)
+
+
+def test_mcp_restores_the_previous_sigint_handler(monkeypatch):
+    """The handler is scoped to the run, so nothing else inherits it."""
+    _stub_mcp_server(monkeypatch)
+    before = signal.getsignal(signal.SIGINT)
+
+    result = runner.invoke(app, ["mcp"])
+
+    assert result.exit_code == 0, result.output
+    assert signal.getsignal(signal.SIGINT) is before
+
+
+@pytest.mark.parametrize(
+    ("exc", "expected"),
+    [
+        # Nested groups happen when the transport's task group is itself
+        # cancelled from an outer one.
+        (
+            BaseExceptionGroup(
+                "outer", [BaseExceptionGroup("inner", [KeyboardInterrupt()])]
+            ),
+            True,
+        ),
+        # A cancelled task group that also carries a bug is not a clean stop.
+        (
+            BaseExceptionGroup("stdio", [KeyboardInterrupt(), RuntimeError("boom")]),
+            False,
+        ),
+        (RuntimeError("boom"), False),
+    ],
+    ids=["nested-group", "group-with-error", "plain-error"],
+)
+def test_is_interrupt_classifies_exception_groups(exc, expected):
+    assert _is_interrupt(exc) is expected
 
 
 def test_materialize_shows_friendly_message_when_db_locked(monkeypatch, mock_locked_db):

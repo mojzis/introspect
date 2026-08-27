@@ -17,6 +17,12 @@ introspy mcp
 
 Starts an MCP server over stdio, for registering in a client's MCP config.
 
+Run by hand in a terminal it prints one line to stderr confirming it is up and
+waiting for a client, and Ctrl-C stops it with a matching line and exit code
+130. Both lines are suppressed when stderr is not a terminal — the exit code is
+unchanged — so a client that spawns the server sees nothing beyond the JSON-RPC
+traffic on stdout.
+
 ## Over HTTP
 
 The web server exposes the same tools and prompts at

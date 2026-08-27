@@ -85,6 +85,17 @@ shares the on-disk DB the server builds.
 `claude` and `codex` launch a coding agent wired to the HTTP MCP endpoint —
 see [MCP server](usage/mcp.md#dedicated-agent-sessions).
 
+`mcp` installs its own SIGINT handler *before* starting the stdio server, for
+two reasons. asyncio's runner claims SIGINT only while the current handler is
+still `signal.default_int_handler`, so registering first is what keeps ours in
+force; and the transport parks its stdin read on a worker thread, so a
+`KeyboardInterrupt` raised in the event loop cannot cancel it — the process
+would hang until the client sends another byte, then unwind as an anyio
+exception group. The handler therefore writes its line with a raw `os.write`
+(a signal can land mid-write on stderr's buffer, and re-entering that buffer
+raises) and ends the process with `os._exit`. The `except` guard around
+`server.run` is a backstop for interrupts arriving outside that window.
+
 ### Web UI (`api/main.py`)
 
 A FastAPI application launched via `introspy serve`.
