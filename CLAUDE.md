@@ -52,6 +52,7 @@ Explore Claude Code (and Codex) conversation logs via CLI, web UI, MCP server.
 - `uv run poe docs-cli` — regenerate `docs/usage/cli-reference.md` from `--help`
 - `uv run mkdocs build --strict` — build the docs site (needs `uv sync --group docs`)
 - `uv run poe worktree <branch>` — create `~/worktrees/introspect-<branch>` from a fresh `origin/main` (fetches, branches, copies `.claude/settings.local.json`, runs `uv sync`). See `scripts/worktree.sh`.
+- `level=minor uv run poe release` — bump the version (default `patch`), commit, tag `v<version>`, push; the tag triggers the PyPI publish. `level` is an env var, so it must precede the command. See [docs/development.md](docs/development.md#releasing-a-new-version).
 
 ## Worktrees
 
