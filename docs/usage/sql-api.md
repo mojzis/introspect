@@ -26,8 +26,11 @@ Response:
 }
 ```
 
-Only single `SELECT` / `WITH` queries are allowed; writes, `ATTACH`, `PRAGMA`,
-`COPY`, and multi-statement scripts are rejected. Rows are capped at 10 000.
+Only single `SELECT` / `WITH` queries are allowed; writes, `ATTACH`, `INSTALL`,
+`LOAD`, `PRAGMA`, `COPY`, and multi-statement scripts are rejected. The default
+limit is 100; rows are capped at 10 000. The same validator backs the MCP
+`run_sql` tool — see
+[the SQL guard](../architecture.md#read-only-sql-guard-sql_querypy).
 
 ### `GET /api/schema`
 
@@ -51,3 +54,13 @@ resp = httpx.post(
 data = resp.json()
 df = pd.DataFrame(data["rows"], columns=data["columns"])
 ```
+
+## What it does not do
+
+- It is not exposed off-machine. Both routes 404 unless the server is bound to
+  loopback, and 404 (rather than 403) so a publicly bound server doesn't
+  advertise that the API exists at all.
+- It has no authentication. Anything that can reach loopback on that port can
+  read your conversation logs.
+- It cannot write. One `SELECT` / `WITH` statement per request, capped rows, no
+  DDL and no `COPY`.

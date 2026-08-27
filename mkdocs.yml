@@ -4,6 +4,12 @@ site_url: https://mojzis.github.io/introspect/
 repo_url: https://github.com/mojzis/introspect
 repo_name: mojzis/introspect
 edit_uri: edit/main/docs/
+
+# Planning / design notes live under docs/plans/ so they are versioned with
+# the code but never published — they must not leak into the site nav or
+# into llms-full.txt. tests/test_docs_drift.py enforces this.
+exclude_docs: |
+  plans/
 copyright: Made for exploring Claude Code conversation logs
 
 theme:
@@ -49,6 +55,7 @@ nav:
   - Usage:
       - Web UI: usage/web-ui.md
       - CLI: usage/cli.md
+      - CLI reference: usage/cli-reference.md
       - MCP server: usage/mcp.md
       - SQL API: usage/sql-api.md
   - Reference:
@@ -95,6 +102,7 @@ plugins:
         Usage:
           - usage/web-ui.md
           - usage/cli.md
+          - usage/cli-reference.md
           - usage/mcp.md
           - usage/sql-api.md
         Reference:
@@ -103,6 +111,8 @@ plugins:
           - configuration.md
         Development:
           - development.md
+        For LLMs:
+          - llms.md
 
 extra:
   social:

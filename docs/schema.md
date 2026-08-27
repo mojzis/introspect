@@ -2,7 +2,18 @@
 
 Reference notes on the shape of the Claude Code conversation logs that
 Introspect reads. These describe the raw JSONL on disk, before it is
-materialized into the DuckDB views documented in [Architecture](architecture.md).
+materialized into the DuckDB relations documented in
+[Architecture](architecture.md).
+
+!!! note "Where the reference schema lives"
+    Claude Code publishes no formal JSON Schema for these files, and this
+    repository does not vendor one — there is no
+    `claude-code-jsonl-schema.json` to reconcile against. This page **is** the
+    reference, written from observation of real logs. Fields are documented as
+    observed, so treat anything here as descriptive rather than guaranteed: the
+    harness adds and renames fields between releases, which is why every
+    extraction in `db.py` uses `json_extract` with a `COALESCE` default rather
+    than assuming a key exists.
 
 ## File Location
 - Conversations stored at `~/.claude/projects/<project-slug>/<session-uuid>.jsonl`
@@ -46,13 +57,55 @@ Model responses.
 - `id` — API message ID
 - `role` — "assistant"
 - `stop_reason` — "end_turn" | "tool_use" | null (streaming)
-- `usage` — token counts (`input_tokens`, `output_tokens`, `cache_creation_input_tokens`, `cache_read_input_tokens`)
+- `usage` — token counts, see [below](#the-usage-block)
 - `content` — array of content blocks
 
 **Content block types:**
 - `text`: `{ type: "text", text: "..." }`
 - `thinking`: `{ type: "thinking", thinking: "...", signature: "..." }`
 - `tool_use`: `{ type: "tool_use", id: "toolu_...", name: "Bash"|"Read"|"Edit"|..., input: {...} }`
+
+#### The `usage` block
+
+```json
+"usage": {
+  "input_tokens": 4,
+  "output_tokens": 312,
+  "cache_read_input_tokens": 41027,
+  "cache_creation_input_tokens": 1583,
+  "cache_creation": {
+    "ephemeral_5m_input_tokens": 1583,
+    "ephemeral_1h_input_tokens": 0
+  }
+}
+```
+
+| Field | Meaning |
+|---|---|
+| `input_tokens` | Uncached input for this call. |
+| `output_tokens` | Generated tokens, including thinking (redacted thinking counts here too). |
+| `cache_read_input_tokens` | Context served from a warm cache. |
+| `cache_creation_input_tokens` | Total tokens written to cache on this call. |
+| `cache_creation.ephemeral_5m_input_tokens` | The part of that total written to the **5-minute** cache. |
+| `cache_creation.ephemeral_1h_input_tokens` | The part written to the **1-hour** cache. |
+
+The two ephemeral fields matter because the 5m and 1h caches bill at different
+write rates (input × 1.25 and input × 2.0). `assistant_message_costs` extracts
+them as `cache_creation_5m` / `cache_creation_1h`.
+
+**Fallback when the split is absent.** Older records carry only the flat
+`cache_creation_input_tokens` with no nested `cache_creation` object. When both
+ephemeral fields are zero and the flat total is not, Introspect bills the whole
+total at the **5-minute** rate — the cheaper of the two, so a legacy record is
+never over-billed. The same rule is implemented twice, in
+`sql_fragments.CACHE_WRITE_FALLBACK_SQL` and in `pricing.cache_miss_premium_usd`
+/ `pricing.compute_cost_usd`; `tests/test_pricing.py` checks the two agree.
+
+**Recorded but not priced.** `usage.speed` (`standard` / `fast`) and
+`usage.inference_geo` (`not_available` / `us`) are request-level pricing
+modifiers Anthropic records per message. Introspect does not apply them, so a
+session that used fast mode or US-pinned inference is understated. See
+[Pricing](architecture.md#pricing-pricingpy).
 
 ### 4. `attachment`
 Harness-injected context — not model/user text. Every derived view over
@@ -101,5 +154,5 @@ names the subtype.
 ## Notes
 - Multiple assistant lines can share the same `requestId` (streaming chunks / parallel tool calls)
 - `isSidechain: true` marks agent sub-conversations
-- `usage` block contains cost-relevant token data
+- `usage` block contains cost-relevant token data — see [The `usage` block](#the-usage-block)
 - The `queue-operation` lines always appear as the first 2 lines (enqueue/dequeue pair)
