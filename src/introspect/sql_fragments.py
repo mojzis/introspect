@@ -156,11 +156,13 @@ def _build_session_cost_subquery(timestamp_where: str = "") -> str:
     rather than Python so the sessions list can ``ORDER BY cost_usd`` without
     materializing every assistant message.
 
-    The ``cc_fallback`` term covers the legacy schema where
-    ``usage.cache_creation_input_tokens`` is set but the
-    ``cache_creation.{ephemeral_5m,ephemeral_1h}_input_tokens`` sub-fields
-    are zero — bill those tokens at the 5m write rate (Anthropic's older
-    default).  Mirrors the Python fallback in ``fetch_token_usage``.
+    The ``CACHE_WRITE_FALLBACK_SQL`` term inside ``COST_EXPR_SQL`` covers
+    the legacy schema where ``usage.cache_creation_input_tokens`` is set but
+    the ``cache_creation.{ephemeral_5m,ephemeral_1h}_input_tokens``
+    sub-fields are zero — bill those tokens at the 5m write rate
+    (Anthropic's older default).  Every cost surface shares that one
+    expression, so the fallback is applied per row and cannot drift between
+    them.
 
     ``timestamp_where`` is spliced into the inner SELECT as a WHERE clause
     when non-empty. Trust contract: callers must pass only validated SQL

@@ -10,9 +10,9 @@ import nolegend
 from fastapi import Request
 from fastapi.templating import Jinja2Templates
 
-from introspect.pricing import compute_cost_usd
 from introspect.sql_fragments import (
     COMMAND_LIST_SUBQUERY,
+    COST_EXPR_SQL,
     FILE_READS_SUBQUERY,
     FILE_WRITES_SUBQUERY,
     OBVIOUS_COMMANDS,
@@ -444,11 +444,16 @@ def fetch_token_usage(
     Reads from ``assistant_message_costs`` (deduped by ``message.id``) so
     callers don't need to know about the raw_messages duplication bug.
 
+    Cost is summed in DuckDB via ``COST_EXPR_SQL``, which prices each row at
+    its own model's rates and applies the legacy cache_creation fallback
+    *per row* — the same expression the sessions list and the MCP
+    ``get_session`` block use, so no two surfaces can quote different totals
+    for one session. (Folding that fallback into per-model aggregates
+    instead drops the legacy tokens entirely whenever the same model also
+    logged a modern record in that session.)
+
     Always returns a dict (empty totals + ``"—"`` cost when the query fails
     or there is no data) so templates don't need ``or {}`` guards.
-
-    Cost is computed in Python so we can apply the per-row cache_creation
-    fallback (``cc_total > 0`` with both 5m/1h zero implies legacy 5m).
     """
     session_filter = ""
     params: list[str] = []
@@ -457,22 +462,21 @@ def fetch_token_usage(
         params.append(session_id)
 
     try:
-        rows = db.execute(
+        row = db.execute(
             f"""
             SELECT
-                model,
                 COALESCE(SUM(input_tokens), 0),
                 COALESCE(SUM(output_tokens), 0),
                 COALESCE(SUM(cache_read_tokens), 0),
                 COALESCE(SUM(cache_creation_tokens), 0),
                 COALESCE(SUM(cache_creation_5m), 0),
-                COALESCE(SUM(cache_creation_1h), 0)
+                COALESCE(SUM(cache_creation_1h), 0),
+                COALESCE(SUM({COST_EXPR_SQL}), 0) / 1e6
             FROM assistant_message_costs
             {session_filter}
-            GROUP BY model
         """,  # noqa: S608
             params,
-        ).fetchall()
+        ).fetchone()
     except duckdb.CatalogException:
         # Lazy-mode read connections may not yet have the derived view; the
         # caller can still render with empty totals.  Any other failure is a
@@ -480,40 +484,19 @@ def fetch_token_usage(
         log.warning("assistant_message_costs view missing", exc_info=True)
         return dict(_EMPTY_TOKEN_USAGE)
 
-    totals = {
-        "input": 0,
-        "output": 0,
-        "cache_read": 0,
-        "cache_creation": 0,
-        "cache_creation_5m": 0,
-        "cache_creation_1h": 0,
-    }
-    cost_usd = 0.0
-    for row in rows:
-        model = row[0]
-        in_tok, out_tok, cr_tok, cc_tok, cc_5m, cc_1h = (int(v or 0) for v in row[1:])
-        totals["input"] += in_tok
-        totals["output"] += out_tok
-        totals["cache_read"] += cr_tok
-        totals["cache_creation"] += cc_tok
-        totals["cache_creation_5m"] += cc_5m
-        totals["cache_creation_1h"] += cc_1h
-        # Legacy schema: usage.cache_creation_input_tokens with no 5m/1h
-        # breakdown — bill at the 5m rate (Anthropic's older default).
-        eff_5m, eff_1h = cc_5m, cc_1h
-        if cc_5m == 0 and cc_1h == 0 and cc_tok > 0:
-            eff_5m = cc_tok
-        cost_usd += compute_cost_usd(
-            model=model,
-            input_tokens=in_tok,
-            output_tokens=out_tok,
-            cache_read_tokens=cr_tok,
-            cache_creation_5m=eff_5m,
-            cache_creation_1h=eff_1h,
-        )
+    if row is None:  # pragma: no cover - ungrouped aggregate always yields
+        # a row; the guard is what lets the unpacking below type-check.
+        return dict(_EMPTY_TOKEN_USAGE)
 
+    in_tok, out_tok, cache_read, cc_tok, cc_5m, cc_1h, cost = row
+    cost_usd = float(cost or 0.0)
     return {
-        **totals,
+        "input": int(in_tok or 0),
+        "output": int(out_tok or 0),
+        "cache_read": int(cache_read or 0),
+        "cache_creation": int(cc_tok or 0),
+        "cache_creation_5m": int(cc_5m or 0),
+        "cache_creation_1h": int(cc_1h or 0),
         "cost_usd": cost_usd,
         "cost": format_cost(cost_usd),
     }

@@ -118,8 +118,8 @@ A FastAPI application launched via `introspy serve`.
 - **Handler pattern**: each handler queries via `conn(request)`, builds dynamic
   SQL with parameterized filters, paginates (1-based, fetch `size+1` to detect
   the next page), and renders a Jinja2 template. Cost-bearing handlers reuse
-  `SESSION_COST_SUBQUERY` from `sql_fragments.py` rather than hand-rolling cost
-  math.
+  `SESSION_COST_SUBQUERY` (per-session) or `COST_EXPR_SQL` (per-row) from
+  `sql_fragments.py` rather than hand-rolling cost math.
 - **HTMX integration**: `parent(request)` returns `"base.html"` for full page
   loads or `"partial.html"` for HTMX fragment requests. The refresh indicator,
   cost panels, and drill-downs are HTMX-swapped fragments.
