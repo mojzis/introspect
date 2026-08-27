@@ -111,6 +111,8 @@ plugins:
           - configuration.md
         Development:
           - development.md
+        For LLMs:
+          - llms.md
 
 extra:
   social:

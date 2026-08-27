@@ -28,7 +28,7 @@ If the target port is busy, the server falls forward to the next free port.
 |---|---|---|
 | `/` | Dashboard | Session count, recent sessions, headline token/cost stats. |
 | `/sessions` | Sessions | Every session, filterable by model, project, branch, command, provider, and free text; sortable by start, duration, message counts, tool calls, model, project, branch, provider, title, file counts, or cost. |
-| `/sessions/{id}` | Session detail | One session across five tabs — see [below](#session-detail-tabs). |
+| `/sessions/{session_id}` | Session detail | One session across five tabs — see [below](#session-detail-tabs). |
 | `/search` | Search | Full-text search across all message types (BM25, ILIKE fallback). |
 | `/tools` | Tools | Tool-call statistics; filter by name, session, project, or failures only. |
 | `/bash` | Bash | Bash invocations grouped by command prefix, with failure counts. |
@@ -40,7 +40,7 @@ If the target port is busy, the server falls forward to the next free port.
 
 HTMX fragment routes (`/cost-overview/breakdown`,
 `/cost-overview/breakdown/{day}`, `/cost-overview/portfolio`,
-`/sessions/{id}/cost/bloat`, `/refresh-status`) back the drill-downs on those
+`/sessions/{session_id}/cost/bloat`, `/refresh-status`) back the drill-downs on those
 pages; they aren't meant to be visited directly.
 
 ## Cost Overview
