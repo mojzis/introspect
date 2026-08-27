@@ -1,4 +1,5 @@
 {% extends parent %}
+{% from '_pagination.html' import pager %}
 {% block title %}Sessions - Introspect{% endblock %}
 
 {# Build query string helper — keeps all current params, overrides given ones.
@@ -124,25 +125,8 @@ page={{ kwargs.get("page", page) }}&page_size={{ kwargs.get("page_size", page_si
 </div>
 
 {# ── Pagination + page size ── #}
-<div class="pagination">
-    {% if page > 1 %}
-    <a href="/sessions?{{ qs(page=page - 1) }}" hx-get="/sessions?{{ qs(page=page - 1) }}" hx-target="#content" hx-push-url="true">Prev</a>
-    {% endif %}
-    <span class="current">Page {{ page }} of {{ total_pages }}</span>
-    {% if page < total_pages %}
-    <a href="/sessions?{{ qs(page=page + 1) }}" hx-get="/sessions?{{ qs(page=page + 1) }}" hx-target="#content" hx-push-url="true">Next</a>
-    {% endif %}
-    <span style="margin-left:1rem;font-size:0.85rem;color:#666;">
-        Show
-        {% for ps in page_sizes %}
-            {% if ps == page_size %}
-                <strong>{{ ps }}</strong>
-            {% else %}
-                <a href="/sessions?{{ qs(page=1, page_size=ps) }}" hx-get="/sessions?{{ qs(page=1, page_size=ps) }}" hx-target="#content" hx-push-url="true">{{ ps }}</a>
-            {% endif %}
-            {% if not loop.last %}/{% endif %}
-        {% endfor %}
-        per page
-    </span>
-</div>
+{% macro sessions_page_url(p, ps) -%}
+/sessions?{{ qs(page=p, page_size=ps) }}
+{%- endmacro %}
+{{ pager(sessions_page_url, page, total_pages, page_size, page_sizes) }}
 {% endblock %}

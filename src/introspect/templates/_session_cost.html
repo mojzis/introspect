@@ -88,7 +88,7 @@
                 <td><span style="display:inline-block;width:10px;height:10px;background:{{ inv.color }};"></span></td>
                 <td>
                     {% if inv.first_uuid %}
-                    <a href="/sessions/{{ session_id }}?tab=messages#msg-{{ inv.first_uuid }}">{{ inv.subagent_type }}</a>
+                    <a href="/sessions/{{ session_id }}?tab=messages&focus={{ inv.first_uuid }}#msg-{{ inv.first_uuid }}">{{ inv.subagent_type }}</a>
                     {% else %}
                     {{ inv.subagent_type }}
                     {% endif %}

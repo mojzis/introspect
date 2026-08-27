@@ -62,6 +62,7 @@ src/introspect/
                             #   _refresh_indicator, _daily_cost_panel,
                             #   _hourly_cost_panel, _cost_portfolio_panel,
                             #   _spend_shapes (split/spark macros),
+                            #   _pagination (shared Prev/Next + size picker),
                             #   _session_cost, _session_cost_bloat,
                             #   _session_messages, _session_tokenscape,
                             #   _session_trajectory, _session_subagents

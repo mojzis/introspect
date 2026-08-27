@@ -4,6 +4,7 @@ import json
 import logging
 import math
 import re
+from dataclasses import dataclass, replace
 
 import plotly.graph_objects as go
 from fastapi import HTTPException, Request
@@ -18,6 +19,8 @@ from introspect.pricing import compute_cost_usd
 from introspect.search import ensure_search_corpus, fts_available
 
 from ._helpers import (
+    MESSAGES_PAGE_SIZES,
+    MESSAGES_PER_PAGE_DEFAULT,
     OBVIOUS_COMMANDS_SQL,
     SESSION_INFO_SELECT,
     SESSIONS_PAGE_SIZES,
@@ -378,15 +381,131 @@ async def sessions(  # noqa: PLR0913
     )
 
 
+# Blocks are numbered once, in display order, so a page window and an
+# anchor lookup ("which page holds this uuid?") agree by construction.
+# ``block_rank`` marks the first block of each assistant turn without the
+# caller having to have seen the earlier blocks — which, once the list is
+# paged, it no longer has.
+_ORDERED_BLOCKS_CTE = """
+    ordered AS (
+        SELECT
+            uuid,
+            timestamp,
+            kind,
+            is_sidechain,
+            text,
+            thinking_text,
+            tool_name,
+            tool_input,
+            tool_use_id,
+            ROW_NUMBER() OVER (
+                ORDER BY timestamp ASC, block_idx ASC, uuid ASC
+            ) AS rn,
+            ROW_NUMBER() OVER (
+                PARTITION BY uuid ORDER BY block_idx ASC
+            ) AS block_rank
+        FROM session_messages_enriched
+        WHERE session_id = ?
+          AND kind <> 'tool_result'
+    )
+"""
+
+
+@dataclass(frozen=True)
+class MessageWindow:
+    """One resolved page of the Messages tab.
+
+    Built by :func:`_resolve_message_window`, which owns every clamp, so the
+    handler, the SQL window and the template pager can't disagree about
+    which blocks are on screen.
+    """
+
+    page: int
+    page_size: int
+    total: int
+
+    @property
+    def offset(self) -> int:
+        return (self.page - 1) * self.page_size
+
+    @property
+    def total_pages(self) -> int:
+        return max(1, math.ceil(self.total / self.page_size))
+
+    def as_context(self, rendered: int) -> dict:
+        """Template context for the pager (``messages_pagination``)."""
+        return {
+            "page": self.page,
+            "page_size": self.page_size,
+            "page_sizes": MESSAGES_PAGE_SIZES,
+            "total": self.total,
+            "total_pages": self.total_pages,
+            "start": (self.offset + 1) if rendered else 0,
+            # Both joins are 1:1 on their keys, so ``rendered`` is the size of
+            # the SQL window; ``min`` is a bound, not a correction.
+            "end": min(self.offset + rendered, self.total),
+        }
+
+
+def _resolve_message_window(
+    db, session_id: str, page: int, page_size: int, focus: str = ""
+) -> MessageWindow:
+    """Resolve a requested page into a window over the session's blocks.
+
+    ``focus`` — a message uuid or a tool_use_id — wins over ``page``. Deep
+    links from the Cost / Subagents / Tools pages point at a single block
+    with a ``#msg-…`` / ``#tc-…`` fragment the server never sees, so they
+    pass the same id here to have the right page rendered in the first place.
+    An unknown id, an out-of-range page and an unsupported size all fall back
+    rather than erroring.
+    """
+    if page_size not in MESSAGES_PAGE_SIZES:
+        page_size = MESSAGES_PER_PAGE_DEFAULT
+    total_row = db.execute(
+        """
+        SELECT COUNT(*)
+        FROM session_messages_enriched
+        WHERE session_id = ?
+          AND kind <> 'tool_result'
+        """,
+        [session_id],
+    ).fetchone()
+    total = int(total_row[0]) if total_row else 0
+
+    if focus:
+        row = db.execute(
+            f"WITH{_ORDERED_BLOCKS_CTE}"  # noqa: S608 - constant CTE, params bound
+            "SELECT MIN(rn) FROM ordered WHERE uuid = ? OR tool_use_id = ?",
+            [session_id, focus, focus],
+        ).fetchone()
+        if row and row[0] is not None:
+            page = math.ceil(int(row[0]) / page_size)
+
+    window = MessageWindow(page=page, page_size=page_size, total=total)
+    return replace(window, page=max(1, min(page, window.total_pages)))
+
+
 def _build_messages_context(
     db,
     session_id: str,
+    window: MessageWindow,
     cache_loss_events: list[dict] | None = None,
-) -> list[dict]:
-    """Build the parsed message list shown in the Messages tab."""
+) -> tuple[list[dict], dict]:
+    """Build one page of the parsed message list shown in the Messages tab.
+
+    Returns the rendered blocks plus the pagination context. The window is
+    applied in SQL — a 40k-block session must never be pulled into memory
+    just to render a thousand rows of it.
+    """
     loss_by_uuid = {e["uuid"]: e for e in (cache_loss_events or [])}
+    offset = window.offset
     cur = db.execute(
-        """
+        f"""
+        WITH{_ORDERED_BLOCKS_CTE},
+        windowed AS (
+            SELECT * FROM ordered
+            WHERE rn > ? AND rn <= ?
+        )
         SELECT
             e.uuid,
             e.timestamp,
@@ -403,15 +522,14 @@ def _build_messages_context(
             amc.input_tokens,
             amc.output_tokens,
             amc.cache_read_tokens,
-            amc.cache_creation_tokens
-        FROM session_messages_enriched e
+            amc.cache_creation_tokens,
+            e.block_rank
+        FROM windowed e
         LEFT JOIN tool_calls tc ON tc.tool_use_id = e.tool_use_id
         LEFT JOIN assistant_message_costs amc ON amc.uuid = e.uuid
-        WHERE e.session_id = ?
-          AND e.kind <> 'tool_result'
-        ORDER BY e.timestamp ASC, e.block_idx ASC
-        """,
-        [session_id],
+        ORDER BY e.rn ASC
+        """,  # noqa: S608 - constant CTE, params bound
+        [session_id, offset, offset + window.page_size],
     )
     col_names = [d[0] for d in cur.description]
     parsed_messages: list[dict] = []
@@ -427,9 +545,12 @@ def _build_messages_context(
         thinking_preview, thinking_has_more = _thinking_preview(rec["thinking_text"])
         # Assistant turns expand to one row per content block (text, thinking,
         # tool_use, etc.), all sharing one uuid. Only the first block in each
-        # turn gets the anchor id so DOM ids stay unique.
+        # turn gets the anchor id so DOM ids stay unique. ``block_rank`` comes
+        # from SQL so a turn split across a page boundary doesn't re-anchor.
         uuid_val = rec["uuid"] or ""
-        is_first = bool(uuid_val) and uuid_val not in seen_uuids
+        is_first = (
+            bool(uuid_val) and rec["block_rank"] == 1 and uuid_val not in seen_uuids
+        )
         if uuid_val:
             seen_uuids.add(uuid_val)
 
@@ -518,7 +639,7 @@ def _build_messages_context(
         msg["cache_loss_cost"] = format_cost(event["miss_premium_usd"])
         msg["cache_loss_recoverable"] = event["recoverable"]
         msg["cache_loss_max_ttl_minutes"] = MAX_RECOVERABLE_GAP_SECONDS // 60
-    return parsed_messages
+    return parsed_messages, window.as_context(len(parsed_messages))
 
 
 _CUMULATIVE_MAX_BUCKETS = 120
@@ -1655,13 +1776,20 @@ def _build_chart_from_attrib(
 _VALID_TABS = {"messages", "cost", "tokenscape", "subagents", "trajectory"}
 
 
-async def session_detail(
+async def session_detail(  # noqa: PLR0913
     request: Request,
     session_id: str,
     tab: str = "messages",
     view: str = DEFAULT_VIEW,
+    page: int = 1,
+    page_size: int = MESSAGES_PER_PAGE_DEFAULT,
+    focus: str = "",
 ) -> HTMLResponse:
-    """Full session detail: Messages tab (default) or Cost tab (?tab=cost)."""
+    """Full session detail: Messages tab (default) or Cost tab (?tab=cost).
+
+    ``page`` / ``page_size`` window the Messages tab; ``focus`` (a message
+    uuid or tool_use_id) picks the page holding that block instead.
+    """
     db = conn(request)
 
     active_tab = tab if tab in _VALID_TABS else "messages"
@@ -1744,13 +1872,15 @@ async def session_detail(
     has_subagents: bool = bool(has_subagents_row and has_subagents_row[0])
 
     parsed_messages: list[dict] = []
+    messages_pagination: dict = {}
     cost_ctx: dict = {}
     tokenscape_ctx: dict = {}
     subagents_ctx: dict = {}
     trajectory_ctx: dict = {}
     if active_tab == "messages":
-        parsed_messages = _build_messages_context(
-            db, session_id, cache_loss_events=cache_loss_events
+        window = _resolve_message_window(db, session_id, page, page_size, focus)
+        parsed_messages, messages_pagination = _build_messages_context(
+            db, session_id, window, cache_loss_events=cache_loss_events
         )
     elif active_tab == "tokenscape":
         try:
@@ -1792,6 +1922,7 @@ async def session_detail(
             "session": session_info,
             "session_id": session_id,
             "messages": parsed_messages,
+            "messages_pagination": messages_pagination,
             "token_usage": token_usage,
             "tool_summary": tool_summary,
             "active_tab": active_tab,

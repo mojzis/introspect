@@ -153,11 +153,23 @@
         document.addEventListener('htmx:historyRestore', function() {
             document.getElementById('loading-overlay').classList.remove('active');
         });
-        document.addEventListener('htmx:afterSettle', function() {
+        document.addEventListener('htmx:afterSettle', function(evt) {
+            // Only a swap into #content is a navigation. Panel swaps — the
+            // charts, and the refresh indicator polling once a second — must
+            // not move the reader's scroll position at all.
+            var target = evt.detail && evt.detail.target;
+            if (!target || target.id !== 'content') return;
             if (location.hash) {
-                var el = document.getElementById(location.hash.substring(1));
-                if (el) el.scrollIntoView({ behavior: 'smooth' });
+                var anchor = document.getElementById(location.hash.substring(1));
+                if (anchor) {
+                    anchor.scrollIntoView({ behavior: 'smooth' });
+                    return;
+                }
             }
+            // Without this the browser keeps the scroll offset from the page
+            // we just left, dropping you into the middle of the new one with
+            // no visible reason why.
+            window.scrollTo(0, 0);
         });
     </script>
 

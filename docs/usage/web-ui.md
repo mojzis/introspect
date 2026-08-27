@@ -96,6 +96,25 @@ Both are omitted (em-dash) when there is nothing to draw.
 | Trajectory | How the session behaved — the tool-call sequence as a glyph strip. |
 | Subagents | Which agent spent what (only shown when the session used subagents). |
 
+### Messages tab
+
+Long sessions run to tens of thousands of content blocks, so the tab pages
+**server-side** — only the current page is queried and rendered, and the rest
+never reaches the browser. 1000 blocks per page by default; `Prev` / `Next`
+and a 250 / 500 / 1000 / 2000 size picker sit above and below the list. Sessions
+of 250 blocks or fewer fit on one page and show no controls at all.
+
+| Query param | Effect |
+|---|---|
+| `page` | 1-based page number. Out-of-range values clamp to the last page. |
+| `page_size` | Blocks per page — 250, 500, 1000 or 2000. Anything else falls back to 1000. |
+| `focus` | A message `uuid` or a `tool_use_id`: opens on the page holding that block. |
+
+`focus` is what makes deep links survive paging. A `#msg-…` / `#tc-…` fragment
+never reaches the server, so the links from the Cost, Subagents, Tools and Bash
+pages pass the same id as `?focus=` — the right page renders, then the fragment
+scrolls to the block.
+
 ### Cost tab
 
 A per-model token/cost rollup, plus **bloat** tables: every unit of context the
