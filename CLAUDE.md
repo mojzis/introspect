@@ -25,7 +25,7 @@ Explore Claude Code (and Codex) conversation logs via CLI, web UI, MCP server.
 
 - **Adding a page**: handler in `handlers/`, route in `routes.py`, template, tests in `tests/routes/`
 - **DB access**: `request.state.conn` (read-only, per-request), `json_extract()` for JSON fields, `# noqa: S608` for dynamic SQL
-- **Pagination**: 1-based, fetch `size+1` to detect next page
+- **Pagination**: 1-based, fetch `size+1` to detect next page. The session-detail Messages tab is the exception: it windows in SQL by block ordinal via `MessageWindow` / `_resolve_message_window()` (`handlers/sessions.py`), and deep links pass `?focus=<uuid|tool_use_id>` so the page holding an anchor renders
 - **HTMX**: `parent(request)` selects `base.html` (full) vs `partial.html` (fragment)
 - **Charts**: build `plotly.graph_objects.Figure` server-side, style with `nolegend.activate()`, embed JSON for `Plotly.newPlot` (see `/python-review` skill `nolegend`)
 - **Cache breaks**: never re-derive a TTL threshold — read `cache_requests` (`cache_miss`, `gap_recoverable`, `gap_unrecoverable`). Waste is capped at 1h gaps; anything longer is a break no setting recovers

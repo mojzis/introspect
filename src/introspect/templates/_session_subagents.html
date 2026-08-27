@@ -53,7 +53,7 @@
                     {% if row.is_main %}
                     <strong>{{ row.label }}</strong>
                     {% else %}
-                    <a href="/sessions/{{ session_id }}?tab=messages#msg-{{ row.first_uuid }}">{{ row.label }}</a>
+                    <a href="/sessions/{{ session_id }}?tab=messages&focus={{ row.first_uuid }}#msg-{{ row.first_uuid }}">{{ row.label }}</a>
                     {% endif %}
                 </td>
                 <td style="font-size:0.85em;color:#555;">{{ row.model }}</td>

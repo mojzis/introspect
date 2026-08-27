@@ -100,7 +100,32 @@ SESSIONS_SORT_COLS = {
 }
 SESSIONS_SORT_DEFAULT = "started_at"
 
+# Messages tab of the session detail page. Long sessions run to tens of
+# thousands of content blocks; rendering them all pins the server on string
+# building and the browser on layout, so the tab pages server-side.
+MESSAGES_PER_PAGE_DEFAULT = 1000
+MESSAGES_PAGE_SIZES = [250, 500, 1000, 2000]
+
 RAW_PER_PAGE = 20
+
+
+def parse_page(raw: str) -> int:
+    """Coerce a ``?page=`` query value to a 1-based page number.
+
+    Anything that isn't a positive integer — blank, ``abc``, ``-1`` — reads
+    as page 1. Handlers clamp the upper end against the real row count.
+    """
+    return max(1, int(raw)) if raw.strip().isdigit() else 1
+
+
+def parse_page_size(raw: str, default: int) -> int:
+    """Coerce a ``?page_size=`` query value, falling back to ``default``.
+
+    Handlers snap the result onto their own allowed set, so a syntactically
+    valid but unsupported size is still safe.
+    """
+    return int(raw) if raw.strip().isdigit() else default
+
 
 _XML_TAG_RE = re.compile(r"<[^>]+>")
 # <command-message> duplicates the <command-name> for slash-command / skill

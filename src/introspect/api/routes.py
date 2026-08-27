@@ -7,8 +7,11 @@ from fastapi import APIRouter, Query, Request
 from fastapi.responses import HTMLResponse, JSONResponse
 
 from introspect.api.handlers._helpers import (
+    MESSAGES_PER_PAGE_DEFAULT,
     SESSIONS_PER_PAGE_DEFAULT,
     SESSIONS_SORT_DEFAULT,
+    parse_page,
+    parse_page_size,
 )
 from introspect.api.handlers.bash import bash as _bash
 from introspect.api.handlers.cost_breakdown import (
@@ -63,8 +66,8 @@ async def sessions(  # noqa: PLR0913
 ):
     return await _sessions(
         request,
-        max(1, int(page)) if page.strip().isdigit() else 1,
-        int(page_size) if page_size.strip().isdigit() else SESSIONS_PER_PAGE_DEFAULT,
+        parse_page(page),
+        parse_page_size(page_size, SESSIONS_PER_PAGE_DEFAULT),
         sort,
         order,
         model,
@@ -77,13 +80,24 @@ async def sessions(  # noqa: PLR0913
 
 
 @router.get("/sessions/{session_id}", response_class=HTMLResponse)
-async def session_detail(
+async def session_detail(  # noqa: PLR0913
     request: Request,
     session_id: str,
     tab: str = Query("messages"),
     view: str = Query(_TRAJECTORY_DEFAULT_VIEW),
+    page: str = Query(""),
+    page_size: str = Query(""),
+    focus: str = Query(""),
 ):
-    return await _session_detail(request, session_id, tab, view)
+    return await _session_detail(
+        request,
+        session_id,
+        tab=tab,
+        view=view,
+        page=parse_page(page),
+        page_size=parse_page_size(page_size, MESSAGES_PER_PAGE_DEFAULT),
+        focus=focus,
+    )
 
 
 @router.get("/sessions/{session_id}/cost/bloat", response_class=HTMLResponse)

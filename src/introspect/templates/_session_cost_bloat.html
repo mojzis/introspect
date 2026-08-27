@@ -87,7 +87,7 @@
                 <td style="text-align:right;">{{ "%.1f"|format(b.pct) }}%</td>
                 <td>
                     {% if b.top_uuid %}
-                    <a href="/sessions/{{ session_id }}?tab=messages#msg-{{ b.top_uuid }}">{{ b.top_cost }}</a>
+                    <a href="/sessions/{{ session_id }}?tab=messages&focus={{ b.top_uuid }}#msg-{{ b.top_uuid }}">{{ b.top_cost }}</a>
                     {% endif %}
                 </td>
             </tr>

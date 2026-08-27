@@ -1,3 +1,4 @@
+{% from '_pagination.html' import pager %}
 {# Render a potentially long text body with an Alpine-driven collapse wrapper.
    When ``needs_collapse`` is false the body renders as a plain <pre>; when
    true, a single <pre> toggles the ``msg-text-clamp`` class and a meta/banner
@@ -18,7 +19,31 @@
     {% endif %}
 {% endmacro %}
 
-<h2>Messages ({{ messages|length }})</h2>
+{# ``focus`` is deliberately absent from these links: it exists to jump to
+   one block, and keeping it would yank you back to that page on every
+   Prev/Next. #}
+{% macro messages_page_url(p, ps) -%}
+/sessions/{{ session_id }}?tab=messages&page={{ p }}&page_size={{ ps }}
+{%- endmacro %}
+
+{# The size picker is the only way back from a large page size, so the pager
+   renders whenever the session is big enough for the choice to matter — not
+   just when it actually spans pages. #}
+{% set show_pager = messages_pagination.total > messages_pagination.page_sizes[0] %}
+{% macro messages_pager() %}
+{% if show_pager %}
+{{ pager(messages_page_url, messages_pagination.page, messages_pagination.total_pages,
+         messages_pagination.page_size, messages_pagination.page_sizes) }}
+{% endif %}
+{% endmacro %}
+
+<h2>Messages ({{ "{:,}".format(messages_pagination.total) }})
+    {%- if messages_pagination.total_pages > 1 %}
+    <span style="font-weight:normal;font-size:0.85rem;color:#666;">showing {{ "{:,}".format(messages_pagination.start) }}–{{ "{:,}".format(messages_pagination.end) }}</span>
+    {%- endif %}
+</h2>
+
+{{ messages_pager() }}
 
 <div x-data="{
         hideThinking: localStorage.getItem('introspect.hideThinking') === '1',
@@ -116,3 +141,5 @@
     </div>
     {% endfor %}
 </div>
+
+{{ messages_pager() }}

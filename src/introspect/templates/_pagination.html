@@ -1,0 +1,35 @@
+{# Shared Prev/Next + page-size pager.
+
+   ``url`` is a caller-supplied macro taking ``(page, page_size)`` and
+   returning the href for that combination — every page builds its query
+   string differently (filters, sort, tab), but the control itself is the
+   same everywhere. Callers that have no size choice pass ``page_sizes=[]``.
+#}
+{% macro pager(url, page, total_pages, page_size, page_sizes) %}
+<div class="pagination">
+    {% if page > 1 %}
+    <a href="{{ url(page - 1, page_size) }}" hx-get="{{ url(page - 1, page_size) }}"
+       hx-target="#content" hx-push-url="true">Prev</a>
+    {% endif %}
+    <span class="current">Page {{ page }} of {{ total_pages }}</span>
+    {% if page < total_pages %}
+    <a href="{{ url(page + 1, page_size) }}" hx-get="{{ url(page + 1, page_size) }}"
+       hx-target="#content" hx-push-url="true">Next</a>
+    {% endif %}
+    {% if page_sizes %}
+    <span style="margin-left:1rem;font-size:0.85rem;color:#666;">
+        Show
+        {% for ps in page_sizes %}
+            {% if ps == page_size %}
+                <strong>{{ ps }}</strong>
+            {% else %}
+                <a href="{{ url(1, ps) }}" hx-get="{{ url(1, ps) }}"
+                   hx-target="#content" hx-push-url="true">{{ ps }}</a>
+            {% endif %}
+            {% if not loop.last %}/{% endif %}
+        {% endfor %}
+        per page
+    </span>
+    {% endif %}
+</div>
+{% endmacro %}
