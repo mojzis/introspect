@@ -29,6 +29,7 @@ from .conftest import (
     make_assistant_message,
     make_attachment_message,
     make_user_message,
+    write_codex_parent_nested_replay,
     write_codex_rollout,
     write_jsonl,
 )
@@ -829,6 +830,57 @@ def test_materialize_views_unions_claude_and_codex():
             }
             assert session_stats[SID] == ("anthropic", "claude-code")
             assert session_stats["codex-sess-001"] == ("openai", "codex")
+        finally:
+            conn.close()
+
+
+def test_materialize_views_deduplicates_codex_parent_replay():
+    """Copied parent responses disappear while unique subagent rows remain."""
+    session_id = "codex-replay-sess"
+
+    with tempfile.TemporaryDirectory() as tmp:
+        tmp_path = Path(tmp)
+        write_codex_parent_nested_replay(tmp_path, session_id)
+
+        conn = duckdb.connect(str(tmp_path / "test.duckdb"))
+        try:
+            materialize_views(
+                conn,
+                str(tmp_path / "projects" / "**" / "*.jsonl"),
+                codex_glob=codex_glob_pattern(tmp_path),
+            )
+
+            assistants = conn.execute(
+                """
+                SELECT message_id, is_sidechain
+                FROM assistant_message_costs
+                WHERE session_id = ?
+                ORDER BY message_id
+                """,
+                [session_id],
+            ).fetchall()
+            assert assistants == [("msg-child", True), ("msg-parent", False)]
+
+            counts = conn.execute(
+                """
+                SELECT assistant_messages, user_messages
+                FROM logical_sessions
+                WHERE session_id = ?
+                """,
+                [session_id],
+            ).fetchone()
+            assert counts == (2, 2)
+
+            messages = conn.execute(
+                """
+                SELECT text, is_sidechain
+                FROM session_messages_enriched
+                WHERE session_id = ? AND kind = 'agent_text'
+                ORDER BY timestamp, uuid
+                """,
+                [session_id],
+            ).fetchall()
+            assert messages == [("parent answer", False), ("subagent answer", True)]
         finally:
             conn.close()
 

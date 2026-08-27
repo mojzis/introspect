@@ -188,7 +188,7 @@ relations; every entry appears below. `search_corpus` is built separately by
 | Name | Key columns | What it is |
 |---|---|---|
 | `raw_data` | `filename`, `type`, `timestamp`, `sessionId`, `uuid`, `parentUuid`, `message`, `toolUseResult`, `attachment` | Direct JSONL records with an added `filename`, camelCase field names preserved. Claude only — Codex rows never appear here. The only relation that keeps `type='attachment'` records. |
-| `codex_raw_messages` | same shape as `raw_messages` | Transcoded Codex rollout messages. Always created; zero rows when Codex isn't requested or its glob matches nothing. |
+| `codex_raw_messages` | same shape as `raw_messages` | Transcoded Codex rollout messages. Native response-item IDs are deduplicated per logical session so parent-transcript replays do not repeat; rows without a native ID (including synthesized enrichment) are preserved. Always created; zero rows when Codex isn't requested or its glob matches nothing. |
 | `raw_messages` | `file_path`, `type`, `timestamp`, `session_id`, `uuid`, `parent_uuid`, `is_sidechain`, `cwd`, `role`, `model`, `message`, `tool_use_result`, `provider`, `harness` | User/assistant messages only (`type IN ('user','assistant')`), snake_cased, with `role`/`model` extracted. Claude `UNION ALL` Codex. Every derived relation except `session_context_loads` builds on this. |
 | `project_map` | `cwd`, `canonical_path`, `project_name` | `cwd` → canonical project, worktree-aware via `projects.py`. Empty in lazy-view mode. |
 | `logical_sessions` | `session_id`, `started_at`, `ended_at`, `duration`, `user_messages`, `assistant_messages`, `model`, `cwd`, `project`, `git_branch`, `entrypoint`, `provider`, `harness` | One row per session: timestamps, duration, message counts, provenance. |

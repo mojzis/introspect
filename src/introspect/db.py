@@ -220,6 +220,57 @@ def _codex_select_sql(day_filter: str = "") -> str:
     """  # noqa: S608
 
 
+def _codex_insert_sql(day_filter: str = "") -> str:
+    """Insert Codex rows, dropping repeated native response items.
+
+    Codex can replay a parent transcript into a nested rollout.  The rollout
+    transcoder gives every emitted row a per-file synthetic ``uuid``, so the
+    native OpenAI response-item id in ``message.id`` is the only stable
+    identity available across files.  Rows without a native id are retained:
+    they include user events and synthesized enrichment rows.
+    """
+    columns = ",\n            ".join(_RAW_MESSAGES_COLUMN_NAMES)
+    native_id = "json_extract_string(message, '$.id')"
+    existing_native_id = "json_extract_string(existing.message, '$.id')"
+    return f"""
+        INSERT INTO codex_raw_messages
+        WITH incoming AS (
+            SELECT
+                {columns},
+                {native_id} AS native_id
+            FROM ({_codex_select_sql(day_filter)})
+        ), deduplicated AS (
+            SELECT * EXCLUDE (row_number)
+            FROM (
+                SELECT
+                    incoming.*,
+                    ROW_NUMBER() OVER (
+                        PARTITION BY session_id, native_id
+                        ORDER BY timestamp, uuid
+                    ) AS row_number
+                FROM incoming
+                WHERE native_id IS NOT NULL
+                  AND native_id != uuid
+            )
+            WHERE row_number = 1
+            UNION ALL
+            SELECT * FROM incoming
+            WHERE native_id IS NULL OR native_id = uuid
+        )
+        SELECT {columns}
+        FROM deduplicated AS candidate
+        WHERE candidate.native_id IS NULL
+           OR candidate.native_id = candidate.uuid
+           OR NOT EXISTS (
+                SELECT 1
+                FROM codex_raw_messages AS existing
+                WHERE existing.session_id = candidate.session_id
+                  AND {existing_native_id} = candidate.native_id
+                  AND {existing_native_id} != existing.uuid
+           )
+    """  # noqa: S608
+
+
 # Empty-stub select matching the ``raw_messages`` schema, generated from the
 # same column table so it can never drift from ``_codex_select_sql``'s output
 # types. Used both as the empty Claude-side stub and as ``codex_raw_messages``'s
@@ -248,7 +299,7 @@ def _create_codex_raw_messages_table(
     conn.execute(f"CREATE TABLE codex_raw_messages AS {_EMPTY_RAW_MESSAGES_SELECT}")
     if codex_glob is None:
         return
-    insert_sql = f"INSERT INTO codex_raw_messages {_codex_select_sql(day_filter)}"
+    insert_sql = _codex_insert_sql(day_filter)
     for path in sorted(glob.glob(codex_glob, recursive=True)):  # noqa: PTH207
         try:
             rows = _transcode_codex_file(path)
