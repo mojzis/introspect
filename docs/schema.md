@@ -20,6 +20,16 @@ materialized into the DuckDB relations documented in
 - One file per session, one JSON object per line
 - Project slug is derived from the project path (e.g., `-home-user-introspect`)
 
+## Codex rollout metadata
+
+Codex rollout files also start with `session_meta`. Alongside the session ID and
+working directory, newer multi-agent runs can provide `agent_path`,
+`agent_nickname`, and `parent_thread_id`. Introspect stores those fields in
+`codex_session_metadata` for display and SQL exploration. Approval-review
+sidecars carry their real opening request inside a synthetic agent-history user
+message; Introspect extracts that first embedded user turn as the session title
+without changing the recorded message text.
+
 ## Top-Level Record Types (`type` field)
 
 ### 1. `queue-operation`

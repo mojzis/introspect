@@ -5,7 +5,13 @@ from pathlib import Path
 
 import pytest
 
-from ..conftest import codex_glob_pattern, write_codex_session
+from ..conftest import (
+    codex_glob_pattern,
+    make_assistant_message,
+    make_user_message,
+    write_codex_session,
+    write_jsonl,
+)
 from .conftest import SID, _patched_client
 
 CODEX_SID = "codex-sess-provider-001"
@@ -330,3 +336,34 @@ def test_sessions_provider_filter_survives_sort_and_page_change():
             response = client.get("/sessions?provider=openai&sort=started_at")
             assert response.status_code == 200
             assert "provider=openai" in response.text
+
+
+def test_sessions_marks_long_context_pricing():
+    """A session with a >272K GPT-5.6 request is visibly marked in the list."""
+    session_id = "long-context-session"
+    with tempfile.TemporaryDirectory() as tmp:
+        tmp_path = Path(tmp)
+        write_jsonl(
+            tmp_path,
+            session_id,
+            [
+                make_user_message(
+                    session_id, "user-1", None, "2026-08-27T10:00:00.000Z", "hi"
+                ),
+                make_assistant_message(
+                    session_id,
+                    "assistant-1",
+                    "user-1",
+                    "2026-08-27T10:00:01.000Z",
+                    [{"type": "text", "text": "hello"}],
+                    model="gpt-5.6-sol",
+                    msg_id="long-context-message",
+                    usage={"input_tokens": 272_001, "output_tokens": 1},
+                ),
+            ],
+        )
+        with _patched_client(tmp_path) as client:
+            response = client.get("/sessions")
+            assert response.status_code == 200
+            assert session_id in response.text
+            assert "long context" in response.text

@@ -17,6 +17,8 @@ from introspect.mcp.server import create_mcp_server
 from introspect.mcp.tools import (
     _SQL_CELL_MAX,
     _SQL_ROW_CAP,
+    _ModelSpend,
+    _render_cost_lines,
     cache_ttl_choice,
     describe_schema,
     expensive_sessions,
@@ -145,6 +147,298 @@ def test_get_session_not_found():
             result = get_session("nonexistent-session")
 
         assert "not found" in result
+
+
+COST_SID = "test-session-cost"
+
+# The JSONL loader infers its column set from the file, and ``raw_messages``
+# selects ``toolUseResult`` — so every fixture file needs at least one record
+# carrying it, even when the test doesn't care about tool results.
+_TOOL_RESULT_STUB = {"stdout": "", "stderr": ""}
+
+
+def _cost_report(lines: list[dict], session_id: str = COST_SID) -> str:
+    """Materialize ``lines`` into a throwaway DB and return get_session's output."""
+    with tempfile.TemporaryDirectory() as tmp:
+        tmp_path = Path(tmp)
+        write_jsonl(tmp_path, session_id, lines)
+        db_path = tmp_path / "cost.duckdb"
+        conn = duckdb.connect(str(db_path))
+        materialize_views(conn, glob_pattern(tmp_path))
+        conn.close()
+
+        with patch("introspect.mcp.tools.get_read_connection") as mock_conn:
+            mock_conn.return_value = connect_read_hardened(db_path)
+            return get_session(session_id)
+
+
+def _opening_user_message(session_id: str = COST_SID) -> dict:
+    return make_user_message(
+        session_id,
+        "u1",
+        None,
+        "2026-03-27T10:00:00.000Z",
+        "hi",
+        tool_use_result=_TOOL_RESULT_STUB,
+    )
+
+
+def test_get_session_token_and_cost_breakdown():
+    """get_session reports tokens, $ cost split, requests and per-model spend."""
+    result = _cost_report(
+        [
+            _opening_user_message(),
+            make_assistant_message(
+                COST_SID,
+                "a1",
+                "u1",
+                "2026-03-27T10:00:01.000Z",
+                [{"type": "text", "text": "hello"}],
+                model="claude-opus-4-6",
+                msg_id="msg-cost-1",
+                usage={
+                    "input_tokens": 1_000,
+                    "output_tokens": 2_000,
+                    "cache_read_input_tokens": 100_000,
+                    "cache_creation_input_tokens": 10_000,
+                    "cache_creation": {
+                        "ephemeral_5m_input_tokens": 10_000,
+                        "ephemeral_1h_input_tokens": 0,
+                    },
+                },
+            ),
+            make_assistant_message(
+                COST_SID,
+                "a2",
+                "a1",
+                "2026-03-27T10:00:02.000Z",
+                [{"type": "text", "text": "sub"}],
+                model="claude-haiku-4-5",
+                msg_id="msg-cost-2",
+                usage={
+                    "input_tokens": 500,
+                    "output_tokens": 1_000,
+                    "cache_read_input_tokens": 0,
+                    "cache_creation_input_tokens": 4_000,
+                    "cache_creation": {
+                        "ephemeral_5m_input_tokens": 0,
+                        "ephemeral_1h_input_tokens": 4_000,
+                    },
+                },
+                is_sidechain=True,
+            ),
+        ]
+    )
+
+    assert "--- Tokens & cost ---" in result
+    # opus-4-6: 1k in @ $5 + 2k out @ $25 + 100k read @ $0.50 + 10k 5m write
+    # @ $6.25 = 0.005 + 0.05 + 0.05 + 0.0625 = $0.1675
+    # haiku-4-5: 0.5k in @ $1 + 1k out @ $5 + 4k 1h write @ $2 = $0.0135
+    assert "Cost: $0.18" in result
+    assert "output $0.06" in result
+    assert "cache read $0.05" in result
+    assert "Tokens: 118,500 total" in result
+    assert "input 1,500" in result
+    assert "output 3,000" in result
+    assert "cache read 100,000" in result
+    assert "cache write 14,000" in result
+    assert "[5m 10,000 / 1h 4,000]" in result
+    assert "API requests: 2 (main 1 · subagent 1)" in result
+    assert "claude-opus-4-6 $0.17/1 req" in result
+    assert "claude-haiku-4-5 $0.01/1 req" in result
+
+
+def test_get_session_bills_legacy_cache_creation_per_row():
+    """A legacy usage record (no 5m/1h split) bills at the 5m write rate.
+
+    The fallback is applied per row, so a model mixing a modern record with a
+    legacy one still bills the legacy tokens — the failure mode of folding it
+    into a per-model aggregate instead.
+    """
+    result = _cost_report(
+        [
+            _opening_user_message(),
+            make_assistant_message(
+                COST_SID,
+                "a1",
+                "u1",
+                "2026-03-27T10:00:01.000Z",
+                [{"type": "text", "text": "modern"}],
+                model="claude-opus-4-6",
+                msg_id="msg-modern",
+                usage={
+                    "cache_creation_input_tokens": 100,
+                    "cache_creation": {
+                        "ephemeral_5m_input_tokens": 100,
+                        "ephemeral_1h_input_tokens": 0,
+                    },
+                },
+            ),
+            make_assistant_message(
+                COST_SID,
+                "a2",
+                "a1",
+                "2026-03-27T10:00:02.000Z",
+                [{"type": "text", "text": "legacy"}],
+                model="claude-opus-4-6",
+                msg_id="msg-legacy",
+                # Pre-TTL-split schema: a total with no per-tier breakdown.
+                usage={"cache_creation_input_tokens": 1_000_000},
+            ),
+        ]
+    )
+
+    # (100 + 1,000,000) tokens @ $6.25/M = $6.25 — not $0.000625.
+    assert "Cost: $6.25" in result
+    assert "cache write 1,000,100" in result
+    assert "[5m 1,000,100 / 1h 0]" in result
+
+
+def test_get_session_excludes_synthetic_messages():
+    """``<synthetic>`` placeholders are local, not API calls — not counted."""
+    result = _cost_report(
+        [
+            _opening_user_message(),
+            make_assistant_message(
+                COST_SID,
+                "a1",
+                "u1",
+                "2026-03-27T10:00:01.000Z",
+                [{"type": "text", "text": "hello"}],
+                model="claude-opus-4-6",
+                msg_id="msg-real",
+                usage={"input_tokens": 1_000, "output_tokens": 2_000},
+            ),
+            make_assistant_message(
+                COST_SID,
+                "a2",
+                "a1",
+                "2026-03-27T10:00:02.000Z",
+                [{"type": "text", "text": "[Request interrupted]"}],
+                model="<synthetic>",
+                msg_id="msg-synthetic",
+                usage={"input_tokens": 0, "output_tokens": 0},
+            ),
+        ]
+    )
+
+    assert "API requests: 1 (main 1 · subagent 0)" in result
+    assert "synthetic" not in result.split("--- Messages ---")[0]
+    # Single real model, nothing unpriced — no by-model line needed.
+    assert "By model:" not in result
+
+
+def test_get_session_flags_unpriced_model():
+    """An unknown model is marked so its $0 doesn't read as a cheap session."""
+    result = _cost_report(
+        [
+            _opening_user_message(),
+            make_assistant_message(
+                COST_SID,
+                "a1",
+                "u1",
+                "2026-03-27T10:00:01.000Z",
+                [{"type": "text", "text": "hello"}],
+                model="some-future-model-9",
+                msg_id="msg-unpriced-1",
+                usage={"input_tokens": 1_000, "output_tokens": 2_000},
+            ),
+        ]
+    )
+
+    assert "Cost: $0.00" in result
+    assert "some-future-model-9 $0.00/1 req [unpriced]" in result
+
+
+def test_get_session_omits_cost_block_without_usage():
+    """Assistant messages without ``usage`` print no cost block, not zeros."""
+    result = _cost_report(
+        [
+            _opening_user_message("no-usage"),
+            make_assistant_message(
+                "no-usage",
+                "a1",
+                "u1",
+                "2026-03-27T10:00:01.000Z",
+                [{"type": "text", "text": "hello"}],
+                msg_id="msg-no-usage-1",
+            ),
+        ],
+        session_id="no-usage",
+    )
+
+    assert "--- Tokens & cost ---" not in result
+    assert "--- Messages ---" in result
+
+
+def test_get_session_survives_a_missing_cost_view():
+    """A DB without the derived view still returns metadata and messages."""
+    with tempfile.TemporaryDirectory() as tmp:
+        tmp_path = Path(tmp)
+        db_path = _materialize_test_data(tmp_path)
+        conn = duckdb.connect(str(db_path))
+        conn.execute("DROP TABLE IF EXISTS assistant_message_costs")
+        conn.execute("DROP VIEW IF EXISTS assistant_message_costs")
+        conn.close()
+
+        with patch("introspect.mcp.tools.get_read_connection") as mock_conn:
+            mock_conn.return_value = connect_read_hardened(db_path)
+            result = get_session(SID)
+
+    assert f"Session: {SID}" in result
+    assert "--- Tokens & cost ---" not in result
+    assert "--- Messages ---" in result
+
+
+def test_render_cost_lines_totals_across_models():
+    """The rollup sums every model's counters into the header lines."""
+    lines = _render_cost_lines(
+        [
+            _ModelSpend(
+                model="claude-opus-5",
+                requests=3,
+                input_tokens=10,
+                output_tokens=20,
+                cache_read_tokens=30,
+                cache_write_5m=40,
+                output_usd=1.5,
+            ),
+            _ModelSpend(
+                model="claude-haiku-4-5",
+                requests=2,
+                sidechain_requests=2,
+                input_tokens=5,
+                cache_write_1h=5,
+                input_usd=0.25,
+            ),
+        ]
+    )
+    body = "\n".join(lines)
+
+    assert "Cost: $1.75  (input $0.25 · output $1.50" in body
+    assert "Tokens: 110 total  (input 15 · output 20 · cache read 30" in body
+    assert "cache write 45 [5m 40 / 1h 5]" in body
+    assert "API requests: 5 (main 3 · subagent 2)" in body
+    assert "By model: claude-opus-5 $1.50/3 req · claude-haiku-4-5 $0.25/2 req" in body
+
+
+def test_render_cost_lines_marks_sub_cent_costs():
+    """A real but sub-cent cost is distinguishable from an unpriced $0.00."""
+    lines = _render_cost_lines(
+        [
+            _ModelSpend(
+                model="claude-opus-5", requests=1, output_tokens=100, output_usd=0.004
+            )
+        ]
+    )
+
+    assert "Cost: <$0.01" in "\n".join(lines)
+
+
+def test_render_cost_lines_empty_without_spend():
+    """No models, or models with no tokens, render nothing."""
+    assert _render_cost_lines([]) == []
+    assert _render_cost_lines([_ModelSpend(model="claude-opus-5", requests=1)]) == []
 
 
 def test_tool_failures():
