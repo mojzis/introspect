@@ -21,6 +21,7 @@ reads is listed below; `tests/test_docs_drift.py` fails if `src/` grows an
 | `INTROSPECT_DB_THREADS` | half the CPU cores (min 1) | every read connection | DuckDB `threads` for the hardened read connection. |
 | `INTROSPECT_SQL_TIMEOUT_SECONDS` | `30` | `POST /api/query` | Wall-clock budget per HTTP SQL API query. Non-numeric or non-positive falls back to the default — the timeout cannot be switched off. |
 | `INTROSPECT_MCP_SQL_TIMEOUT_SECONDS` | `20` | MCP `run_sql` | Wall-clock budget per `run_sql` call. Same fallback rule. |
+| `INTROSPECT_DEBUG` | unset (off) | web app | Set to `1` (or `true` / `yes` / `on`) to include the traceback in the [error response](usage/web-ui.md#error-handling) shown in the browser. Ignored unless the bind is loopback, like the SQL API. `devserve` sets it; `serve` never does. Tracebacks are written to the server log either way — see [Security](security.md#http-boundary). |
 | `INTROSPECT_VERSION_CHECK` | unset (on) | update check | Set to `off` (or `0` / `false` / `no`) to disable the [update check](#update-check) — the network call and the nag. |
 | `INTROSPECT_VERSION_CHECK_INTERVAL` | `86400` | update check | Seconds between PyPI checks. Escape hatch for testing; a non-numeric or non-positive value falls back to the default. |
 

@@ -145,11 +145,20 @@ def clean_title(raw: str) -> str:
     return " ".join(detagged.split())
 
 
+def is_htmx(request: Request) -> bool:
+    """True when HTMX issued this request.
+
+    HTMX sets ``HX-Request`` on every request it makes. This is the single
+    place that header is interpreted — :func:`parent` picks a template with
+    it, and :mod:`introspect.api.errors` picks an error representation with
+    it, so the two can never disagree about what an HTMX request is.
+    """
+    return bool(request.headers.get("HX-Request"))
+
+
 def parent(request: Request) -> str:
     """Return the base template: full page for normal requests, partial for HTMX."""
-    if request.headers.get("HX-Request"):
-        return "partial.html"
-    return "base.html"
+    return "partial.html" if is_htmx(request) else "base.html"
 
 
 def conn(request: Request):

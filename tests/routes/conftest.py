@@ -221,11 +221,20 @@ def _write_sample_jsonl(tmp_dir: Path) -> Path:
 
 
 @contextmanager
-def _patched_client(tmp_path: Path, extra_env: dict[str, str] | None = None):
+def _patched_client(
+    tmp_path: Path,
+    extra_env: dict[str, str] | None = None,
+    *,
+    raise_server_exceptions: bool = True,
+):
     """Context manager that yields a TestClient with materialized test data.
 
     ``extra_env`` overlays additional environment variables read by the app
     lifespan (e.g. ``INTROSPECT_HOST`` to exercise the SQL API bind gate).
+
+    ``raise_server_exceptions=False`` lets a test assert on the 500 *response*
+    an unhandled exception produces instead of having it re-raised — see
+    :func:`tests.conftest.local_client`.
     """
     _write_sample_jsonl(tmp_path)
     db_path = tmp_path / "test.duckdb"
@@ -244,6 +253,6 @@ def _patched_client(tmp_path: Path, extra_env: dict[str, str] | None = None):
     }
     with (
         patch.dict(os.environ, env),
-        local_client(app) as client,
+        local_client(app, raise_server_exceptions=raise_server_exceptions) as client,
     ):
         yield client

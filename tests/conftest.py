@@ -410,9 +410,20 @@ def ttl_materialized(tmp_dir: Path, session_id: str, lines: list[dict]):
 LOOPBACK_BASE_URL = "http://127.0.0.1:8347"
 
 
-def local_client(app) -> TestClient:
-    """``TestClient`` with a loopback Host header."""
-    return TestClient(app, base_url=LOOPBACK_BASE_URL)
+def local_client(app, *, raise_server_exceptions: bool = True) -> TestClient:
+    """``TestClient`` with a loopback Host header.
+
+    ``raise_server_exceptions=False`` is what a real browser sees: Starlette's
+    ``ServerErrorMiddleware`` sends the 500 response *and then* re-raises, and
+    only tests that want to assert on that response need the re-raise
+    suppressed. Everything else keeps the default, so a genuine crash still
+    fails the test loudly instead of arriving as a 500 assertion.
+    """
+    return TestClient(
+        app,
+        base_url=LOOPBACK_BASE_URL,
+        raise_server_exceptions=raise_server_exceptions,
+    )
 
 
 def nested_type_sql(payload_chars: int) -> list[tuple[str, str]]:

@@ -1,0 +1,23 @@
+{#
+  Full-page error, for a failure on a request HTMX did not make (a typed URL,
+  a bookmark, a reload). Same information as the _error.html fragment, same
+  honest status code — only the framing differs.
+#}
+{% extends "base.html" %}
+
+{% block title %}{{ status_code }} {{ reason }} · Introspect{% endblock %}
+
+{% block content %}
+<div class="card error-page">
+    <h1>{{ status_code }} — {{ reason }}</h1>
+    <p>{{ message }}</p>
+    <p class="error-toast-meta">Request {{ request_id }}</p>
+    {% if traceback %}
+    <details class="error-toast-trace" open>
+        <summary>Traceback</summary>
+        <pre>{{ traceback }}</pre>
+    </details>
+    {% endif %}
+    <p><a href="/">Back to the dashboard</a></p>
+</div>
+{% endblock %}

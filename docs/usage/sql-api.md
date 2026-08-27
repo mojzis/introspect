@@ -56,7 +56,10 @@ than as one opaque object. When a cap stops the read or shortens a value,
 `"; "`-joined. It is not a paging signal: a result the cell cap clipped is
 complete row-wise, and re-querying returns the same thing — select narrower
 columns or `substr()` instead. A timeout, an out-of-memory, and a SQL error
-all return 400 with `{"error": ...}`.
+all return 400 with `{"error": ...}`. An unexpected server fault returns 500 in
+that same shape — the browser-facing
+[error handling](web-ui.md#error-handling) never applies to `/api/*`, which
+always answers JSON.
 
 The same validator and the same bounded executor back the MCP `run_sql` tool —
 see [the SQL guard](../architecture.md#read-only-sql-guard-sql_querypy) and

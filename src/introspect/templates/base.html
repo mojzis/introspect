@@ -7,6 +7,17 @@
     <link rel="icon" type="image/svg+xml" href="/favicon.ico">
     <link rel="manifest" href="/manifest.webmanifest">
     <meta name="theme-color" content="#1a1a2e">
+    {#
+      Project-wide HTMX response policy. HTMX's default leaves 4xx/5xx
+      unswapped, which is what makes a failed request look like a click that
+      did nothing. Marking [45].. as swap+error means the server's error
+      fragment (retargeted to #errors — see introspect.api.errors) actually
+      reaches the page, and htmx:responseError still fires for the responses
+      the server did not format. 204 and the 2xx/3xx rules are HTMX's own
+      defaults, restated because setting responseHandling replaces the list.
+      Must precede the htmx script tag: htmx reads this meta at load.
+    #}
+    <meta name="htmx-config" content='{"responseHandling":[{"code":"204","swap":false},{"code":"[23]..","swap":true},{"code":"[45]..","swap":true,"error":true}]}'>
     <script src="https://unpkg.com/htmx.org@2.0.4"></script>
     <script defer src="https://unpkg.com/alpinejs@3.14.8/dist/cdn.min.js"></script>
     <script src="https://cdn.plot.ly/plotly-3.5.0.min.js" charset="utf-8"></script>
@@ -86,6 +97,25 @@
         .tool-btn-count { background: #e8e8f0; color: #555; font-size: 0.75rem; padding: 0.1rem 0.4rem; border-radius: 10px; font-weight: 600; }
         .tool-btn-active .tool-btn-count { background: rgba(255,255,255,0.2); color: #fff; }
         .tool-btn-sm { font-size: 0.8rem; padding: 0.2rem 0.6rem; }
+        /* Error surface. Fixed and out of flow so a failure never reflows the
+           page underneath it; above #loading-overlay so it stays readable if
+           a second request is in flight. Errors are appended (HX-Reswap:
+           beforeend), so several stack. */
+        #errors { position: fixed; top: 1rem; right: 1rem; z-index: 1100; width: min(28rem, calc(100vw - 2rem)); max-height: calc(100vh - 2rem); overflow-y: auto; display: flex; flex-direction: column; gap: 0.5rem; pointer-events: none; }
+        /* :not(:has()) rather than :empty — a swap leaves whitespace text
+           nodes behind, which :empty would count as content forever. */
+        #errors:not(:has(.error-toast)) { display: none; }
+        .error-toast { pointer-events: auto; background: #fff; border-left: 4px solid #c00; border-radius: 0 6px 6px 0; padding: 0.7rem 0.9rem; box-shadow: 0 2px 8px rgba(0,0,0,0.18); font-size: 0.88rem; }
+        .error-toast-head { display: flex; align-items: baseline; gap: 0.5rem; color: #a00; }
+        .error-toast-head strong { flex: 1; min-width: 0; }
+        .error-toast-dismiss { background: none; border: none; color: #a00; font-size: 1.1rem; line-height: 1; padding: 0 0.2rem; cursor: pointer; }
+        .error-toast-dismiss:hover { background: none; color: #600; }
+        .error-toast-detail { margin: 0.3rem 0 0; word-break: break-word; }
+        .error-toast-meta { margin: 0.3rem 0 0; font-size: 0.72rem; color: #888; font-family: ui-monospace, SFMono-Regular, Menlo, monospace; }
+        .error-toast-trace { margin-top: 0.4rem; }
+        .error-toast-trace summary { cursor: pointer; color: #888; font-size: 0.78rem; }
+        .error-toast-trace pre { margin-top: 0.35rem; max-height: 18rem; overflow: auto; font-size: 0.75rem; color: #a44; }
+        .error-page .error-toast-trace pre { max-height: none; }
         #loading-overlay { display: none; position: fixed; top: 0; left: 0; right: 0; bottom: 0; background: rgba(245,245,245,0.7); z-index: 1000; justify-content: center; align-items: center; }
         #loading-overlay.active { display: flex; }
         .spinner { width: 36px; height: 36px; border: 3px solid #e0e0e0; border-top-color: #1a1a2e; border-radius: 50%; animation: spin 0.7s linear infinite; }
@@ -118,6 +148,10 @@
 </head>
 <body>
     <div id="loading-overlay"><div class="spinner"></div></div>
+    {# Every failed request lands here — server-rendered fragments via
+       HX-Retarget, client-built toasts via the listeners below. No aria-live
+       on the container: each toast is role="alert" and announces itself. #}
+    <div id="errors"></div>
     <nav>
         <a href="/" class="brand" hx-get="/" hx-target="#content" hx-push-url="true">Introspect</a>
         <a href="/" hx-get="/" hx-target="#content" hx-push-url="true">Dashboard</a>
@@ -152,6 +186,91 @@
         });
         document.addEventListener('htmx:historyRestore', function() {
             document.getElementById('loading-overlay').classList.remove('active');
+        });
+
+        // --- Error surface -------------------------------------------------
+        // Server-rendered failures arrive as a fragment retargeted to #errors
+        // (see introspect.api.errors), so nothing is needed for them here.
+        // These two listeners are the backstop for what the server could not
+        // format: a proxy or dev-server error page, and a request that never
+        // reached the server at all.
+        var errorContainer = document.getElementById('errors');
+
+        // Mirrors the markup in templates/_error.html — same classes, same
+        // dismiss hook. Keep the two in step.
+        function showErrorToast(title, detail) {
+            var toast = document.createElement('div');
+            toast.className = 'error-toast';
+            toast.setAttribute('role', 'alert');
+            var head = document.createElement('div');
+            head.className = 'error-toast-head';
+            var label = document.createElement('strong');
+            label.textContent = title;
+            var dismiss = document.createElement('button');
+            dismiss.type = 'button';
+            dismiss.className = 'error-toast-dismiss';
+            dismiss.setAttribute('data-error-dismiss', '');
+            dismiss.setAttribute('aria-label', 'Dismiss');
+            dismiss.innerHTML = '&times;';
+            head.appendChild(label);
+            head.appendChild(dismiss);
+            var body = document.createElement('p');
+            body.className = 'error-toast-detail';
+            // textContent, not innerHTML: the URL and any server text in here
+            // is untrusted input as far as this page is concerned.
+            body.textContent = detail;
+            toast.appendChild(head);
+            toast.appendChild(body);
+            errorContainer.appendChild(toast);
+        }
+
+        function requestPath(evt) {
+            var info = evt.detail && evt.detail.pathInfo;
+            return (info && (info.requestPath || info.finalRequestPath)) || '';
+        }
+
+        // htmx swaps 4xx/5xx by default under our responseHandling config,
+        // which is what gets the server's error fragment onto the page. But a
+        // response we did NOT format — a proxy 502, a middleware's plain-text
+        // 400, a tunnel's HTML error page — carries no HX-Retarget, so htmx
+        // would swap that foreign body straight into the element the request
+        // came from. That is the exact panel-wipe this policy promises never
+        // happens, so refuse the swap and let the toast below report it.
+        document.body.addEventListener('htmx:beforeSwap', function (evt) {
+            if (!evt.detail || !evt.detail.isError) return;
+            var xhr = evt.detail.xhr;
+            if (!(xhr && xhr.getResponseHeader('X-Introspect-Error-Rendered'))) {
+                evt.detail.shouldSwap = false;
+            }
+        });
+
+        document.body.addEventListener('htmx:responseError', function (evt) {
+            var xhr = evt.detail && evt.detail.xhr;
+            // The server formats its own error fragment and HTMX has already
+            // swapped it into #errors; a toast on top would double-report.
+            if (xhr && xhr.getResponseHeader('X-Introspect-Error-Rendered')) return;
+            var status = xhr ? xhr.status : '';
+            showErrorToast(
+                'Request failed' + (status ? ' (' + status + ')' : ''),
+                requestPath(evt)
+            );
+        });
+
+        document.body.addEventListener('htmx:sendError', function (evt) {
+            showErrorToast(
+                'Network error',
+                'Could not reach the server. ' + requestPath(evt)
+            );
+        });
+
+
+        // One delegated handler dismisses both the server-rendered toasts and
+        // the ones built above, so neither needs a script of its own.
+        errorContainer.addEventListener('click', function (evt) {
+            var button = evt.target.closest('[data-error-dismiss]');
+            if (!button) return;
+            var toast = button.closest('.error-toast');
+            if (toast) toast.remove();
         });
         document.addEventListener('htmx:afterSettle', function(evt) {
             // Only a swap into #content is a navigation. Panel swaps — the

@@ -291,6 +291,41 @@ now" button, and scope how much history is loaded with the window picker
 See [Configuration](../configuration.md) for the environment variables that
 control refresh behaviour.
 
+## Error handling
+
+Most of the UI is built from HTMX fragment swaps, and HTMX's documented default
+is to *not* swap a 4xx/5xx response — so without a policy a failed click looks
+like a click that did nothing. There is one project-wide policy instead of
+per-element attributes:
+
+- **Errors keep their status code.** A failure is never returned as a 200 with
+  error markup in the body. Whatever the browser, the logs and any monitoring
+  see, they see the same thing.
+- **HTMX requests get an error fragment swapped into `#errors`**, a fixed
+  container in the page layout. The response sets `HX-Retarget` and
+  `HX-Reswap: beforeend`, so the fragment is *appended* there and the element
+  the request came from is left untouched — a refresh that fails never wipes
+  the data you were reading. Errors stack, and each one is dismissable.
+- **Ordinary requests get the same information as a full page**, with the app
+  chrome intact so you can navigate away.
+- **Network failures and unformatted error responses** (a proxy 502, a dropped
+  connection) raise a toast in the same container, from the `htmx:responseError`
+  / `htmx:sendError` listeners in the page layout. A response the server did not
+  format is never swapped into the page at all, so a foreign error body cannot
+  overwrite a panel either.
+- **The machine endpoints are unaffected.** `/api/query`, `/api/schema` and
+  `/mcp` answer programs, not browsers, and keep returning JSON.
+
+Every error carries a short request id, and it appears in the server log
+alongside the same id. Unhandled exceptions are always logged with their full
+traceback; the traceback reaches the browser only when `INTROSPECT_DEBUG` is
+set *and* the server is bound to loopback (`devserve` sets the variable, `serve`
+does not) — see [Security](../security.md#http-boundary).
+
+A panel that renders a partial result — a chart that could not be built, a tab
+whose data is unavailable — is *not* a failed request: it renders an inline
+notice and the page stays a 200.
+
 ## What the web UI does not do
 
 - It is a **read-only** view of your logs. Nothing you do in the UI changes a

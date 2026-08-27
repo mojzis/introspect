@@ -19,6 +19,7 @@ from fastapi.responses import (
 )
 from fastapi.staticfiles import StaticFiles
 
+from introspect.api.errors import register_exception_handlers
 from introspect.api.routes import router
 from introspect.db import (
     DEFAULT_CODEX_GLOB,
@@ -154,6 +155,18 @@ async def lifespan(app: FastAPI):
 
 
 app = FastAPI(title="Introspect", lifespan=lifespan)
+
+# One place decides what a failed request looks like — an HTML fragment for
+# HTMX, a full page for a browser, JSON for the machine endpoints — always
+# with the real status code. See introspect.api.errors.
+#
+# ``host_guard`` and ``local_api_guard`` below keep their own representation
+# because they *return* a response rather than raising, so nothing routes them
+# through these handlers. Note the layering if that ever changes: the
+# ``Exception`` handler lives in Starlette's outermost ``ServerErrorMiddleware``
+# (a crash inside those middlewares does reach it), while the
+# ``HTTPException`` handler lives in ``ExceptionMiddleware``, inside them.
+register_exception_handlers(app)
 
 
 @app.middleware("http")
