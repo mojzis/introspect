@@ -136,14 +136,22 @@ cmd = "biston scan ."
 help = "Structural clone detection (advisory)"
 
 [tool.poe.tasks._check-parallel]
+# A bare `wait` returns only the LAST job's status, so a ruff or deptry
+# failure here used to exit 0 and `check` reported success over a red tool.
+# Collect the PIDs and wait on each one instead.
 shell = """
-  ruff check . &
-  ty check &
-  vulture src &
-  deptry . &
-  biston scan . &
-  (uvx pysentry-rs --compact . || true) &
-  wait
+  pids=()
+  ruff check . &                          pids+=($!)
+  ty check &                              pids+=($!)
+  vulture src &                           pids+=($!)
+  deptry . &                              pids+=($!)
+  biston scan . &                         pids+=($!)
+  (uvx pysentry-rs --compact . || true) & pids+=($!)
+  status=0
+  for pid in "${pids[@]}"; do
+    wait "$pid" || status=1
+  done
+  exit $status
 """
 interpreter = "bash"
 
