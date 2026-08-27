@@ -37,9 +37,10 @@ uv run biston scan --suggest .
 uv run biston overview .
 ```
 
-## Claude Code skills
+## Agentic skills
 
-Skills under `.claude/skills/` extend Claude Code when working in this repo:
+Skills under `.claude/skills/` extend the coding agent when working in this
+repo:
 
 | Skill | Purpose |
 |---|---|
@@ -49,6 +50,14 @@ Skills under `.claude/skills/` extend Claude Code when working in this repo:
 
 After finishing a change, run `/python-review` and then `/docs-review`, and
 apply every 🔴 Must Fix finding before marking the work complete.
+
+The same skills are available in Codex: `.agents/skills` is a symlink to
+`.claude/skills`, and Codex scans `.agents/skills` from the working directory
+up to the repo root, following symlinks. Add a skill once under
+`.claude/skills/` and both agents see it — `codex /skills` lists what Codex
+discovered, and `$` mentions one. `.codex/config.toml` sets
+`project_doc_fallback_filenames = ["CLAUDE.md"]`, so Codex reads the same
+project instructions as Claude Code rather than needing its own `AGENTS.md`.
 
 ## Worktrees
 
@@ -115,3 +124,42 @@ uv run mkdocs build --strict
 
 Pushing to `main` deploys the site to GitHub Pages via the
 `.github/workflows/docs.yml` workflow.
+
+## Releasing a new version
+
+Releases are cut from `main` with one task:
+
+```bash
+# Patch release (0.3.0 -> 0.3.1)
+uv run poe release
+
+# Minor or major — `level` is read from the environment, so it goes
+# *before* the command; `poe release level=minor` cuts a patch release.
+level=minor uv run poe release
+level=major uv run poe release
+```
+
+It runs `uv version --bump <level>` (updating `pyproject.toml` and `uv.lock`),
+commits everything tracked as `Release v<version>`, tags `v<version>`, and
+pushes the branch and the tag. Because the commit is a `git commit -am`, it
+sweeps up every modified tracked file — start from an up-to-date `main` with a
+clean tree and `uv run poe check` green.
+
+Pushing the tag triggers `.github/workflows/release.yml`, which builds the sdist
+and wheel with `uv build` and publishes them to PyPI as
+[`introspy`](https://pypi.org/project/introspy/) through the `pypi` deployment
+environment. Publishing uses PyPI trusted publishing (OIDC), so there is no API
+token to rotate — but the environment does need to approve the run if it is
+configured with reviewers.
+
+After the workflow finishes, confirm the new version is the one PyPI serves:
+
+```bash
+curl -s https://pypi.org/pypi/introspy/json | jq -r .info.version
+```
+
+Installed copies find out on their own: `version_check.py` asks PyPI for the
+latest version at most once a day and nags on stderr from the commands where
+that is harmless — `introspy mcp` stays silent so its stdio channel stays
+clean. See [update check](configuration.md#update-check) for the opt-out and
+the interval override.
