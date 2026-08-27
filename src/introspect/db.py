@@ -230,33 +230,10 @@ def _codex_insert_sql(day_filter: str = "") -> str:
     they include user events and synthesized enrichment rows.
     """
     columns = ",\n            ".join(_RAW_MESSAGES_COLUMN_NAMES)
-    native_id = "json_extract_string(message, '$.id')"
     existing_native_id = "json_extract_string(existing.message, '$.id')"
     return f"""
         INSERT INTO codex_raw_messages
-        WITH incoming AS (
-            SELECT
-                {columns},
-                {native_id} AS native_id
-            FROM ({_codex_select_sql(day_filter)})
-        ), deduplicated AS (
-            SELECT * EXCLUDE (row_number)
-            FROM (
-                SELECT
-                    incoming.*,
-                    ROW_NUMBER() OVER (
-                        PARTITION BY session_id, native_id
-                        ORDER BY timestamp, uuid
-                    ) AS row_number
-                FROM incoming
-                WHERE native_id IS NOT NULL
-                  AND native_id != uuid
-            )
-            WHERE row_number = 1
-            UNION ALL
-            SELECT * FROM incoming
-            WHERE native_id IS NULL OR native_id = uuid
-        )
+        WITH deduplicated AS ({_codex_incoming_sql(day_filter)})
         SELECT {columns}
         FROM deduplicated AS candidate
         WHERE candidate.native_id IS NULL
@@ -268,6 +245,56 @@ def _codex_insert_sql(day_filter: str = "") -> str:
                   AND {existing_native_id} = candidate.native_id
                   AND {existing_native_id} != existing.uuid
            )
+    """  # noqa: S608
+
+
+def _codex_incoming_sql(day_filter: str = "") -> str:
+    """Select one deterministic winner per native response id in one file."""
+    columns = ",\n                ".join(_RAW_MESSAGES_COLUMN_NAMES)
+    native_id = "json_extract_string(message, '$.id')"
+    return f"""
+        SELECT * EXCLUDE (row_number)
+        FROM (
+            SELECT
+                incoming.*,
+                ROW_NUMBER() OVER (
+                    PARTITION BY session_id, native_id
+                    ORDER BY timestamp, uuid
+                ) AS row_number
+            FROM (
+                SELECT
+                    {columns},
+                    {native_id} AS native_id
+                FROM ({_codex_select_sql(day_filter)})
+            ) AS incoming
+        )
+        WHERE native_id IS NULL
+           OR native_id = uuid
+           OR row_number = 1
+    """  # noqa: S608
+
+
+def _codex_delete_later_copies_sql(day_filter: str = "") -> str:
+    """Delete stored native-id rows beaten by an earlier incoming copy."""
+    existing_native_id = "json_extract_string(existing.message, '$.id')"
+    return f"""
+        WITH deduplicated AS ({_codex_incoming_sql(day_filter)})
+        DELETE FROM codex_raw_messages AS existing
+        USING (
+            SELECT session_id, native_id, timestamp, uuid
+            FROM deduplicated
+            WHERE native_id IS NOT NULL AND native_id != uuid
+        ) AS candidate
+        WHERE existing.session_id = candidate.session_id
+          AND {existing_native_id} = candidate.native_id
+          AND {existing_native_id} != existing.uuid
+          AND (
+              existing.timestamp > candidate.timestamp
+              OR (
+                  existing.timestamp = candidate.timestamp
+                  AND existing.uuid > candidate.uuid
+              )
+          )
     """  # noqa: S608
 
 
@@ -300,11 +327,19 @@ def _create_codex_raw_messages_table(
     if codex_glob is None:
         return
     insert_sql = _codex_insert_sql(day_filter)
+    delete_later_copies_sql = _codex_delete_later_copies_sql(day_filter)
     for path in sorted(glob.glob(codex_glob, recursive=True)):  # noqa: PTH207
         try:
             rows = _transcode_codex_file(path)
             if rows:
-                conn.execute(insert_sql, [rows])
+                conn.execute("BEGIN TRANSACTION")
+                try:
+                    conn.execute(delete_later_copies_sql, [rows])
+                    conn.execute(insert_sql, [rows])
+                except Exception:
+                    conn.execute("ROLLBACK")
+                    raise
+                conn.execute("COMMIT")
         except Exception:
             log.warning(
                 "Skipping unparseable Codex rollout file %s", path, exc_info=True

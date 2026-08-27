@@ -885,6 +885,70 @@ def test_materialize_views_deduplicates_codex_parent_replay():
             conn.close()
 
 
+def test_materialize_views_dedupes_codex_replay_by_timestamp_then_uuid():
+    """The earliest response copy wins even when its rollout filename sorts later."""
+    session_id = "codex-replay-order-sess"
+
+    with tempfile.TemporaryDirectory() as tmp:
+        tmp_path = Path(tmp)
+        later_copy = [
+            codex_record("session_meta", codex_session_meta(session_id)),
+            codex_record("turn_context", codex_turn_context("turn-later")),
+            codex_record(
+                "response_item",
+                {
+                    "type": "message",
+                    "role": "assistant",
+                    "id": "msg-replayed",
+                    "content": [{"type": "output_text", "text": "later copy"}],
+                },
+                timestamp="2026-08-20T11:00:00Z",
+            ),
+        ]
+        earlier_copy = [
+            codex_record(
+                "session_meta",
+                codex_session_meta(session_id, thread_source="subagent"),
+            ),
+            codex_record("turn_context", codex_turn_context("turn-earlier")),
+            codex_record(
+                "response_item",
+                {
+                    "type": "message",
+                    "role": "assistant",
+                    "id": "msg-replayed",
+                    "content": [{"type": "output_text", "text": "earlier copy"}],
+                },
+                timestamp="2026-08-20T10:00:00Z",
+            ),
+        ]
+        write_codex_rollout(tmp_path, session_id, later_copy, filename="01-later")
+        write_codex_rollout(tmp_path, session_id, earlier_copy, filename="02-earlier")
+
+        conn = duckdb.connect(str(tmp_path / "test.duckdb"))
+        try:
+            materialize_views(
+                conn,
+                str(tmp_path / "projects" / "**" / "*.jsonl"),
+                codex_glob=codex_glob_pattern(tmp_path),
+            )
+
+            replay = conn.execute(
+                """
+                SELECT
+                    json_extract_string(message, '$.content[0].text'),
+                    is_sidechain
+                FROM raw_messages
+                WHERE session_id = ?
+                  AND json_extract_string(message, '$.id') = 'msg-replayed'
+                """,
+                [session_id],
+            ).fetchall()
+            assert replay == [("earlier copy", True)]
+        finally:
+            conn.close()
+
+
 def test_materialize_views_unions_claude_and_codex_with_day_filter():
     """The day-filtered Codex select (``days > 0``, the production default via
     ``INTROSPECT_REFRESH_WINDOW``) still unions correctly. The Claude fixture's
