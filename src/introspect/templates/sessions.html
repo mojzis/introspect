@@ -114,7 +114,12 @@ page={{ kwargs.get("page", page) }}&page_size={{ kwargs.get("page_size", page_si
                 <td>{{ s.files_read_only }}</td>
                 <td>{{ s.files_outside }}</td>
                 <td>{% if s.commands %}{% for c in s.commands.split(', ') %}<span class="tool-btn tool-btn-sm" style="font-size:0.75rem;padding:0.1rem 0.4rem;margin:0.1rem;">{{ c }}</span>{% endfor %}{% endif %}</td>
-                <td style="white-space:nowrap;text-align:right;">{% if s.cost %}<a href="/sessions/{{ s.id }}?tab=cost" hx-get="/sessions/{{ s.id }}?tab=cost" hx-target="#content" hx-push-url="true">{{ s.cost }}</a>{% else %}—{% endif %}</td>
+                <td style="white-space:nowrap;text-align:right;">
+                    {% if s.cost %}<a href="/sessions/{{ s.id }}?tab=cost" hx-get="/sessions/{{ s.id }}?tab=cost" hx-target="#content" hx-push-url="true">{{ s.cost }}</a>{% else %}—{% endif %}
+                    {% if s.has_long_context %}
+                    <span class="tool-btn tool-btn-sm" title="One or more requests had more than 272K input tokens and used OpenAI long-context pricing" style="font-size:0.7rem;padding:0.1rem 0.35rem;margin-left:0.3rem;">long context</span>
+                    {% endif %}
+                </td>
                 <td>{{ s.model }}</td>
                 <td>{{ s.provider }}</td>
             </tr>

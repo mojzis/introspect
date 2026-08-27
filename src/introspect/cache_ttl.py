@@ -66,6 +66,7 @@ Assumptions, stated so they can be argued with
 
 from __future__ import annotations
 
+import logging
 from typing import TYPE_CHECKING, Any, NamedTuple
 
 from introspect.pricing import (
@@ -79,6 +80,9 @@ from introspect.pricing import (
 
 if TYPE_CHECKING:
     import duckdb
+
+
+log = logging.getLogger(__name__)
 
 # The two policies Claude Code can be configured with. 5m is Anthropic's
 # default ephemeral TTL (re-exported from pricing so there is one definition);
@@ -650,6 +654,15 @@ def cache_miss_event_rows(
     if timestamp_window is not None:
         clauses.append("timestamp >= ? AND timestamp < ?")
         params.extend(timestamp_window)
+    relation = db.execute(
+        "SELECT 1 FROM information_schema.tables WHERE table_name = 'cache_requests'"
+    ).fetchone()
+    if relation is None:
+        # A hot-reloaded server can retain a database materialized by an older
+        # release. Keep session details usable until the next materialization
+        # upgrades the derived schema.
+        log.warning("cache_requests is unavailable; cache-loss events are hidden")
+        return []
     rows = db.execute(
         f"""
         SELECT uuid, session_id, timestamp, gap_seconds, gap_bucket, model,

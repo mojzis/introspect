@@ -6,6 +6,7 @@ from contextlib import contextmanager
 from pathlib import Path
 from unittest.mock import patch
 
+import duckdb
 from fastapi.testclient import TestClient
 
 from introspect.api.main import app
@@ -185,12 +186,28 @@ def test_session_detail_returns_200():
         assert response.status_code == 200
 
 
+def test_session_detail_tolerates_a_database_missing_cache_requests():
+    """Older materialized databases should not turn every detail page into a 500."""
+    with tempfile.TemporaryDirectory() as tmp, _patched_client(Path(tmp)) as client:
+        with duckdb.connect(str(app.state.db_path)) as db:
+            db.execute("DROP TABLE cache_requests")
+
+        response = client.get(f"/sessions/{SID}")
+
+        assert response.status_code == 200
+        assert "Cache losses" not in response.text
+
+
 def test_session_detail_shows_user_messages():
     """Session detail page displays user messages."""
     with tempfile.TemporaryDirectory() as tmp, _patched_client(Path(tmp)) as client:
         response = client.get(f"/sessions/{SID}")
         assert response.status_code == 200
         assert "Hello, help me with tests" in response.text
+        assert (
+            '<span class="meta-label">Title</span> Hello, help me with tests'
+            in response.text
+        )
 
 
 def test_session_detail_omits_codex_parent_replay_but_keeps_subagent():

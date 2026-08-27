@@ -15,7 +15,8 @@ from introspect.cache_ttl import (
     SESSION_CACHE_TTL_BODY,
     TTL_OBSERVED_SQL,
 )
-from introspect.codex import transcode_rollout
+from introspect.codex import transcode_rollout_with_metadata
+from introspect.pricing import LONG_CONTEXT_REQUEST_SQL
 from introspect.projects import resolve_project_map
 from introspect.search import build_search_corpus
 from introspect.sql_fragments import (
@@ -184,7 +185,9 @@ _CODEX_ROW_STRUCT = (
 )
 
 
-def _transcode_codex_file(path: str) -> list[dict[str, Any]]:
+def _transcode_codex_file(
+    path: str,
+) -> tuple[list[dict[str, Any]], list[dict[str, str]]]:
     """Transcode one Codex rollout file into ``raw_messages``-shaped rows.
 
     ``message``/``tool_use_result`` are JSON-encoded here (rather than left
@@ -195,14 +198,14 @@ def _transcode_codex_file(path: str) -> list[dict[str, Any]]:
     for the ``::JSON`` cast in ``_codex_select_sql``. ``None`` stays ``None``
     so ``tool_use_result IS NULL`` still behaves like the Claude side.
     """
-    rows = transcode_rollout(path)
+    rows, metadata = transcode_rollout_with_metadata(path)
     for row in rows:
         row["message"] = json.dumps(row["message"])
         tool_use_result = row["tool_use_result"]
         row["tool_use_result"] = (
             None if tool_use_result is None else json.dumps(tool_use_result)
         )
-    return rows
+    return rows, metadata
 
 
 def _codex_select_sql(day_filter: str = "") -> str:
@@ -310,6 +313,64 @@ _EMPTY_RAW_MESSAGES_SELECT = (
     + "\n    WHERE FALSE"
 )
 
+_CODEX_SESSION_METADATA_COLUMNS = (
+    "session_id VARCHAR",
+    "title VARCHAR",
+    "agent_path VARCHAR",
+    "agent_nickname VARCHAR",
+    "parent_thread_id VARCHAR",
+)
+_CODEX_SESSION_METADATA_STRUCT = (
+    "STRUCT(" + ", ".join(_CODEX_SESSION_METADATA_COLUMNS) + ")[]"
+)
+
+
+def _merge_codex_session_metadata(
+    metadata: list[dict[str, str]],
+) -> list[dict[str, str]]:
+    """Keep the first nonempty display value per session and metadata field."""
+    merged: dict[str, dict[str, str]] = {}
+    for record in metadata:
+        session_id = record["session_id"]
+        current = merged.setdefault(
+            session_id,
+            {
+                "session_id": session_id,
+                "title": "",
+                "agent_path": "",
+                "agent_nickname": "",
+                "parent_thread_id": "",
+            },
+        )
+        for field in ("title", "agent_path", "agent_nickname", "parent_thread_id"):
+            if not current[field] and record[field]:
+                current[field] = record[field]
+    return list(merged.values())
+
+
+def _create_codex_session_metadata_table(
+    conn: duckdb.DuckDBPyConnection, metadata: list[dict[str, str]]
+) -> None:
+    """Materialize one Codex display-metadata row per logical session."""
+    columns = ", ".join(_CODEX_SESSION_METADATA_COLUMNS)
+    conn.execute(f"CREATE TABLE codex_session_metadata ({columns})")
+    if not metadata:
+        return
+    merged = _merge_codex_session_metadata(metadata)
+    conn.execute(
+        f"""
+        INSERT INTO codex_session_metadata
+        SELECT
+            session_id,
+            NULLIF(title, '') AS title,
+            NULLIF(agent_path, '') AS agent_path,
+            NULLIF(agent_nickname, '') AS agent_nickname,
+            NULLIF(parent_thread_id, '') AS parent_thread_id
+        FROM (SELECT unnest($1::{_CODEX_SESSION_METADATA_STRUCT}, recursive := true))
+        """,  # noqa: S608
+        [merged],
+    )
+
 
 def _create_codex_raw_messages_table(
     conn: duckdb.DuckDBPyConnection,
@@ -325,12 +386,15 @@ def _create_codex_raw_messages_table(
     """
     conn.execute(f"CREATE TABLE codex_raw_messages AS {_EMPTY_RAW_MESSAGES_SELECT}")
     if codex_glob is None:
+        _create_codex_session_metadata_table(conn, [])
         return
     insert_sql = _codex_insert_sql(day_filter)
     delete_later_copies_sql = _codex_delete_later_copies_sql(day_filter)
+    metadata: list[dict[str, str]] = []
     for path in sorted(glob.glob(codex_glob, recursive=True)):  # noqa: PTH207
         try:
-            rows = _transcode_codex_file(path)
+            rows, file_metadata = _transcode_codex_file(path)
+            metadata.extend(file_metadata)
             if rows:
                 conn.execute("BEGIN TRANSACTION")
                 try:
@@ -345,6 +409,7 @@ def _create_codex_raw_messages_table(
                 "Skipping unparseable Codex rollout file %s", path, exc_info=True
             )
             continue
+    _create_codex_session_metadata_table(conn, metadata)
 
 
 # Columns DuckDB sometimes infers as native UUID (when every sampled value
@@ -403,14 +468,19 @@ def get_read_connection(
     codex_glob: str | None = None,
 ) -> duckdb.DuckDBPyConnection:
     """Open materialized DB read-only, falling back to lazy views."""
+    needs_upgrade = False
     if db_path.exists():
         try:
             conn = duckdb.connect(str(db_path), read_only=True)
-            if _has_materialized_raw_messages(conn):
+            if _has_materialized_schema(conn):
                 return conn
+            needs_upgrade = _has_materialized_raw_table(conn)
             conn.close()
         except duckdb.Error:
             pass
+    if needs_upgrade:
+        ensure_materialized(db_path, jsonl_glob, codex_glob=codex_glob)
+        return duckdb.connect(str(db_path), read_only=True)
     return get_connection(db_path, jsonl_glob, codex_glob)
 
 
@@ -492,6 +562,7 @@ def materialize_views(
         "raw_messages",
         "raw_data",
         "codex_raw_messages",
+        "codex_session_metadata",
         "search_corpus",
         "materialize_meta",
     ):
@@ -617,7 +688,7 @@ def ensure_materialized(
             with contextlib.closing(
                 duckdb.connect(str(db_path), read_only=True)
             ) as probe:
-                if _has_materialized_raw_messages(probe):
+                if _has_materialized_schema(probe):
                     return read_last_materialized(probe)
         except duckdb.Error:
             # Fall through to rebuild — a corrupt or incompatible file will
@@ -650,8 +721,27 @@ def _column_exists(conn: duckdb.DuckDBPyConnection, table: str, column: str) -> 
     return row is not None
 
 
-def _has_materialized_raw_messages(conn: duckdb.DuckDBPyConnection) -> bool:
-    """True when ``raw_messages`` exists as a base table in ``conn``."""
+def _has_materialized_schema(conn: duckdb.DuckDBPyConnection) -> bool:
+    """True when the materialized schema has the required support relations.
+
+    ``raw_messages`` alone used to identify a usable on-disk database.  That
+    lets databases made before cache-TTL and Codex-title support pass the
+    probe, even though derived views now require ``cache_requests`` and
+    ``codex_session_metadata``. Rebuild those databases on their next CLI use
+    rather than treating an incomplete schema as current.
+    """
+    row = conn.execute(
+        "SELECT 1 FROM information_schema.tables "
+        "WHERE table_name IN "
+        "('raw_messages', 'cache_requests', 'codex_session_metadata') "
+        "AND table_type = 'BASE TABLE' "
+        "GROUP BY table_type HAVING COUNT(*) = 3"
+    ).fetchone()
+    return row is not None
+
+
+def _has_materialized_raw_table(conn: duckdb.DuckDBPyConnection) -> bool:
+    """True when ``raw_messages`` is a table from an older materialization."""
     row = conn.execute(
         "SELECT 1 FROM information_schema.tables "
         "WHERE table_name = 'raw_messages' AND table_type = 'BASE TABLE'"
@@ -1152,11 +1242,12 @@ def _create_derived_views(
         """,
     )
 
-    # Session titles: first meaningful user prompt per session
+    # Session titles: the original request for Codex approval sidecars when
+    # available, otherwise the first meaningful main-conversation prompt.
     _make(
         "session_titles",
         """
-        SELECT session_id, first_prompt FROM (
+        WITH first_prompts AS (
             SELECT
                 session_id,
                 COALESCE(
@@ -1168,6 +1259,7 @@ def _create_derived_views(
                 ) AS rn
             FROM raw_messages
             WHERE type = 'user' AND role = 'user'
+              AND NOT COALESCE(is_sidechain, FALSE)
               AND json_extract_string(
                   message, '$.content[0].type'
               ) IS DISTINCT FROM 'tool_result'
@@ -1186,7 +1278,28 @@ def _create_derived_views(
                   json_extract_string(message, '$.content'),
                   ''
               ) NOT LIKE '<local-command-caveat>%'
-        ) sub WHERE rn = 1
+              AND COALESCE(
+                  json_extract_string(message, '$.content[0].text'),
+                  json_extract_string(message, '$.content'),
+                  ''
+              ) NOT LIKE '<environment_context>%'
+              AND COALESCE(
+                  json_extract_string(message, '$.content[0].text'),
+                  json_extract_string(message, '$.content'),
+                  ''
+              ) NOT LIKE 'The following is the Codex agent history%'
+        )
+        SELECT
+            ls.session_id,
+            COALESCE(
+                NULLIF(csm.title, ''),
+                fp.first_prompt,
+                NULLIF(csm.agent_path, ''),
+                NULLIF(csm.agent_nickname, '')
+            ) AS first_prompt
+        FROM logical_sessions ls
+        LEFT JOIN first_prompts fp ON fp.session_id = ls.session_id AND fp.rn = 1
+        LEFT JOIN codex_session_metadata csm ON csm.session_id = ls.session_id
         """,
     )
 
@@ -1385,7 +1498,8 @@ _SESSION_STATS_BODY = f"""
         COALESCE(fr_agg.files_outside, 0) AS files_outside,
         fp.first_prompt,
         cmd.commands,
-        sc.cost_usd
+        sc.cost_usd,
+        COALESCE(lc.has_long_context, FALSE) AS has_long_context
     FROM logical_sessions ls
     LEFT JOIN session_titles fp ON ls.session_id = fp.session_id
     LEFT JOIN {TOOL_COUNTS_SUBQUERY} ON ls.session_id = tc.session_id
@@ -1393,6 +1507,11 @@ _SESSION_STATS_BODY = f"""
     LEFT JOIN {FILE_WRITES_SUBQUERY} ON ls.session_id = fw_agg.session_id
     LEFT JOIN {COMMAND_LIST_SUBQUERY} ON ls.session_id = cmd.session_id
     LEFT JOIN {SESSION_COST_SUBQUERY} ON ls.session_id = sc.session_id
+    LEFT JOIN (
+        SELECT session_id, BOOL_OR({LONG_CONTEXT_REQUEST_SQL}) AS has_long_context
+        FROM assistant_message_costs
+        GROUP BY session_id
+    ) lc ON ls.session_id = lc.session_id
 """  # noqa: S608
 
 

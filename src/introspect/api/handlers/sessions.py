@@ -25,6 +25,7 @@ from ._helpers import (
     SESSIONS_SORT_COLS,
     SESSIONS_SORT_DEFAULT,
     build_cost_attribution_sql,
+    clean_title,
     conn,
     ensure_chart_template,
     fetch_token_usage,
@@ -678,6 +679,7 @@ def _aggregate_bloat(rows: list[tuple]) -> tuple[dict, dict]:
             uuid,
             is_side,
             model,
+            input_tokens,
             cc_total,
             cc_5m,
             cc_1h,
@@ -695,6 +697,7 @@ def _aggregate_bloat(rows: list[tuple]) -> tuple[dict, dict]:
             eff_5m = cc_total
         cost = compute_cost_usd(
             model=model,
+            input_tokens=int(input_tokens or 0),
             cache_creation_5m=eff_5m,
             cache_creation_1h=eff_1h,
         )
@@ -819,6 +822,7 @@ def _build_cost_context(
             row[1],  # uuid
             row[3],  # is_sidechain
             row[4],  # model
+            row[5],  # input_tokens
             row[8],  # cc_total
             row[9],  # cache_creation_5m
             row[10],  # cache_creation_1h
@@ -1675,6 +1679,10 @@ async def session_detail(
     """,
         [session_id],
     ).fetchone()
+    title_row = db.execute(
+        "SELECT first_prompt FROM session_titles WHERE session_id = ?", [session_id]
+    ).fetchone()
+    session_title = clean_title(title_row[0] or "") if title_row else ""
 
     token_usage = fetch_token_usage(db, session_id=session_id)
 
@@ -1791,6 +1799,7 @@ async def session_detail(
             "parent": parent(request),
             "session": session_info,
             "session_id": session_id,
+            "session_title": session_title,
             "messages": parsed_messages,
             "token_usage": token_usage,
             "tool_summary": tool_summary,
