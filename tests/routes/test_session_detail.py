@@ -6,12 +6,11 @@ from contextlib import contextmanager
 from pathlib import Path
 from unittest.mock import patch
 
-from fastapi.testclient import TestClient
-
 from introspect.api.main import app
 
 from ..conftest import (
     glob_pattern,
+    local_client,
     make_assistant_message,
     make_user_message,
     write_jsonl,
@@ -46,7 +45,7 @@ def _cache_loss_client(tmp_path: Path, *, gap_minutes: int = 6):
                 "INTROSPECT_DAYS": "0",
             },
         ),
-        TestClient(app) as client,
+        local_client(app) as client,
     ):
         yield client
 
@@ -169,7 +168,7 @@ def _tweak_client(tmp_path: Path):
                 "INTROSPECT_DAYS": "0",
             },
         ),
-        TestClient(app) as client,
+        local_client(app) as client,
     ):
         yield client
 

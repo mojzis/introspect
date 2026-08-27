@@ -2,13 +2,20 @@
 
 from __future__ import annotations
 
+from dataclasses import replace
 from datetime import datetime
 from typing import cast, get_args
 
 import duckdb
 
 from introspect.cache_ttl import compare_ttl
-from introspect.db import DEFAULT_CODEX_GLOB, DEFAULT_DB_PATH, get_read_connection
+from introspect.db import (
+    DEFAULT_CODEX_GLOB,
+    DEFAULT_DB_PATH,
+    configured_memory_limit,
+    connect_read_hardened,
+    get_read_connection,
+)
 from introspect.mcp import refresh_bridge
 from introspect.query_templates import (
     QUERY_TEMPLATES,
@@ -29,19 +36,27 @@ from introspect.sql_fragments import (
     session_cost_subquery_filtered,
 )
 from introspect.sql_query import (
+    CELL_TRUNCATION_MARKER,
+    MCP_BUDGET,
+    MCP_SQL_CELL_CAP,
     MCP_SQL_ROW_CAP,
+    SqlTimeoutError,
     clamp_row_limit,
+    execute_bounded,
     validate_read_only_sql,
-    wrap_with_row_cap,
 )
 
 _VALID_ROLES = {"user", "assistant"}
 # Derived from the QueryTemplate.kind Literal so the two can't drift.
 _VALID_TEMPLATE_KINDS: frozenset[str] = frozenset(get_args(TemplateKind))
 
-# Max characters per cell in run_sql output; long values (e.g. tool_input JSON
-# blobs) are truncated so one wide row doesn't blow up the response.
-_SQL_CELL_MAX = 200
+# Max characters per rendered cell in run_sql output. Deliberately one marker
+# wider than ``MCP_SQL_CELL_CAP``: ``execute_bounded`` has already clipped
+# every over-long *string* to ``cell_cap`` + CELL_TRUNCATION_MARKER, and a
+# ceiling equal to ``cell_cap`` would re-clip all of them and eat the marker.
+# What is left for this clip is everything ``str()`` widens on the way to the
+# table — lists, structs, blobs, timestamps.
+_SQL_CELL_MAX = MCP_SQL_CELL_CAP + len(CELL_TRUNCATION_MARKER)
 # Hard cap on run_sql rows regardless of caller's `limit` argument.
 # Re-exported alias for tests/back-compat — canonical value lives in sql_query.
 _SQL_ROW_CAP = MCP_SQL_ROW_CAP
@@ -234,8 +249,15 @@ def recent_sessions(n: int = 10) -> str:
         conn.close()
 
 
-def _format_rows(columns: list[str], rows: list[tuple]) -> str:
-    """Format a result set as an aligned text table with truncated cells."""
+def _format_rows(
+    columns: list[str], rows: list[tuple], footnote: str | None = None
+) -> str:
+    """Format a result set as an aligned text table with truncated cells.
+
+    String cells are already clipped by :func:`execute_bounded`; the clip here
+    is the backstop for everything else DuckDB hands back (lists, structs,
+    blobs) once ``str()`` has widened it.
+    """
     if not rows:
         return f"(0 rows)\ncolumns: {', '.join(columns)}"
 
@@ -258,55 +280,74 @@ def _format_rows(columns: list[str], rows: list[tuple]) -> str:
     header = render(columns)
     sep = "-+-".join("-" * w for w in widths)
     body = "\n".join(render(r) for r in str_rows)
-    return f"{header}\n{sep}\n{body}\n({len(rows)} rows)"
+    tail = f"\n{footnote}" if footnote else ""
+    return f"{header}\n{sep}\n{body}\n({len(rows)} rows){tail}"
+
+
+def _run_sql_error(exc: Exception) -> str:
+    """Render a `run_sql` execution failure as tool output.
+
+    Out-of-memory gets its own wording naming the configured budget: the
+    engine raises it cleanly (the process survives), so the useful thing to
+    say is what the query was allowed to use.
+    """
+    if isinstance(exc, SqlTimeoutError):
+        return f"Error: {exc}"
+    if isinstance(exc, duckdb.OutOfMemoryException):
+        return (
+            f"Error: query exceeded the {configured_memory_limit()} memory limit: {exc}"
+        )
+    return f"SQL error ({type(exc).__name__}): {exc}"
 
 
 def run_sql(sql: str, limit: int = 100) -> str:
-    """Execute a read-only SELECT / WITH query against the introspect DB.
+    """Execute a read-only SELECT query against the introspect DB.
 
-    Only single SELECT or WITH statements are permitted; write operations,
-    ATTACH, PRAGMA, INSTALL, LOAD, COPY, and multi-statement scripts are
-    rejected. Use `describe_schema` to discover available views and columns.
+    The statement is parsed by DuckDB and must be exactly one SELECT (``WITH``
+    and DuckDB's FROM-first form count as SELECT). Writes, ATTACH, PRAGMA,
+    SET, INSTALL, LOAD, COPY and multi-statement scripts are rejected, as are
+    functions that read outside the database (``read_csv``, ``read_text``,
+    ``glob``, ``sqlite_scan``, …). The connection itself has filesystem,
+    network and extension access disabled, so those are refused by the engine
+    too. Use `describe_schema` to discover available views and columns.
 
-    Results are capped at `limit` rows (max 500). The cap is pushed into
-    the query planner as an outer LIMIT so DuckDB doesn't materialize more
-    than the cap before the tool fetches rows. Long cell values are
-    truncated. Returns an aligned text table.
+    Bounded on five axes: `limit` rows (max 500, pushed into the planner as an
+    outer LIMIT), 64 KB of total output, 200 characters per cell, 8 KB of SQL
+    text, and a 20 s wall clock. A result stopped by one of those says so on
+    the last line. Returns an aligned text table.
     """
-    error = validate_read_only_sql(sql)
+    error = validate_read_only_sql(sql, max_bytes=MCP_BUDGET.max_sql_bytes)
     if error:
         return f"Error: {error}"
 
-    capped_limit = clamp_row_limit(limit, _SQL_ROW_CAP)
-
-    # Fresh strict read-only connection — do NOT route through
+    # Fresh hardened read-only connection — do NOT route through
     # get_read_connection(), which silently falls back to a writable
-    # connection when the materialized DB file is missing.
+    # connection over lazy JSONL views when the materialized DB is missing.
     if not DEFAULT_DB_PATH.exists():
         return (
             f"Error: materialized DB not found at {DEFAULT_DB_PATH}. "
             "Start `introspect serve` once to materialize views."
         )
     try:
-        conn = duckdb.connect(str(DEFAULT_DB_PATH), read_only=True)
+        conn = connect_read_hardened(DEFAULT_DB_PATH)
     except duckdb.Error as exc:
         return f"Error opening DB ({type(exc).__name__}): {exc}"
 
-    # Wrap the user query so the row cap is applied by the planner, not
-    # just by fetchmany. Safe because the inner SQL has already passed the
-    # read-only validator and `capped_limit` is a clamped int.
-    wrapped = wrap_with_row_cap(sql, capped_limit)
-
     try:
-        try:
-            cursor = conn.execute(wrapped)
-        except duckdb.Error as exc:
-            return f"SQL error ({type(exc).__name__}): {exc}"
-        columns = [d[0] for d in (cursor.description or [])]
-        rows = cursor.fetchall()
-        return _format_rows(columns, rows)
+        result = execute_bounded(
+            conn,
+            sql,
+            replace(MCP_BUDGET, row_cap=clamp_row_limit(limit, _SQL_ROW_CAP)),
+        )
+    except (SqlTimeoutError, duckdb.Error) as exc:
+        return _run_sql_error(exc)
     finally:
         conn.close()
+
+    footnote = (
+        f"truncated: hit the {result.truncation_reason}" if result.truncated else None
+    )
+    return _format_rows(result.columns, result.rows, footnote)
 
 
 def describe_schema() -> str:

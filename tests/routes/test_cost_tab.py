@@ -6,12 +6,11 @@ import tempfile
 from pathlib import Path
 from unittest.mock import patch
 
-from fastapi.testclient import TestClient
-
 from introspect.api.main import app
 
 from ..conftest import (
     glob_pattern,
+    local_client,
     make_assistant_message,
     make_user_message,
     write_jsonl,
@@ -62,7 +61,7 @@ def test_session_cost_dedup():
                     "INTROSPECT_DAYS": "0",
                 },
             ),
-            TestClient(app) as client,
+            local_client(app) as client,
         ):
             response = client.get(f"/sessions/{sid}?tab=cost")
             assert response.status_code == 200
@@ -153,7 +152,7 @@ def test_session_cost_bloat_attribution():
                     "INTROSPECT_DAYS": "0",
                 },
             ),
-            TestClient(app) as client,
+            local_client(app) as client,
         ):
             response = client.get(f"/sessions/{sid}?tab=cost")
             assert response.status_code == 200
@@ -186,7 +185,7 @@ def test_session_cost_subagent_attribution():
                     "INTROSPECT_DAYS": "0",
                 },
             ),
-            TestClient(app) as client,
+            local_client(app) as client,
         ):
             response = client.get(f"/sessions/{sid}?tab=cost")
             assert response.status_code == 200
@@ -325,7 +324,7 @@ def test_session_cost_chart_serializes_uuid_columns():
                     "INTROSPECT_DAYS": "0",
                 },
             ),
-            TestClient(app) as client,
+            local_client(app) as client,
         ):
             response = client.get(f"/sessions/{sid}?tab=cost")
             assert response.status_code == 200

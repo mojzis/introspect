@@ -4,7 +4,10 @@ import contextlib
 import glob
 import json
 import logging
+import os
+import threading
 from datetime import UTC, datetime
+from functools import cache
 from pathlib import Path
 from typing import Any
 
@@ -311,15 +314,294 @@ def _create_raw_messages_union(
     """  # noqa: S608
 
 
+# --- Hardened read connection -------------------------------------------------
+#
+# The engine configuration below — not the SQL text validator in
+# ``introspect.sql_query`` — is the primary boundary for the ad-hoc SQL
+# surface (``POST /api/query`` and the MCP ``run_sql`` tool). See
+# ``docs/security.md`` for the threat model.
+
+# Startup-only options: DuckDB accepts these in ``connect(config=...)`` but
+# ``memory_limit`` / ``threads`` can also be re-SET later, which is exactly why
+# ``lock_configuration`` is issued last.
+_MEMORY_LIMIT_CEILING_BYTES = 2 * 1024**3
+_MEMORY_LIMIT_FLOOR_BYTES = 256 * 1024**2
+_MEMORY_LIMIT_FRACTION = 0.25
+# Fallback when the OS won't tell us how much RAM is free.
+_MEMORY_LIMIT_FALLBACK_BYTES = 512 * 1024**2
+_MAX_TEMP_DIRECTORY_SIZE = "1GB"
+
+# Access settings, issued in this order after ``LOAD fts`` and before
+# ``lock_configuration``. Every one of these takes something *away*; a
+# performance knob does not belong in this tuple (``preserve_insertion_order``
+# is a connect-time option in ``_read_config`` for exactly that reason).
+_HARDENING_SETTINGS: tuple[tuple[str, str], ...] = (
+    # Blocks read_csv / read_text / read_blob / read_json / glob / COPY TO /
+    # ATTACH / httpfs — every filesystem and network escape from a SELECT.
+    ("enable_external_access", "false"),
+    ("allow_community_extensions", "false"),
+    ("allow_unsigned_extensions", "false"),
+    ("autoinstall_known_extensions", "false"),
+    ("autoload_known_extensions", "false"),
+    ("allow_persistent_secrets", "false"),
+)
+
+
+def _available_ram_bytes() -> int | None:
+    """Best-effort "RAM we could use right now", or None if unknowable.
+
+    Prefers Linux's ``MemAvailable`` (accounts for reclaimable page cache);
+    falls back to ``SC_AVPHYS_PAGES`` where ``sysconf`` exposes it (macOS,
+    BSDs). Returns None rather than guessing so the caller can apply an
+    explicit fallback.
+    """
+    meminfo = Path("/proc/meminfo")
+    try:
+        for line in meminfo.read_text().splitlines():
+            if line.startswith("MemAvailable:"):
+                return int(line.split()[1]) * 1024
+    except (OSError, ValueError, IndexError):
+        pass
+    try:
+        return os.sysconf("SC_PAGE_SIZE") * os.sysconf("SC_AVPHYS_PAGES")
+    except (ValueError, OSError, AttributeError):
+        return None
+
+
+def _default_memory_limit() -> str:
+    """DuckDB ``memory_limit`` string: ~25% of available RAM, capped at 2GB."""
+    available = _available_ram_bytes()
+    raw = (
+        int(available * _MEMORY_LIMIT_FRACTION)
+        if available
+        else _MEMORY_LIMIT_FALLBACK_BYTES
+    )
+    clamped = max(_MEMORY_LIMIT_FLOOR_BYTES, min(raw, _MEMORY_LIMIT_CEILING_BYTES))
+    return f"{clamped // (1024 * 1024)}MB"
+
+
+def _default_threads() -> int:
+    """At most half the cores, never fewer than one."""
+    cores = os.cpu_count() or 1
+    return max(1, cores // 2)
+
+
+# Mirrors the value type ``duckdb.connect(config=...)`` accepts. Spelled out
+# so the memoized dict is assignable to it — a bare ``dict[str, str]`` is not,
+# because the parameter's value type is a union and dicts are invariant.
+DuckDBConfig = dict[str, "str | bool | int | float | list[str]"]
+
+
+def _memory_limit_setting() -> str:
+    """``INTROSPECT_DB_MEMORY_LIMIT`` if it parses, else the derived default.
+
+    An unusable value warns and falls back rather than propagating: this
+    config is applied in the request middleware, so a typo would otherwise
+    turn every page into a 500 with nothing naming the variable.
+    """
+    override = os.environ.get("INTROSPECT_DB_MEMORY_LIMIT", "").strip()
+    if not override:
+        return _default_memory_limit()
+    try:
+        with contextlib.closing(
+            duckdb.connect(":memory:", config={"memory_limit": override})
+        ):
+            return override
+    except duckdb.Error as exc:
+        log.warning(
+            "Ignoring INTROSPECT_DB_MEMORY_LIMIT=%r (%s); using %s.",
+            override,
+            exc,
+            default := _default_memory_limit(),
+        )
+        return default
+
+
+def _threads_setting() -> str:
+    """``INTROSPECT_DB_THREADS`` if it is a positive integer, else the default."""
+    override = os.environ.get("INTROSPECT_DB_THREADS", "").strip()
+    if not override:
+        return str(_default_threads())
+    try:
+        if (value := int(override)) > 0:
+            return str(value)
+    except ValueError:
+        pass
+    log.warning(
+        "Ignoring INTROSPECT_DB_THREADS=%r (want a positive integer); using %d.",
+        override,
+        default := _default_threads(),
+    )
+    return str(default)
+
+
+@cache
+def _read_config(db_path_str: str) -> DuckDBConfig:
+    """Frozen ``connect(config=...)`` mapping for one database path.
+
+    Memoized because DuckDB refuses a second connection to a file whose
+    existing instance was opened with a *different* configuration
+    (``ConnectionException: Can't open a connection to same database file
+    with a different configuration than existing connections``). The
+    memory limit is derived from live RAM, so recomputing it per request
+    would eventually produce a different string and break every concurrent
+    caller.
+
+    Pure: :func:`connect_read_hardened` creates the temp directory, so the
+    cached value has no filesystem side effect to repeat or skip.
+    """
+    return {
+        "memory_limit": _memory_limit_setting(),
+        "threads": _threads_setting(),
+        "max_temp_directory_size": _MAX_TEMP_DIRECTORY_SIZE,
+        # Not a hardening setting — a memory one. DuckDB keeps input order for
+        # un-``ORDER BY``-ed results by default, which costs memory the read
+        # path has no use for: every relation the UI shows is explicitly
+        # ordered. Set at connect time rather than in _HARDENING_SETTINGS so
+        # that tuple stays "things this connection may not do".
+        "preserve_insertion_order": "false",
+        "temp_directory": _temp_directory(db_path_str),
+    }
+
+
+def _temp_directory(db_path_str: str) -> str:
+    """Where DuckDB may spill, next to the database file itself."""
+    return str(Path(db_path_str).parent / "duckdb-tmp")
+
+
+# Set once a network ``INSTALL fts`` has been tried and failed. Connections
+# are per-request and DuckDB drops an instance once its last connection
+# closes, so ``_load_fts`` runs again on the next request — without this flag
+# a machine with no extension and no network would pay the DNS timeout
+# (~80s) on *every* page load, not once.
+_fts_install_failed: list[bool] = [False]
+
+
+def _try_load_fts(conn: duckdb.DuckDBPyConnection) -> bool:
+    """``LOAD fts`` if the extension is already on disk. Never touches network."""
+    try:
+        conn.execute("LOAD fts")
+    except duckdb.Error:
+        return False
+    return True
+
+
+def _load_fts(conn: duckdb.DuckDBPyConnection) -> None:
+    """Load the FTS extension while external access is still permitted.
+
+    Verified on DuckDB 1.5.3: once ``enable_external_access=false`` is set,
+    ``LOAD fts`` on an instance that has *not* already loaded it fails with
+    ``PermissionException: Loading external extensions is disabled through
+    configuration``, and ``INSTALL fts`` fails with ``PermissionException:
+    Cannot access directory ".../.duckdb/extensions/..."``. Loading it first
+    is therefore mandatory, not merely an optimisation — and re-``LOAD``ing an
+    already-loaded extension after the lock is a harmless no-op, which is what
+    keeps :func:`introspect.search.fts_available` working.
+
+    Best effort: a machine with no FTS extension and no network simply falls
+    back to the ILIKE search path, and only pays for discovering that once
+    per process (see :data:`_fts_install_failed`).
+    """
+    if _try_load_fts(conn) or _fts_install_failed[0]:
+        return
+    # Not on disk — fetch it. Still permitted at this point, which is the
+    # whole reason this runs before the SETs below.
+    try:
+        conn.execute("INSTALL fts")
+        conn.execute("LOAD fts")
+    except duckdb.Error as exc:
+        _fts_install_failed[0] = True
+        log.debug("FTS extension unavailable; search falls back to ILIKE: %s", exc)
+
+
+def _configuration_locked(conn: duckdb.DuckDBPyConnection) -> bool:
+    """True when this DuckDB instance has already been hardened."""
+    try:
+        row = conn.execute("SELECT current_setting('lock_configuration')").fetchone()
+    except duckdb.Error:
+        return False
+    return bool(row and row[0])
+
+
+# Guards the read-modify-write between "is this instance locked?" and the SETs
+# that lock it. Settings are instance-global, so two threads racing to harden
+# the same freshly-opened instance would otherwise have the loser hit
+# ``InvalidInputException: Cannot change configuration option "..." - the
+# configuration has been locked``.
+_harden_lock = threading.Lock()
+
+
+def connect_read_hardened(
+    db_path: Path = DEFAULT_DB_PATH,
+) -> duckdb.DuckDBPyConnection:
+    """Open ``db_path`` read-only with the engine locked down.
+
+    This is the *only* place the codebase opens a read-only connection to the
+    main database file; ``tests/e2e/test_sql_hardening.py`` greps for
+    violations. Routing everything through one factory is also a correctness
+    requirement, not just tidiness: DuckDB keys its instance cache by path and
+    rejects a second connection carrying a different ``config``, so a caller
+    that opened the file bare would break every hardened caller (and vice
+    versa).
+
+    Order of operations, each step depending on the previous one:
+
+    1. ``connect(config=...)`` applies the resource caps (memory, threads,
+       temp-directory size and location).
+    2. ``LOAD fts`` — must precede step 3; see :func:`_load_fts`.
+    3. The ``_HARDENING_SETTINGS`` SETs cut off filesystem, network and
+       extension access.
+    4. ``lock_configuration`` makes steps 1-3 irreversible for the lifetime
+       of the instance, so a ``SET``/``PRAGMA`` inside a query can't undo them.
+
+    Idempotent: settings are instance-global and concurrent callers join the
+    cached instance, so an already-locked instance skips straight to returning
+    the connection. Re-issuing the SETs there would raise
+    ``InvalidInputException: Cannot change configuration option "..." - the
+    configuration has been locked``.
+    """
+    config = _read_config(str(db_path))
+    with contextlib.suppress(OSError):
+        Path(str(config["temp_directory"])).mkdir(parents=True, exist_ok=True)
+    conn = duckdb.connect(str(db_path), read_only=True, config=config)
+    try:
+        with _harden_lock:
+            if not _configuration_locked(conn):
+                _load_fts(conn)
+                for name, value in _HARDENING_SETTINGS:
+                    conn.execute(f"SET {name} = {value}")
+                conn.execute("SET lock_configuration = true")
+    except duckdb.Error:
+        conn.close()
+        raise
+    return conn
+
+
+def configured_memory_limit(db_path: Path = DEFAULT_DB_PATH) -> str:
+    """The ``memory_limit`` a hardened connection to ``db_path`` runs under.
+
+    Exposed so an out-of-memory error can name the actual budget instead of
+    telling the caller to go look it up.
+    """
+    return str(_read_config(str(db_path))["memory_limit"])
+
+
 def get_read_connection(
     db_path: Path = DEFAULT_DB_PATH,
     jsonl_glob: str = DEFAULT_JSONL_GLOB,
     codex_glob: str | None = None,
 ) -> duckdb.DuckDBPyConnection:
-    """Open materialized DB read-only, falling back to lazy views."""
+    """Open materialized DB read-only, falling back to lazy views.
+
+    The read-only branch goes through :func:`connect_read_hardened`, so every
+    caller that lands on a materialized DB gets the locked-down engine. The
+    fallback branch builds lazy views over the JSONL files and therefore
+    *needs* filesystem access — it cannot be hardened, and is only reached
+    when there is no materialized DB to read.
+    """
     if db_path.exists():
         try:
-            conn = duckdb.connect(str(db_path), read_only=True)
+            conn = connect_read_hardened(db_path)
             if _has_materialized_raw_messages(conn):
                 return conn
             conn.close()
@@ -528,9 +810,7 @@ def ensure_materialized(
     """
     if db_path.exists():
         try:
-            with contextlib.closing(
-                duckdb.connect(str(db_path), read_only=True)
-            ) as probe:
+            with contextlib.closing(connect_read_hardened(db_path)) as probe:
                 if _has_materialized_raw_messages(probe):
                     return read_last_materialized(probe)
         except duckdb.Error:

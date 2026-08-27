@@ -688,7 +688,7 @@ requires-dist = [
     { name = "duckdb", specifier = ">=1.2.0" },
     { name = "fastapi", specifier = ">=0.115.0" },
     { name = "jinja2", specifier = ">=3.1.0" },
-    { name = "mcp", specifier = ">=1.0.0,<2" },
+    { name = "mcp", specifier = ">=1.10,<2" },
     { name = "nolegend", specifier = ">=0.1.2" },
     { name = "packaging", specifier = ">=21.0" },
     { name = "plotly", specifier = ">=5.0" },

@@ -5,12 +5,11 @@ import tempfile
 from pathlib import Path
 from unittest.mock import patch
 
-from fastapi.testclient import TestClient
-
 from introspect.api.main import app
 
 from ..conftest import (
     glob_pattern,
+    local_client,
     make_assistant_message,
     make_user_message,
     write_jsonl,
@@ -111,7 +110,7 @@ def test_session_cost_chart_marker_in_customdata():
                     "INTROSPECT_DAYS": "0",
                 },
             ),
-            TestClient(app) as client,
+            local_client(app) as client,
         ):
             response = client.get(f"/sessions/{sid}?tab=cost")
             assert response.status_code == 200
@@ -231,7 +230,7 @@ def test_session_cost_tab_shows_invocations_view_with_subagent_type():
                     "INTROSPECT_DAYS": "0",
                 },
             ),
-            TestClient(app) as client,
+            local_client(app) as client,
         ):
             response = client.get(f"/sessions/{sid}?tab=cost")
             assert response.status_code == 200
@@ -320,7 +319,7 @@ def test_inflection_detection_empty_on_short_session():
                     "INTROSPECT_DAYS": "0",
                 },
             ),
-            TestClient(app) as client,
+            local_client(app) as client,
         ):
             response = client.get(f"/sessions/{sid}?tab=cost")
             assert response.status_code == 200

@@ -9,6 +9,7 @@ import pytest
 
 from ..conftest import (
     glob_pattern,
+    local_client,
     make_assistant_message,
     make_user_message,
     write_jsonl,
@@ -285,7 +286,6 @@ def _multi_block_session_jsonl(tmp_dir: Path, session_id: str) -> Path:
 @contextmanager
 def _patched_client_with_jsonl(tmp_path: Path, jsonl_writer):
     """Like _patched_client but uses a custom JSONL writer."""
-    from fastapi.testclient import TestClient  # noqa: PLC0415
 
     from introspect.api.main import app  # noqa: PLC0415
 
@@ -301,7 +301,7 @@ def _patched_client_with_jsonl(tmp_path: Path, jsonl_writer):
                 "INTROSPECT_DAYS": "0",
             },
         ),
-        TestClient(app) as client,
+        local_client(app) as client,
     ):
         yield client
 

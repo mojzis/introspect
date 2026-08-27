@@ -11,11 +11,13 @@ Explore Claude Code (and Codex) conversation logs via CLI, web UI, MCP server.
 - `cache_ttl.py` — the single prompt-cache-break detection rule (`cache_requests` view) plus the 5m-vs-1h counterfactual and its rollups; verify with `introspy cache-ttl --verify`
 - `sql_fragments.py` — shared SQL building blocks (cost / tool / file / command / skills / context-loads rollups)
 - `query_templates.py` — one registry of curated SQL investigations, leaf module; `kind` fans out to three adapters (cookbook tool, deterministic MCP tools, MCP prompts)
-- `sql_query.py` — shared read-only SQL guard (SELECT/WITH-only validator, row-cap wrapping, loopback host check) used by both MCP `run_sql` and the HTTP SQL API. The validator, **not** `read_only=True`, is the boundary
+- `sql_query.py` — shared SQL guard for MCP `run_sql` and the HTTP SQL API: `validate_read_only_sql` (one `SELECT`, via `duckdb.extract_statements`, plus a function denylist), `execute_bounded` (wall clock / rows / bytes / cell width), `is_loopback_host`. The **engine config**, not this module, is the boundary — see `docs/security.md`
+- `db.connect_read_hardened()` — the single read-only connection factory. `enable_external_access=false` + `lock_configuration=true` + memory/thread/temp caps. `LOAD fts` must precede the disable; the SETs must be skipped on an already-locked instance. Never open a read-only connection to the main DB anywhere else — `tests/e2e/test_sql_hardening.py` fails the build if you do (DuckDB rejects a second connection with a different config)
 - `version_check.py` — once-a-day PyPI update check + stderr nag
 - `projects.py` — git worktree-aware `cwd` → canonical project
 - `search.py` — FTS via BM25, ILIKE fallback
 - `api/handlers/query.py` — local-only `POST /api/query` + `GET /api/schema` JSON SQL API; gated on `app.state.sql_api_enabled` (loopback bind only, set in `main.py` lifespan from `INTROSPECT_HOST`, fails closed)
+- `api/main.py` — three middlewares: `db_middleware` (per-request hardened read connection), `host_guard` (loopback `Host` allowlist `ALLOWED_HOSTS`, enforced only when `host_allowlist_applies(bind_host)` — hand-rolled, *not* Starlette's `TrustedHostMiddleware`, because the allowlist depends on the bind host the lifespan reads), `local_api_guard` (`Origin` + `X-Introspect-Client` on `/api/query` / `/api/schema` / `/mcp`). **Never** add `CORSMiddleware`
 - `api/routes.py` → `api/handlers/<name>.py` → `templates/<name>.html`
 - `api/handlers/_helpers.py` — shared: `parent(request)`, `conn(request)`, pagination, sort allowlists; re-exports SQL fragments
 - `mcp/` — FastMCP tools + prompts mounted on FastAPI; `_register.py` wires the query-template registry; `refresh_bridge.py` plumbs `app.state` to stateless tool fns
@@ -29,11 +31,12 @@ Explore Claude Code (and Codex) conversation logs via CLI, web UI, MCP server.
 - **HTMX**: `parent(request)` selects `base.html` (full) vs `partial.html` (fragment)
 - **Charts**: build `plotly.graph_objects.Figure` server-side, style with `nolegend.activate()`, embed JSON for `Plotly.newPlot` (see `/python-review` skill `nolegend`)
 - **Cache breaks**: never re-derive a TTL threshold — read `cache_requests` (`cache_miss`, `gap_recoverable`, `gap_unrecoverable`). Waste is capped at 1h gaps; anything longer is a break no setting recovers
+- **Ad-hoc SQL**: never hand-roll validation or execution for `run_sql` / `/api/query` — both go through `validate_read_only_sql` then `execute_bounded`, and the API wraps the latter in `asyncio.to_thread` (blocking `db.execute` on the event loop freezes the UI, MCP and refresh together)
 - **Cost SQL**: reuse `SESSION_COST_SUBQUERY` / `session_cost_subquery_filtered()` from `sql_fragments.py` — never hand-roll cost math in handlers
 - **Adding a query template**: append to `QUERY_TEMPLATES`, then add the matching adapter — `deterministic` → `deterministic_tool_fns` in `_register.py` (or a hand-registered tool of the same name, which shadows the generated one, as `expensive_sessions` does); `exploratory` → a fn in `mcp/prompts.py` plus `exploratory_prompt_fns`. `_wire_template_adapters()` raises on either half missing
 - **Materialization**: `materialize_views()` runs on web startup and rebuilds derived tables (incl. `session_stats`, `assistant_message_costs`, `session_messages_enriched`, `session_context_loads`); CLI commands call `ensure_materialized()` so they share the on-disk DB
 - **Relations** (`db.py`): `raw_data`, `codex_raw_messages`, `raw_messages`, `project_map`, `logical_sessions`, `assistant_message_costs`, `tool_calls`, `session_messages_enriched`, `conversation_turns`, `session_titles`, `message_commands`, `session_context_loads`, `file_reads`, `file_writes`, `session_stats`, `cache_requests`, `session_cache_ttl`, `search_corpus`, `materialize_meta`
-- **Docs**: user-facing docs live in `docs/` (published); planning notes go in `docs/plans/` (excluded from the build). `tests/test_docs_drift.py` fails when a command, env var, relation, MCP tool/prompt, template, or route isn't mentioned in the docs — fix the docs, don't weaken the test. Regenerate the CLI reference with `uv run poe docs-cli`
+- **Docs**: user-facing docs live in `docs/` (published); planning notes go in `docs/plans/` (excluded from the build). `tests/test_docs_drift.py` fails when a command, env var, relation, MCP tool/prompt, template, or route isn't mentioned in the docs; security-relevant behaviour belongs in `docs/security.md` — fix the docs, don't weaken the test. Regenerate the CLI reference with `uv run poe docs-cli`
 
 ## Test Fixtures (`conftest.py`)
 

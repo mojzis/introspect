@@ -11,7 +11,7 @@ from unittest.mock import patch
 import duckdb
 import pytest
 
-from introspect.db import materialize_views
+from introspect.db import connect_read_hardened, materialize_views
 from introspect.mcp import refresh_bridge
 from introspect.mcp.server import create_mcp_server
 from introspect.mcp.tools import (
@@ -28,6 +28,7 @@ from introspect.mcp.tools import (
     tool_failures,
 )
 from introspect.search import build_search_corpus
+from introspect.sql_query import CELL_TRUNCATION_MARKER, MCP_SQL_CELL_CAP
 
 from .conftest import (
     TTL_T0,
@@ -111,7 +112,7 @@ def test_recent_sessions():
         db_path = _materialize_test_data(tmp_path)
 
         with patch("introspect.mcp.tools.get_read_connection") as mock_conn:
-            mock_conn.return_value = duckdb.connect(str(db_path), read_only=True)
+            mock_conn.return_value = connect_read_hardened(db_path)
             result = recent_sessions(n=10)
 
         assert "test-session-mcp" in result
@@ -125,7 +126,7 @@ def test_get_session():
         db_path = _materialize_test_data(tmp_path)
 
         with patch("introspect.mcp.tools.get_read_connection") as mock_conn:
-            mock_conn.return_value = duckdb.connect(str(db_path), read_only=True)
+            mock_conn.return_value = connect_read_hardened(db_path)
             result = get_session("test-session-mcp")
 
         assert "Session: test-session-mcp" in result
@@ -139,7 +140,7 @@ def test_get_session_not_found():
         db_path = _materialize_test_data(tmp_path)
 
         with patch("introspect.mcp.tools.get_read_connection") as mock_conn:
-            mock_conn.return_value = duckdb.connect(str(db_path), read_only=True)
+            mock_conn.return_value = connect_read_hardened(db_path)
             result = get_session("nonexistent-session")
 
         assert "not found" in result
@@ -152,7 +153,7 @@ def test_tool_failures():
         db_path = _materialize_test_data(tmp_path)
 
         with patch("introspect.mcp.tools.get_read_connection") as mock_conn:
-            mock_conn.return_value = duckdb.connect(str(db_path), read_only=True)
+            mock_conn.return_value = connect_read_hardened(db_path)
             result = tool_failures()
 
         assert "Bash" in result
@@ -166,13 +167,13 @@ def test_tool_failures_with_prefix():
         db_path = _materialize_test_data(tmp_path)
 
         with patch("introspect.mcp.tools.get_read_connection") as mock_conn:
-            mock_conn.return_value = duckdb.connect(str(db_path), read_only=True)
+            mock_conn.return_value = connect_read_hardened(db_path)
             result = tool_failures(command_prefix="Bash")
 
         assert "Bash" in result
 
         with patch("introspect.mcp.tools.get_read_connection") as mock_conn:
-            mock_conn.return_value = duckdb.connect(str(db_path), read_only=True)
+            mock_conn.return_value = connect_read_hardened(db_path)
             result = tool_failures(command_prefix="NonExistent")
 
         assert "No failed tool calls found" in result
@@ -185,7 +186,7 @@ def test_search_conversations():
         db_path = _materialize_test_data(tmp_path)
 
         with patch("introspect.mcp.tools.get_read_connection") as mock_conn:
-            mock_conn.return_value = duckdb.connect(str(db_path), read_only=True)
+            mock_conn.return_value = connect_read_hardened(db_path)
             result = search_conversations("refactor database")
 
         assert "test-session-mcp" in result
@@ -198,7 +199,7 @@ def test_search_conversations_no_results():
         db_path = _materialize_test_data(tmp_path)
 
         with patch("introspect.mcp.tools.get_read_connection") as mock_conn:
-            mock_conn.return_value = duckdb.connect(str(db_path), read_only=True)
+            mock_conn.return_value = connect_read_hardened(db_path)
             result = search_conversations("xyznonexistentterm123")
 
         assert "No results found" in result
@@ -209,8 +210,10 @@ def patched_mcp_db() -> Iterator[None]:
     """Materialize sample data and patch the MCP tool DB handles to use it.
 
     Patches both ``get_read_connection`` (used by the parameterized tools)
-    and ``DEFAULT_DB_PATH`` (which ``run_sql`` opens directly as a strict
-    read-only connection).
+    and ``DEFAULT_DB_PATH`` (which ``run_sql`` opens directly via
+    ``connect_read_hardened``). Both handles must go through the same factory
+    — DuckDB refuses a second connection to a file whose instance was opened
+    with a different configuration.
     """
     with tempfile.TemporaryDirectory() as tmp:
         db_path = _materialize_test_data(Path(tmp))
@@ -218,7 +221,7 @@ def patched_mcp_db() -> Iterator[None]:
             patch("introspect.mcp.tools.get_read_connection") as mock_conn,
             patch("introspect.mcp.tools.DEFAULT_DB_PATH", db_path),
         ):
-            mock_conn.return_value = duckdb.connect(str(db_path), read_only=True)
+            mock_conn.return_value = connect_read_hardened(db_path)
             yield
 
 
@@ -257,15 +260,15 @@ def test_run_sql_rejects_write_statement(patched_mcp_db: None):
     result = run_sql("DELETE FROM logical_sessions")
 
     assert "Error" in result
-    assert "SELECT" in result
+    assert "DELETE" in result
 
 
 def test_run_sql_rejects_attach(patched_mcp_db: None):
-    """run_sql rejects a single ATTACH statement by the first-keyword check."""
+    """run_sql rejects a single ATTACH statement by statement type."""
     result = run_sql("ATTACH 'evil.db' AS evil")
 
     assert "Error" in result
-    assert "SELECT" in result
+    assert "ATTACH" in result
 
 
 def test_run_sql_rejects_multiple_statements(patched_mcp_db: None):
@@ -310,6 +313,27 @@ def test_run_sql_truncates_long_cells(patched_mcp_db: None):
     assert "…" in result
     # The header + separator + the truncated cell row + "(1 rows)" footer.
     assert "1 rows" in result
+
+
+def test_run_sql_keeps_the_cell_truncation_marker(patched_mcp_db: None):
+    """The clip marker must survive rendering, not be re-clipped away.
+
+    ``execute_bounded`` appends CELL_TRUNCATION_MARKER at ``cell_cap``; if the
+    formatter's own ceiling were also ``cell_cap`` it would chop every marked
+    cell back down and replace the marker with a bare ellipsis.
+    """
+    result = run_sql(f"SELECT repeat('x', {MCP_SQL_CELL_CAP * 3}) AS big")
+
+    assert CELL_TRUNCATION_MARKER in result
+
+
+def test_run_sql_reports_truncation(patched_mcp_db: None):
+    """A row-capped result says so; one that fits does not."""
+    truncated = run_sql("SELECT * FROM range(0, 50) AS t(n)", limit=5)
+    assert "truncated: hit the row cap (5)" in truncated
+
+    complete = run_sql("SELECT * FROM range(0, 3) AS t(n)", limit=5)
+    assert "truncated" not in complete
 
 
 def test_run_sql_surfaces_duckdb_errors(patched_mcp_db: None):
@@ -540,7 +564,7 @@ def _ttl_db(tmp_path: Path, session_id: str, lines: list[dict]) -> Path:
 
 def _run_cache_ttl_choice(db_path: Path, **kwargs) -> str:
     with patch("introspect.mcp.tools.get_read_connection") as mock_conn:
-        mock_conn.return_value = duckdb.connect(str(db_path), read_only=True)
+        mock_conn.return_value = connect_read_hardened(db_path)
         return cache_ttl_choice(**kwargs)
 
 
@@ -753,7 +777,7 @@ def test_expensive_sessions_cost_ordering_and_pareto():
         db_path = _materialize_expensive_db(tmp_path)
 
         with patch("introspect.mcp.tools.get_read_connection") as mock_conn:
-            mock_conn.return_value = duckdb.connect(str(db_path), read_only=True)
+            mock_conn.return_value = connect_read_hardened(db_path)
             result = expensive_sessions(limit=15)
 
     # Pricey session should come first ($20), mid second ($10), cheap third ($5)
@@ -804,11 +828,11 @@ def test_expensive_sessions_since_filters():
         conn.close()
 
         with patch("introspect.mcp.tools.get_read_connection") as mock_conn:
-            mock_conn.return_value = duckdb.connect(str(db_path), read_only=True)
+            mock_conn.return_value = connect_read_hardened(db_path)
             result_all = expensive_sessions(limit=15)
 
         with patch("introspect.mcp.tools.get_read_connection") as mock_conn:
-            mock_conn.return_value = duckdb.connect(str(db_path), read_only=True)
+            mock_conn.return_value = connect_read_hardened(db_path)
             result_since = expensive_sessions(limit=15, since="2026-05-01")
 
     # All: both sessions visible, total $30
@@ -827,7 +851,7 @@ def test_expensive_sessions_limit_clamps_display_not_totals():
         db_path = _materialize_expensive_db(tmp_path)
 
         with patch("introspect.mcp.tools.get_read_connection") as mock_conn:
-            mock_conn.return_value = duckdb.connect(str(db_path), read_only=True)
+            mock_conn.return_value = connect_read_hardened(db_path)
             result = expensive_sessions(limit=1)
 
     # Only first session displayed
@@ -877,7 +901,7 @@ def test_expensive_sessions_no_cost_data():
         conn.close()
 
         with patch("introspect.mcp.tools.get_read_connection") as mock_conn:
-            mock_conn.return_value = duckdb.connect(str(db_path), read_only=True)
+            mock_conn.return_value = connect_read_hardened(db_path)
             result = expensive_sessions()
 
     assert "No sessions with cost found" in result
@@ -903,7 +927,7 @@ def test_expensive_sessions_split_and_shape_lines():
         conn.close()
 
         with patch("introspect.mcp.tools.get_read_connection") as mock_conn:
-            mock_conn.return_value = duckdb.connect(str(db_path), read_only=True)
+            mock_conn.return_value = connect_read_hardened(db_path)
             result = expensive_sessions(limit=5)
 
     # Split line should appear with cache write and output segments
@@ -956,7 +980,7 @@ def test_expensive_sessions_subagent_flag():
         conn.close()
 
         with patch("introspect.mcp.tools.get_read_connection") as mock_conn:
-            mock_conn.return_value = duckdb.connect(str(db_path), read_only=True)
+            mock_conn.return_value = connect_read_hardened(db_path)
             result = expensive_sessions(limit=5)
 
     # The subagent session block should say subagents=yes

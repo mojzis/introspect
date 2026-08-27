@@ -14,6 +14,8 @@ from bs4 import BeautifulSoup, Tag
 from fastapi.testclient import TestClient
 from httpx2 import Response
 
+from ..conftest import local_client
+
 
 @dataclass
 class HTMXResponse:
@@ -277,5 +279,5 @@ def e2e(tmp_path):
     ):
         from introspect.api.main import app  # noqa: PLC0415
 
-        with TestClient(app) as client:
+        with local_client(app) as client:
             yield HTMXTestClient(client)
