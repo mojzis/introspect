@@ -230,6 +230,22 @@ def test_traceback_is_shown_only_in_debug_mode(env, traceback_visible, why):
         assert CRASH_MESSAGE not in response.text
 
 
+def test_unrouted_url_gets_the_policy_too(client):
+    """A 404 that never reaches a handler is still a policy error.
+
+    Routing (and ``StaticFiles``) raise *Starlette's* ``HTTPException``, and
+    ``fastapi.HTTPException`` is a distinct subclass — so a handler registered
+    on the FastAPI class would miss this entirely. That is why ``errors.py``
+    imports ``starlette.exceptions`` directly, and why ``starlette`` is a
+    declared dependency rather than a transitive one.
+    """
+    response = client.get("/no-such-page", headers=HTMX)
+
+    assert response.status_code == 404
+    assert response.headers["HX-Retarget"] == ERROR_TARGET
+    assert response.headers[ERROR_RENDERED_HEADER] == "1"
+
+
 # --- Machine endpoints keep their machine representation ----------------------
 
 
