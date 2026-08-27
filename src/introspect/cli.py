@@ -904,9 +904,9 @@ def devserve(
 ):
     """Launch the web UI with auto-reload on source changes.
 
-    Uses a per-branch DuckDB (``introspect-<branch>.duckdb``) so dev servers on
+    Uses a per-branch DuckDB (`introspect-<branch>.duckdb`) so dev servers on
     different branches never share a schema-mismatched database. Respects an
-    explicit ``INTROSPECT_DB_PATH`` if set. Also prunes dev DBs for branches
+    explicit `INTROSPECT_DB_PATH` if set. Also prunes dev DBs for branches
     that no longer exist.
     """
     import os  # noqa: PLC0415
@@ -1083,7 +1083,7 @@ def _finish_connected_session(
 # Added to the dedicated Claude Code / Codex session prompt. The session is
 # dedicated to log analysis, so steer it toward the MCP tools instead of
 # spelunking the raw rollout logs with Bash.
-INTROSPECT_SESSION_INSTRUCTIONS = (
+SESSION_INSTRUCTIONS = (
     "This session is dedicated to analyzing coding-agent conversation logs "
     "via the `introspect` MCP server. Prefer the mcp__introspect__* tools "
     "(run_sql, describe_schema, search_conversations, get_session, "
@@ -1101,12 +1101,12 @@ INTROSPECT_SESSION_INSTRUCTIONS = (
 
 # Kept as a named alias because Claude Code calls this an appended system
 # prompt, while Codex calls it developer instructions.
-CLAUDE_SYSTEM_PROMPT_SUFFIX = INTROSPECT_SESSION_INSTRUCTIONS
-CODEX_DEVELOPER_INSTRUCTIONS = INTROSPECT_SESSION_INSTRUCTIONS
+CLAUDE_SYSTEM_PROMPT_SUFFIX = SESSION_INSTRUCTIONS
+CODEX_DEVELOPER_INSTRUCTIONS = SESSION_INSTRUCTIONS
 
 # Permission rule covering every tool on the introspect MCP server, so the
 # dedicated session doesn't permission-prompt on each query.
-INTROSPECT_MCP_PERMISSION = "mcp__introspect"
+MCP_PERMISSION_RULE = "mcp__introspect"
 
 
 @app.command(
@@ -1128,16 +1128,16 @@ def claude(
 ):
     """Launch Claude Code connected to the introspect MCP server.
 
-    Starts ``introspy serve`` automatically in the background when nothing is
-    listening on the target port (log at ``~/.introspect/serve.log``) and stops
-    it again when Claude Code exits (pass ``--keep-server`` to leave it up).
+    Starts `introspy serve` automatically in the background when nothing is
+    listening on the target port (log at `~/.introspect/serve.log`) and stops
+    it again when Claude Code exits (pass `--keep-server` to leave it up).
     A server that was already running is never touched.  The MCP config is
     passed inline, so nothing is written to your Claude Code settings — the
     server is only registered for this session.
 
-    Any extra arguments are forwarded to the ``claude`` CLI as-is, e.g.
-    ``introspy claude -- --model opus --resume`` or
-    ``introspy claude -- -p "recent sessions"``. Use ``--`` to separate
+    Any extra arguments are forwarded to the `claude` CLI as-is, e.g.
+    `introspy claude -- --model opus --resume` or
+    `introspy claude -- -p "recent sessions"`. Use `--` to separate
     introspect's own options from the ones meant for Claude Code.
     """
     import json  # noqa: PLC0415
@@ -1170,7 +1170,7 @@ def claude(
                 "--append-system-prompt",
                 CLAUDE_SYSTEM_PROMPT_SUFFIX,
                 "--allowedTools",
-                INTROSPECT_MCP_PERMISSION,
+                MCP_PERMISSION_RULE,
                 *ctx.args,
             ]
         )
@@ -1200,16 +1200,16 @@ def codex(
 ):
     """Launch Codex connected to the introspect MCP server.
 
-    Starts ``introspy serve`` automatically in the background when nothing is
-    listening on the target port (log at ``~/.introspect/serve.log``) and stops
-    it again when Codex exits (pass ``--keep-server`` to leave it up). A server
+    Starts `introspy serve` automatically in the background when nothing is
+    listening on the target port (log at `~/.introspect/serve.log`) and stops
+    it again when Codex exits (pass `--keep-server` to leave it up). A server
     that was already running is never touched. The MCP configuration and
     developer instructions are passed as command-line overrides, so nothing is
     written to the user's Codex configuration.
 
-    Any extra arguments are forwarded to the ``codex`` CLI as-is, e.g.
-    ``introspy codex -- --model gpt-5.4`` or
-    ``introspy codex -- "what are the most expensive sessions"``. Use ``--``
+    Any extra arguments are forwarded to the `codex` CLI as-is, e.g.
+    `introspy codex -- --model gpt-5.4` or
+    `introspy codex -- "what are the most expensive sessions"`. Use `--`
     to separate introspect's own options from the ones meant for Codex.
     """
     import json  # noqa: PLC0415

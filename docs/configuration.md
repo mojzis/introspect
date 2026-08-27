@@ -1,25 +1,49 @@
 # Configuration
 
-Introspect is configured through environment variables.
+Introspect is configured through environment variables. Everything the code
+reads is listed below; `tests/test_docs_drift.py` fails if `src/` grows an
+`INTROSPECT_*` variable that this page doesn't mention.
 
-| Variable | Default | Description |
-|---|---|---|
-| `INTROSPECT_DB_PATH` | `~/.introspect/introspect.duckdb` | Database file location. |
-| `INTROSPECT_JSONL_GLOB` | `~/.claude/projects/**/*.jsonl` | Glob pattern for Claude Code conversation logs. |
-| `INTROSPECT_CODEX_GLOB` | `~/.codex/sessions/**/*.jsonl` | Glob pattern for Codex CLI rollout logs. A missing directory or non-matching glob is a silent no-op. |
-| `INTROSPECT_DAYS` | resolved from `INTROSPECT_REFRESH_WINDOW` | Days of history to load (`0` = no limit). Set explicitly by `serve` / `materialize` (`-d`); takes precedence over the window picker on lifespan startup. |
-| `INTROSPECT_REFRESH_WINDOW` | `30` | Window picker token: `1`, `7`, `30`, or `month` (calendar-month-to-date). |
-| `INTROSPECT_REFRESH_INTERVAL_SECONDS` | `600` | Background refresh poll interval; `0` disables auto-refresh. |
-| `INTROSPECT_RESOLVE_PROJECTS` | `1` | When `0`, skip git worktree resolution for project names. |
-| `INTROSPECT_SQL_API` | on (loopback only) | Set to `off` to force-disable the local [SQL API](usage/sql-api.md) even on loopback. |
-| `INTROSPECT_VERSION_CHECK` | `on` | Set to `off` to disable the [update check](#update-check) — the network call and the nag. |
+## Environment variables
+
+| Variable | Default | Read by | Description |
+|---|---|---|---|
+| `INTROSPECT_DB_PATH` | `~/.introspect/introspect.duckdb` | CLI, web app, update check | Database file location. |
+| `INTROSPECT_JSONL_GLOB` | `~/.claude/projects/**/*.jsonl` | web app | Glob for Claude Code conversation logs. |
+| `INTROSPECT_CODEX_GLOB` | `~/.codex/sessions/**/*.jsonl` | web app | Glob for Codex CLI rollout logs. A missing directory or non-matching glob is a silent no-op. |
+| `INTROSPECT_DAYS` | resolved from `INTROSPECT_REFRESH_WINDOW` | web app | Days of history to load (`0` = no limit). `serve` / `devserve` set it from `-d`; it takes precedence over the window picker on startup. |
+| `INTROSPECT_REFRESH_WINDOW` | `30` | web app | Window-picker token: `1`, `7`, `30`, or `month` (calendar-month-to-date). An unrecognized value logs a warning and falls back to the default. |
+| `INTROSPECT_REFRESH_INTERVAL_SECONDS` | `600` | web app | Background refresh poll interval; `0` disables auto-refresh. |
+| `INTROSPECT_RESOLVE_PROJECTS` | `1` | web app | When `0`, skip git worktree resolution for project names. Set by `serve --no-resolve-projects`. |
+| `INTROSPECT_HOST` | unset | set by `serve`, read by the web app | The address the server bound to. Gates the [SQL API](usage/sql-api.md) — see below. |
+| `INTROSPECT_SQL_API` | unset (on, loopback only) | web app | Set to `off` to force-disable the SQL API even on loopback. |
+| `INTROSPECT_VERSION_CHECK` | unset (on) | update check | Set to `off` (or `0` / `false` / `no`) to disable the [update check](#update-check) — the network call and the nag. |
+| `INTROSPECT_VERSION_CHECK_INTERVAL` | `86400` | update check | Seconds between PyPI checks. Escape hatch for testing; a non-numeric or non-positive value falls back to the default. |
+
+`serve` writes `INTROSPECT_DAYS`, `INTROSPECT_HOST`, and (with
+`--no-resolve-projects`) `INTROSPECT_RESOLVE_PROJECTS` into the environment
+before handing off to uvicorn, so the app's lifespan sees the flags you passed
+on the command line.
+
+## SQL API gating
+
+`INTROSPECT_HOST` is how the CLI tells the app which address it bound to. The
+app exposes the local [SQL API](usage/sql-api.md) only when that host is
+loopback (`127.0.0.0/8`, `::1`, `localhost`) **and** `INTROSPECT_SQL_API` is
+not `off`.
+
+The check fails closed: if `INTROSPECT_HOST` is unset — for example when the
+app is launched under bare `uvicorn` instead of `introspy serve` — the host is
+not *known* to be loopback, so the API stays disabled and `/api/query` and
+`/api/schema` return 404.
 
 ## Update check
 
 Introspect distributed via `uvx introspy` and `uv tool install introspy` does
 not auto-update, so it can quietly tell you when a newer release is out. On
-interactive commands (never on `mcp`, never when output is piped or `CI` is
-set) it may print a single line to **stderr**:
+interactive commands (never on `mcp`, never when output is piped or `CI` — or
+another CI marker such as `GITHUB_ACTIONS` — is set) it may print a single line
+to **stderr**:
 
 ```
 introspy 0.3.0 is available (you have 0.2.3) — run: uvx introspy@latest  |  uv tool upgrade introspy
