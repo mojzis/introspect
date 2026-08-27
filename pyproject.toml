@@ -15,7 +15,7 @@ dependencies = [
     # streamable-HTTP transport) — see introspect/mcp/server.py.
     # <2: mcp 2.0 removed `mcp.server.fastmcp` (the FastMCP server API this
     # package builds on). Lift once introspect.mcp is ported to the 2.x API.
-    "mcp>=1.10,<2",
+    "mcp>=1.10,<3",
     "plotly>=5.0",
     "nolegend>=0.1.2",
     "packaging>=21.0",
