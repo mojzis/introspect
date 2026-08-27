@@ -413,3 +413,23 @@ LOOPBACK_BASE_URL = "http://127.0.0.1:8347"
 def local_client(app) -> TestClient:
     """``TestClient`` with a loopback Host header."""
     return TestClient(app, base_url=LOOPBACK_BASE_URL)
+
+
+def nested_type_sql(payload_chars: int) -> list[tuple[str, str]]:
+    """``(label, sql)`` probes that hide `payload_chars` inside a nested type.
+
+    DuckDB returns LIST as ``list``, STRUCT and MAP as ``dict`` and BLOB as
+    ``bytes`` — Python objects with no width the size caps can see. Each of
+    these used to be counted as one flat cell and serialized in full;
+    ``execute_bounded`` normalizes cells to their wire form before measuring
+    them, which is what closes the bypass. Shared so a shape added here
+    reaches both the HTTP and the MCP guard.
+    """
+    payload = f"repeat('x', {payload_chars})"
+    return [
+        ("list", f"SELECT list({payload}) FROM range(300)"),
+        ("struct", f"SELECT {{'a': {payload}}}"),
+        ("map", f"SELECT map([1], [{payload}])"),
+        ("nested_list", f"SELECT [[{payload}]]"),
+        ("blob", f"SELECT {payload}::BLOB"),
+    ]

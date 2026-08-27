@@ -12,10 +12,13 @@ See ``docs/security.md`` for the threat model these correspond to.
 from __future__ import annotations
 
 import ast
+import datetime as dt
 import os
 import threading
 import time
+import uuid
 from dataclasses import replace
+from decimal import Decimal
 from pathlib import Path
 from typing import NamedTuple
 
@@ -38,10 +41,13 @@ from introspect.db import (
 from introspect.search import build_search_corpus
 from introspect.sql_query import (
     API_BUDGET,
+    API_SQL_CELL_CAP,
+    CELL_TRUNCATION_MARKER,
     MCP_SQL_CELL_CAP,
     SqlBudget,
     SqlTimeoutError,
     execute_bounded,
+    normalize_cell,
     validate_read_only_sql,
     wrap_with_row_cap,
 )
@@ -51,6 +57,7 @@ from ..conftest import (
     local_client,
     make_assistant_message,
     make_user_message,
+    nested_type_sql,
     write_jsonl,
 )
 
@@ -462,6 +469,130 @@ def test_cell_cap_clips_wide_values(hardened_conn):
     assert "truncated" in value
 
 
+# Payload each nested-type probe hides from the size caps. Comfortably above
+# the 8 MB API byte cap once the LIST case is multiplied by its 300 rows, and
+# far below any ``memory_limit`` a hardened connection can be given (the floor
+# is 256 MB), so the probe measures the caps rather than the engine's OOM.
+NESTED_PAYLOAD_CHARS = 100_000
+
+# Each of these used to be counted as one flat 16-byte cell and then
+# serialized in full, so a 30 MB result walked through an 8 MB cap.
+NESTED_TYPE_IDS = [label for label, _ in nested_type_sql(NESTED_PAYLOAD_CHARS)]
+NESTED_TYPE_SQL = [sql for _, sql in nested_type_sql(NESTED_PAYLOAD_CHARS)]
+
+# Headroom over ``byte_cap`` for the JSON envelope (column names, the
+# truncation fields, brackets and quotes) around a capped result set.
+_RESPONSE_SLACK_BYTES = 64 * 1024
+
+
+@pytest.mark.parametrize("sql", NESTED_TYPE_SQL, ids=NESTED_TYPE_IDS)
+def test_nested_type_cannot_bypass_the_cell_cap(hardened_conn, sql: str):
+    """A megabyte hidden in a LIST/STRUCT/MAP/BLOB is still clipped."""
+    result = execute_bounded(hardened_conn, sql, budget(cell_cap=API_SQL_CELL_CAP))
+
+    value = result.rows[0][0]
+    assert isinstance(value, str), "cell reached the caller un-normalized"
+    assert len(value) == API_SQL_CELL_CAP + len(CELL_TRUNCATION_MARKER)
+    assert result.truncated
+    assert result.truncation_reason == f"cell cap ({API_SQL_CELL_CAP} chars)"
+
+
+def test_nested_cells_count_against_the_byte_cap(hardened_conn):
+    """Nested values are measured per row, so the byte cap can stop the read.
+
+    Each row here survives the cell cap intact; only the aggregate estimate
+    can stop it, and before normalization every row was counted as 16 bytes.
+    """
+    result = execute_bounded(
+        hardened_conn,
+        "SELECT [repeat('x', 400)] AS nested FROM range(100)",
+        budget(byte_cap=4096, cell_cap=API_SQL_CELL_CAP),
+    )
+
+    # ~405 UTF-8 bytes per row against a 4 KB budget: the read stops at ~10.
+    assert len(result.rows) <= 12
+    assert result.truncated
+    assert "byte cap" in (result.truncation_reason or "")
+
+
+def test_clipping_a_cell_marks_the_result_truncated(hardened_conn):
+    """The cell cap is reported even though it does not stop the read."""
+    result = execute_bounded(
+        hardened_conn,
+        f"SELECT repeat('z', {MCP_SQL_CELL_CAP * 3}) AS wide FROM range(3)",
+        budget(cell_cap=MCP_SQL_CELL_CAP),
+    )
+
+    assert len(result.rows) == 3
+    assert result.truncated
+    assert f"cell cap ({MCP_SQL_CELL_CAP} chars)" == result.truncation_reason
+
+
+def test_every_cap_that_fired_is_named(hardened_conn):
+    """A run that stops early *and* clips cells has to report both.
+
+    Naming only the cap that stopped the read would hand back shortened
+    values with nothing saying so — the bug cell-cap reporting exists to
+    prevent, hidden behind an unrelated row cap.
+    """
+    result = execute_bounded(
+        hardened_conn,
+        f"SELECT repeat('z', {MCP_SQL_CELL_CAP * 3}) AS wide FROM range(50)",
+        budget(row_cap=3, cell_cap=MCP_SQL_CELL_CAP),
+    )
+
+    assert result.truncation_reason == (
+        f"row cap (3); cell cap ({MCP_SQL_CELL_CAP} chars)"
+    )
+
+
+def test_a_result_that_fits_is_not_marked_truncated(hardened_conn):
+    """Only an actual clip sets the flag — no false positives."""
+    result = execute_bounded(hardened_conn, "SELECT 'short' AS s", budget())
+
+    assert not result.truncated
+    assert result.truncation_reason is None
+
+
+@pytest.mark.parametrize(
+    "value, expected",
+    [
+        (None, None),
+        (True, True),
+        (7, 7),
+        (1.5, 1.5),
+        ("text", "text"),
+        (Decimal("1.25"), 1.25),
+        ([1, 2], "[1, 2]"),
+        ({"a": 1}, "{'a': 1}"),
+        (b"\x00\x01", "b'\\x00\\x01'"),
+        (dt.date(2026, 1, 2), "2026-01-02"),
+        (
+            dt.datetime(2026, 1, 2, 3, 4, 5, tzinfo=dt.UTC),
+            "2026-01-02 03:04:05+00:00",
+        ),
+        (
+            uuid.UUID("aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee"),
+            "aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee",
+        ),
+        (float("nan"), "nan"),
+        (float("inf"), "inf"),
+        (float("-inf"), "-inf"),
+    ],
+)
+def test_normalize_cell_produces_a_measurable_wire_value(value, expected):
+    """Everything comes back JSON-ready: a scalar or a string with a width."""
+    normalized = normalize_cell(value)
+
+    assert normalized == expected
+    assert normalized is None or isinstance(normalized, (bool, int, float, str))
+
+
+def test_normalize_cell_keeps_bool_a_bool_not_an_int():
+    """``bool`` is an ``int`` subclass — JSON callers still want true/false."""
+    assert normalize_cell(False) is False
+
+
 def test_out_of_memory_raises_without_killing_the_process():
     """``memory_limit`` must produce an exception, not a dead interpreter.
 
@@ -733,6 +864,61 @@ def test_query_happy_path_through_http(api_client):
     )
     assert resp.status_code == 200
     assert resp.json()["rows"] == [[1]]
+
+
+@pytest.mark.parametrize("sql", NESTED_TYPE_SQL, ids=NESTED_TYPE_IDS)
+def test_nested_type_response_stays_within_the_byte_cap(api_client, sql: str):
+    """The bypass end to end: a capped body, and a caller told it was capped."""
+    resp = api_client.post(
+        "/api/query", json={"sql": sql}, headers={CLIENT_HEADER: "1"}
+    )
+
+    assert resp.status_code == 200
+    body = resp.json()
+    assert body["truncated"], "the payload was served in full"
+    assert "cell cap" in (body["truncation_reason"] or "")
+    assert len(resp.content) <= API_BUDGET.byte_cap + _RESPONSE_SLACK_BYTES
+
+
+def test_a_list_of_every_row_does_not_stream_its_payload(api_client):
+    """The reported shape, sized against the payload it aggregates.
+
+    ``SELECT list(content) FROM raw_messages`` is this query with the corpus
+    in place of ``repeat`` — one row holding everything, which served in full
+    is the multi-gigabyte failure mode. The sibling test above pins the
+    response against the byte cap; this one pins it against the *input*, so a
+    regression that scaled the body with the payload would show up here even
+    if the cap were raised.
+    """
+    payload_bytes = NESTED_PAYLOAD_CHARS * 300
+    resp = api_client.post(
+        "/api/query",
+        json={
+            "sql": f"SELECT list(repeat('x', {NESTED_PAYLOAD_CHARS})) FROM range(300)"
+        },
+        headers={CLIENT_HEADER: "1"},
+    )
+
+    assert resp.status_code == 200
+    assert len(resp.content) < 10 * 1024 * 1024
+    assert len(resp.content) < payload_bytes / 1000
+
+
+def test_a_non_finite_float_is_serialized_not_a_500(api_client):
+    """``nan``/``inf`` are floats JSON cannot spell; they must not escape.
+
+    Starlette renders with ``allow_nan=False``, and the raise happens in the
+    response constructor — past the handler's error handling — so letting one
+    through is an unhandled 500 with no ``{"error": ...}`` envelope.
+    """
+    resp = api_client.post(
+        "/api/query",
+        json={"sql": "SELECT 'nan'::DOUBLE AS n, 'inf'::DOUBLE AS i"},
+        headers={CLIENT_HEADER: "1"},
+    )
+
+    assert resp.status_code == 200
+    assert resp.json()["rows"] == [["nan", "inf"]]
 
 
 def test_rebinding_host_is_rejected(api_client):

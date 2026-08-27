@@ -32,6 +32,14 @@ Response:
 }
 ```
 
+**Cell values.** Rows come back JSON-ready. Strings, booleans, integers and
+finite floats pass through; `DECIMAL` (cost columns) becomes a JSON number;
+everything else — timestamps, dates, UUIDs, intervals, `BLOB`, and the nested
+`LIST` / `STRUCT` / `MAP` types — arrives as a string. Non-finite floats
+(`nan`, `inf`, `-inf`, which DuckDB produces from ordinary arithmetic such as
+`1.0 / 0.0`) are stringified too, since JSON has no spelling for them; guard
+against them in SQL with `isfinite()` if a column must stay numeric.
+
 Exactly one `SELECT` statement is allowed — `WITH` and DuckDB's FROM-first
 form (`FROM t SELECT …`) count as `SELECT`. Writes, `ATTACH`, `INSTALL`,
 `LOAD`, `PRAGMA`, `SET`, `COPY`, multi-statement scripts, and functions that
@@ -41,9 +49,14 @@ access disabled, so those are refused by the engine too.
 
 **Limits.** The default row limit is 100. A query is bounded at 10 000 rows,
 8 MB of total output, 4 000 characters per cell, 32 KB of SQL text, and a 30 s
-wall clock. When a cap stops the read, `truncated` is `true` and
-`truncation_reason` names which one. A timeout, an out-of-memory, and a SQL
-error all return 400 with `{"error": ...}`.
+wall clock. The caps are measured against the *serialized* value, so a LIST,
+STRUCT, MAP or BLOB cell counts for what it will weigh in the response rather
+than as one opaque object. When a cap stops the read or shortens a value,
+`truncated` is `true` and `truncation_reason` names every cap that fired,
+`"; "`-joined. It is not a paging signal: a result the cell cap clipped is
+complete row-wise, and re-querying returns the same thing — select narrower
+columns or `substr()` instead. A timeout, an out-of-memory, and a SQL error
+all return 400 with `{"error": ...}`.
 
 The same validator and the same bounded executor back the MCP `run_sql` tool —
 see [the SQL guard](../architecture.md#read-only-sql-guard-sql_querypy) and
