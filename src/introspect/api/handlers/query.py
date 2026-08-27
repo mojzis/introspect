@@ -16,7 +16,6 @@ from __future__ import annotations
 
 import asyncio
 from dataclasses import replace
-from decimal import Decimal
 from typing import TYPE_CHECKING
 
 import duckdb
@@ -51,22 +50,6 @@ class QueryRequest(BaseModel):
     limit: int = Field(default=DEFAULT_LIMIT, ge=1)
 
 
-def _jsonable(value: object) -> object:
-    """Coerce a DuckDB cell to a JSON-serializable value.
-
-    ints/floats/bools/None/str pass through unchanged; ``Decimal`` (e.g. cost
-    columns) becomes ``float`` so notebooks get a number to compute on;
-    everything else DuckDB may hand back (UUID, datetime, date, bytes,
-    interval) is stringified — lossless enough for analysis and always
-    serializable.
-    """
-    if value is None or isinstance(value, (bool, int, float, str)):
-        return value
-    if isinstance(value, Decimal):
-        return float(value)
-    return str(value)
-
-
 def _require_sql_api(request: Request) -> None:
     """Fail closed with 404 unless the local-only SQL API is enabled.
 
@@ -86,11 +69,20 @@ async def run_query(request: Request, body: QueryRequest) -> JSONResponse:
         {"columns": [...], "rows": [[...], ...],
          "row_count": N, "truncated": bool, "truncation_reason": str | None}
 
-    ``truncated`` is true when a cap stopped the read; ``truncation_reason``
-    names which one. Caps come from ``API_BUDGET``: 10 000 rows, 8 MB of
-    serialized results, 4 000 characters per cell, 32 KB of SQL text, and a
-    30 s wall clock (``INTROSPECT_SQL_TIMEOUT_SECONDS``). Validation, timeout
-    and SQL errors all return HTTP 400 with ``{"error": ...}``.
+    ``truncated`` is true when a cap stopped the read *or* shortened a value;
+    ``truncation_reason`` names every cap that fired, ``"; "``-joined. It is
+    not a paging signal — a complete result whose cells were clipped is
+    truncated too, and re-querying will not produce more.
+
+    Caps come from ``API_BUDGET``: 10 000 rows, 8 MB of serialized results,
+    4 000 characters per cell, 32 KB of SQL text, and a 30 s wall clock
+    (``INTROSPECT_SQL_TIMEOUT_SECONDS``). Validation, timeout and SQL errors
+    all return HTTP 400 with ``{"error": ...}``.
+
+    Cells arrive JSON-ready: ``execute_bounded`` normalizes each one
+    (:func:`introspect.sql_query.normalize_cell`) before applying the cell and
+    byte caps, so nesting a megabyte in a LIST or STRUCT cannot slip past the
+    size budget on its way here.
 
     The query runs in a worker thread: DuckDB's ``execute`` is blocking, and
     on the event loop a slow query would freeze the web UI, the MCP endpoint
@@ -126,7 +118,9 @@ async def run_query(request: Request, body: QueryRequest) -> JSONResponse:
     return JSONResponse(
         {
             "columns": result.columns,
-            "rows": [[_jsonable(v) for v in row] for row in result.rows],
+            # Cells are already JSON-ready; ``json.dumps`` renders the row
+            # tuples as arrays, so there is nothing left to convert.
+            "rows": result.rows,
             "row_count": len(result.rows),
             "truncated": result.truncated,
             "truncation_reason": result.truncation_reason,

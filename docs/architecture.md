@@ -89,6 +89,17 @@ shares the on-disk DB the server builds.
 `claude` and `codex` launch a coding agent wired to the HTTP MCP endpoint —
 see [MCP server](usage/mcp.md#dedicated-agent-sessions).
 
+`mcp` installs its own SIGINT handler *before* starting the stdio server, for
+two reasons. asyncio's runner claims SIGINT only while the current handler is
+still `signal.default_int_handler`, so registering first is what keeps ours in
+force; and the transport parks its stdin read on a worker thread, so a
+`KeyboardInterrupt` raised in the event loop cannot cancel it — the process
+would hang until the client sends another byte, then unwind as an anyio
+exception group. The handler therefore writes its line with a raw `os.write`
+(a signal can land mid-write on stderr's buffer, and re-entering that buffer
+raises) and ends the process with `os._exit`. The `except` guard around
+`server.run` is a backstop for interrupts arriving outside that window.
+
 ### Web UI (`api/main.py`)
 
 A FastAPI application launched via `introspy serve`.
@@ -284,7 +295,9 @@ fails loudly.
 both callers, taking a frozen `SqlBudget` (`MCP_BUDGET` / `API_BUDGET`) rather
 than five loose limits: an outer `LIMIT` for rows, `fetchmany` batching for a
 byte cap, per-cell clipping, and a `threading.Timer` calling
-`conn.interrupt()` for wall clock. Narrow one limit for a single request with
+`conn.interrupt()` for wall clock. Cells go through `normalize_cell()` first —
+LIST, STRUCT, MAP and BLOB become strings there — which is what gives the cell
+and byte caps a width to measure instead of an opaque Python object. Narrow one limit for a single request with
 `dataclasses.replace()`. `interrupt()` is per connection or cursor, so the object handed to
 `execute_bounded` must be the one executing. The API handler calls it through
 `asyncio.to_thread` — `db.execute` is blocking, and on the event loop one slow

@@ -35,8 +35,10 @@ from introspect.db import DEFAULT_DB_PATH
 DIST_NAME = "introspy"
 PYPI_URL = f"https://pypi.org/pypi/{DIST_NAME}/json"
 
-# Commands where a stderr line is harmless. ``mcp`` is deliberately absent: its
-# stdio transport must never see extra output. Anything not listed is suppressed.
+# Commands where a stderr line is harmless. ``mcp`` is deliberately absent: the
+# stdio server prints its own start/stop lines (see ``cli._mcp_notice``) and an
+# unrelated upgrade nag has no place on that stream. Anything not listed is
+# suppressed. stdout is never touched either way.
 ELIGIBLE_COMMANDS = frozenset(
     {
         "serve",
@@ -291,7 +293,12 @@ def _format_nag(current: str, latest: str) -> str:
     )
 
 
-def _stderr_is_tty() -> bool:
+def stderr_is_tty() -> bool:
+    """Is a human watching stderr? Also used to gate the MCP server's notices.
+
+    The guard covers captured or closed streams, where ``isatty`` raises rather
+    than answering — which is why callers should not inline ``sys.stderr.isatty``.
+    """
     try:
         return sys.stderr.isatty()
     except (AttributeError, ValueError):
@@ -348,6 +355,6 @@ def maybe_notify_update(command: str | None, defer) -> None:
     non-TTY, CI, and opt-out paths all short-circuit before anything prints or
     hits the network.
     """
-    line = _evaluate_nag(command, now=time.time(), is_tty=_stderr_is_tty())
+    line = _evaluate_nag(command, now=time.time(), is_tty=stderr_is_tty())
     if line is not None:
         defer(functools.partial(_emit_nag, line))

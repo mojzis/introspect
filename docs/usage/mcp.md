@@ -17,6 +17,12 @@ introspy mcp
 
 Starts an MCP server over stdio, for registering in a client's MCP config.
 
+Run by hand in a terminal it prints one line to stderr confirming it is up and
+waiting for a client, and Ctrl-C stops it with a matching line and exit code
+130. Both lines are suppressed when stderr is not a terminal — the exit code is
+unchanged — so a client that spawns the server sees nothing beyond the JSON-RPC
+traffic on stdout.
+
 ## Over HTTP
 
 The web server exposes the same tools and prompts at
@@ -51,8 +57,13 @@ validator — which matters here, because the logs `run_sql` reads are full of
 untrusted text that could ask a model to try exactly that.
 
 Every call is bounded at 500 rows, 64 KB of output, 200 characters per cell,
-8 KB of SQL text, and a 20 s wall clock; a truncated result says so on its
-last line. See [the SQL guard](../architecture.md#read-only-sql-guard-sql_querypy)
+8 KB of SQL text, and a 20 s wall clock. The caps are measured against the
+*serialized* value, so a LIST, STRUCT, MAP or BLOB cell counts for what it will
+weigh in the rendered table rather than as one opaque object. A truncated
+result names every cap that fired on its last line. The cell cap only shortens
+values — seeing it there means every row is present but some were too wide, so
+re-running with a smaller `limit` will not help; select narrower columns or
+`substr()` instead. See [the SQL guard](../architecture.md#read-only-sql-guard-sql_querypy)
 and [Security](../security.md).
 
 ## Query templates

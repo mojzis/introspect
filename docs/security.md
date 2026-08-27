@@ -35,9 +35,10 @@ reaches the loopback port from a context the user never authorised.
 ### 3. Denial of service, deliberate or accidental
 
 `WITH RECURSIVE` with no base case runs until something kills it.
-`string_agg` over the whole corpus is one row of hundreds of megabytes.
-`LIMIT` bounds neither. This is as often a typo as an attack, and the
-consequence is the same.
+`string_agg` over the whole corpus is one row of hundreds of megabytes, and
+`list(content)` is the same corpus in one cell whose Python object has no
+obvious width. `LIMIT` bounds none of them. This is as often a typo as an
+attack, and the consequence is the same.
 
 ## The layers
 
@@ -149,7 +150,7 @@ endpoint and the background refresh together.
 | Wall clock | 30 s | 20 s |
 | Rows | 10 000 | 500 |
 | Total output | 8 MB | 64 KB |
-| Per cell | 4 000 chars | 200 chars |
+| Per cell (serialized) | 4 000 chars | 200 chars |
 | SQL text | 32 KB | 8 KB |
 
 All five limits for one caller live in a single `SqlBudget`
@@ -167,6 +168,28 @@ Row limits are pushed into the planner as an outer `LIMIT` rather than applied
 at fetch time, and results are read with `fetchmany` so the byte cap can stop a
 single enormous row. `LIMIT` alone does not bound output size, and `fetchall`
 builds Python objects outside DuckDB's memory accounting.
+
+The caps apply to the **serialized** size of a cell, not to the Python object
+DuckDB hands back. Each cell goes through `normalize_cell` first — scalars pass
+through, `Decimal` becomes `float`, and everything else (LIST, STRUCT, MAP,
+BLOB, timestamps, UUIDs) is stringified — so the per-cell and byte caps see the
+width that will actually go on the wire. Without that step a nested type was an
+opaque object with no measurable size: `SELECT list(repeat('x', 1000000)) FROM
+range(300)` counted as a single 16-byte cell and served 300 MB through an 8 MB
+cap. Clipping a cell does not stop the read (the remaining rows are still
+worth returning) but does mark the result `truncated` — a shortened value is
+never handed back silently. `truncation_reason` names every cap that fired,
+`"; "`-joined, so a result that hit the row cap *and* had wide cells clipped
+reports both. The estimate is in UTF-8 bytes, not characters: a cell of CJK or
+emoji weighs up to four times its character count on the wire.
+
+**Residual:** the row is fully materialized as a Python object *before* it is
+normalized and clipped. The engine-side `memory_limit` bounds DuckDB's half of
+that; the Python half is bounded by cell cap × columns × rows, which is fine
+for wide result sets but not for a single cell holding the whole corpus
+(`SELECT list(content) FROM raw_messages`) on a machine where that fits under
+`memory_limit`. Closing it needs a SQL-side projection guard (`len(list)` /
+`octet_length`) or Arrow fetches with a row-group limit; neither is in place.
 
 Memory is bounded by the connection's `memory_limit` (see
 [Configuration](configuration.md#resource-limits)). Exceeding it raises

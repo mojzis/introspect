@@ -35,7 +35,7 @@ from introspect.db import (
 )
 from introspect.search import build_search_corpus, ensure_search_corpus, fts_search
 from introspect.sql_query import is_loopback_host
-from introspect.version_check import maybe_notify_update
+from introspect.version_check import maybe_notify_update, stderr_is_tty
 
 SID_TRUNCATE = 12
 
@@ -950,6 +950,47 @@ def devserve(
     _run_web_ui(host, port, days, no_resolve_projects, reload=True)
 
 
+# Ctrl-C is the only way a human stops the stdio server, so it has to end in a
+# line rather than a traceback. Two things get in the way. The transport parks
+# its stdin read on a worker thread, so the KeyboardInterrupt raised in the
+# event loop cannot cancel it: the process hangs until another byte arrives,
+# and the interrupt then unwinds through anyio's task group as an exception
+# group. Handling SIGINT ourselves short-circuits both. The handler has to be
+# installed *before* the server starts: asyncio's runner claims SIGINT only
+# when the current handler is still ``signal.default_int_handler``, so
+# registering first is what keeps ours in force and leaves the ``except``
+# guard below as a backstop for interrupts arriving outside that window.
+_INTERRUPT_EXIT_CODE = 130
+_STOPPED_NOTICE = "Introspect MCP server stopped."
+
+
+def _mcp_notice(message: str) -> None:
+    """Print an operator-facing line for the stdio server.
+
+    stdout is the JSON-RPC channel, so this goes to stderr, and only when a
+    human is watching — a client that spawned the server gets no extra output.
+    Not safe to call from a signal handler; see ``mcp``.
+    """
+    import sys  # noqa: PLC0415
+
+    if stderr_is_tty():
+        print(message, file=sys.stderr, flush=True)  # noqa: T201 - stderr only
+
+
+def _is_interrupt(exc: BaseException) -> bool:
+    """Is *exc* the shutdown Ctrl-C caused, however anyio wrapped it?
+
+    A cancelled task group re-raises as a ``BaseExceptionGroup``, and the
+    cancellation itself surfaces as ``CancelledError`` once the original
+    ``KeyboardInterrupt`` has been consumed.
+    """
+    import asyncio  # noqa: PLC0415
+
+    if isinstance(exc, BaseExceptionGroup):
+        return all(_is_interrupt(inner) for inner in exc.exceptions)
+    return isinstance(exc, KeyboardInterrupt | asyncio.CancelledError)
+
+
 @app.command()
 def mcp():
     """Run the MCP server (stdio transport) for Claude Code integration.
@@ -957,9 +998,37 @@ def mcp():
     Its `run_sql` tool takes one read-only SELECT, capped at 500 rows / 64 KB
     / 20 s, on a connection with no filesystem, network or extension access.
     """
+    import os  # noqa: PLC0415
+    import signal  # noqa: PLC0415
+
     from introspect.mcp.server import create_mcp_server  # noqa: PLC0415
 
-    create_mcp_server().run(transport="stdio")
+    server = create_mcp_server()
+    # Resolved once, up front: the handler below must not touch sys.stderr.
+    interactive = stderr_is_tty()
+
+    def _on_interrupt(_signum, _frame) -> None:
+        # A raw fd write, not print(): the signal runs on the main thread,
+        # which may be mid-write on stderr's buffer, and re-entering that
+        # buffer raises RuntimeError before os._exit could run.
+        if interactive:
+            os.write(2, _STOPPED_NOTICE.encode() + b"\n")
+        os._exit(_INTERRUPT_EXIT_CODE)
+
+    _mcp_notice(
+        "Introspect MCP server ready on stdio — waiting for a client. "
+        "Press Ctrl-C to stop."
+    )
+    previous = signal.signal(signal.SIGINT, _on_interrupt)
+    try:
+        server.run(transport="stdio")
+    except BaseException as exc:
+        if not _is_interrupt(exc):
+            raise
+        _mcp_notice(_STOPPED_NOTICE)
+        raise typer.Exit(code=_INTERRUPT_EXIT_CODE) from None
+    finally:
+        signal.signal(signal.SIGINT, previous)
 
 
 # How long to wait for a freshly-spawned server to become connectable.

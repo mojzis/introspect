@@ -37,6 +37,7 @@ from .conftest import (
     glob_pattern,
     make_assistant_message,
     make_user_message,
+    nested_type_sql,
     ttl_turn,
     write_jsonl,
 )
@@ -628,6 +629,31 @@ def test_run_sql_reports_truncation(patched_mcp_db: None):
 
     complete = run_sql("SELECT * FROM range(0, 3) AS t(n)", limit=5)
     assert "truncated" not in complete
+
+
+# LIST, STRUCT, MAP, nested LIST and BLOB each hide a payload far wider than
+# the 200-character MCP cell cap inside an object with no visible width. The
+# payload is smaller than the HTTP guard's because this cap is 20x tighter.
+_NESTED_TYPE_PROBES = nested_type_sql(20_000)
+
+
+@pytest.mark.parametrize(
+    "sql",
+    [sql for _, sql in _NESTED_TYPE_PROBES],
+    ids=[label for label, _ in _NESTED_TYPE_PROBES],
+)
+def test_run_sql_clips_nested_and_binary_cells(patched_mcp_db: None, sql: str):
+    """Regression guard: run_sql output stays small for LIST/STRUCT/MAP/BLOB.
+
+    The formatter clipped these before ``execute_bounded`` did, so this passed
+    already; it stays here so a future change to either clip cannot let a
+    megabyte-wide cell through into a conversation.
+    """
+    result = run_sql(sql)
+
+    assert len(result) < 4 * _SQL_CELL_MAX
+    assert CELL_TRUNCATION_MARKER in result
+    assert "truncated: hit the cell cap" in result
 
 
 def test_run_sql_surfaces_duckdb_errors(patched_mcp_db: None):
