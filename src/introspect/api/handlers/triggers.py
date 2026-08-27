@@ -3,7 +3,7 @@
 Shows, per session, how the *opening prompt* set the session up: which
 file/dir paths it named, whether the harness auto-loaded context (nested
 CLAUDE.md / .claude/rules, @-file expansions, the skill menu), and which
-skills/commands ran. See ``docs/first-prompt-triggers-plan.md``.
+skills/commands ran. See ``docs/plans/first-prompt-triggers.md``.
 """
 
 import math
