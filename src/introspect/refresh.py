@@ -7,9 +7,11 @@ import contextlib
 import glob
 import logging
 import os
+import re
+from collections.abc import Callable, Iterable, Iterator
 from dataclasses import dataclass
-from datetime import UTC, datetime
-from enum import Enum
+from datetime import UTC, date, datetime, timedelta
+from enum import Enum, StrEnum
 from pathlib import Path
 from typing import TYPE_CHECKING, Protocol
 
@@ -29,8 +31,75 @@ log = logging.getLogger(__name__)
 # keeps the dependency direction (handler -> refresh) one-way.
 VALID_WINDOWS = frozenset({"1", "7", "30", "month"})
 DEFAULT_WINDOW = "30"
+_CUSTOM_WINDOW_RE = re.compile(r"(?:0|[1-9][0-9]*)\Z")
 # Days returned for fixed-length tokens. ``"month"`` is computed at call time.
 _FIXED_WINDOW_DAYS: dict[str, int] = {"1": 1, "7": 7, "30": 30}
+
+# Cold-start discovery is deliberately bounded.  A mtime guard band keeps a
+# recently written Claude transcript whose timestamps lag its file mtime in
+# the preview; Codex has stable YYYY/MM/DD partitions, so it does not need to
+# scan the entire tree for the common case.
+MAX_COLD_START_CANDIDATES = 10_000
+CLAUDE_MTIME_GUARD_DAYS = 1
+
+
+class LoadingPhase(StrEnum):
+    """Lifecycle phases visible to the web UI and startup diagnostics."""
+
+    DISCOVERING = "discovering"
+    PREVIEWING = "previewing"
+    PREVIEW_READY = "preview_ready"
+    LOADING = "loading"
+    READY = "ready"
+    FAILED = "failed"
+
+
+class LoadingStage(StrEnum):
+    """Concrete work currently being performed for a loading phase."""
+
+    PROVIDER = "provider"
+    DERIVED = "derived"
+    SEARCH = "search"
+    SWAP = "swap"
+
+
+@dataclass(frozen=True)
+class RefreshTarget:
+    """The sole value used by a refresh build to identify its target window."""
+
+    window: str
+    days: int
+    generation: int = 0
+
+
+@dataclass(frozen=True)
+class LoadingState:
+    """Typed, truthful startup/refresh state.
+
+    Candidate counts are counts of discovered files, not guessed percentages
+    or ETAs.  ``target`` is captured with the state so a build can be checked
+    before it promotes its sidecar.
+    """
+
+    phase: LoadingPhase
+    target: RefreshTarget
+    candidate_count: int = 0
+    completed_candidates: int = 0
+    error: str | None = None
+    stage: LoadingStage | None = None
+
+
+@dataclass(frozen=True)
+class CandidateFiles:
+    """Explicit files selected for a bounded cold-start preview."""
+
+    claude: tuple[str, ...]
+    codex: tuple[str, ...]
+    truncated: bool = False
+
+    @property
+    def total(self) -> int:
+        return len(self.claude) + len(self.codex)
 
 
 def window_to_days(window: str) -> int:
@@ -51,6 +120,203 @@ def window_to_days(window: str) -> int:
     return _FIXED_WINDOW_DAYS[DEFAULT_WINDOW]
 
 
+def target_for_window(
+    window: str,
+    *,
+    days: int | None = None,
+    generation: int = 0,
+) -> RefreshTarget:
+    """Build a target, keeping an explicit numeric override displayable.
+
+    Numeric values are deliberately part of the target contract. ``0`` means
+    all data, while a positive value is the custom day count supplied by the
+    CLI or a refresh control. This keeps the picker, refresh loop, and MCP
+    control from silently disagreeing about the database being built.
+    """
+    if window in VALID_WINDOWS:
+        canonical_days = window_to_days(window)
+        resolved_days = canonical_days if days is None else max(0, days)
+        display_window = (
+            window if resolved_days == canonical_days else str(resolved_days)
+        )
+    elif _CUSTOM_WINDOW_RE.fullmatch(window):
+        resolved_days = int(window) if days is None else max(0, days)
+        display_window = str(resolved_days)
+    else:
+        resolved_days = window_to_days(DEFAULT_WINDOW) if days is None else max(0, days)
+        display_window = str(resolved_days) if days is not None else DEFAULT_WINDOW
+    return RefreshTarget(
+        window=display_window,
+        days=resolved_days,
+        generation=generation,
+    )
+
+
+def is_valid_refresh_target(value: str) -> bool:
+    """Return whether ``value`` is a picker token or a numeric day target."""
+    return value in VALID_WINDOWS or _CUSTOM_WINDOW_RE.fullmatch(value) is not None
+
+
+def set_refresh_target(
+    state: RefreshState,
+    window: str,
+    *,
+    days: int | None = None,
+) -> RefreshTarget:
+    """Atomically publish a new target and advance its generation.
+
+    The compatibility ``refresh_window`` attribute remains mirrored for
+    existing templates/callers, but refresh decisions use ``refresh_target``.
+    """
+    current = getattr(state, "refresh_target", None)
+    requested = target_for_window(window, days=days)
+    changed = True
+    if isinstance(current, RefreshTarget) and (
+        current.window == requested.window and current.days == requested.days
+    ):
+        target = current
+        changed = False
+    else:
+        generation = current.generation + 1 if isinstance(current, RefreshTarget) else 1
+        target = target_for_window(window, days=days, generation=generation)
+    state.refresh_target = target
+    state.refresh_window = target.window
+    state.refresh_pending = bool(getattr(state, "refresh_pending", False)) or changed
+    return target
+
+
+def _partition_date(path: str) -> date | None:
+    """Extract a Codex YYYY/MM/DD partition from any path component sequence."""
+    parts = Path(path).parts
+    for index in range(len(parts) - 2):
+        try:
+            year, month, day = (int(value) for value in parts[index : index + 3])
+            return date(year, month, day)
+        except (TypeError, ValueError):
+            continue
+    return None
+
+
+def _safe_mtime(path: str) -> float:
+    try:
+        return os.path.getmtime(path)  # noqa: PTH204
+    except (FileNotFoundError, OSError):
+        return 0.0
+
+
+def _bounded(paths: Iterable[str], limit: int) -> tuple[tuple[str, ...], bool]:
+    """Return newest paths first without retaining more than ``limit`` paths."""
+    import heapq  # noqa: PLC0415
+
+    iterator: Iterator[str] = iter(paths)
+    if limit < 1:
+        return (), next(iterator, None) is not None
+
+    selected: list[tuple[float, str]] = []
+    truncated = False
+    for path in iterator:
+        candidate = (_safe_mtime(path), path)
+        if len(selected) < limit:
+            heapq.heappush(selected, candidate)
+        elif candidate > selected[0]:
+            heapq.heapreplace(selected, candidate)
+            truncated = True
+        else:
+            truncated = True
+    selected.sort(reverse=True)
+    return tuple(path for _mtime, path in selected), truncated
+
+
+def _codex_candidate_paths(
+    codex_glob: str, *, moment: datetime, span_days: int
+) -> Iterator[str]:
+    """Yield Codex files from only the recent YYYY/MM/DD partitions."""
+    if "**" not in codex_glob:
+        return glob.iglob(codex_glob, recursive=True)  # noqa: PTH207
+
+    def paths():
+        seen: set[str] = set()
+        for offset in range(span_days):
+            partition = (moment - timedelta(days=offset)).date()
+            partition_glob = codex_glob.replace(
+                "**", f"{partition:%Y}/{partition:%m}/{partition:%d}", 1
+            )
+            for path in glob.iglob(partition_glob, recursive=True):  # noqa: PTH207
+                if path not in seen:
+                    seen.add(path)
+                    yield path
+
+    return paths()
+
+
+def discover_cold_start_candidates(
+    jsonl_glob: str,
+    codex_glob: str | None,
+    *,
+    days: int = 1,
+    now: datetime | None = None,
+    max_candidates: int = MAX_COLD_START_CANDIDATES,
+) -> CandidateFiles:
+    """Discover a bounded, conservative file set for the initial preview.
+
+    Claude selection uses a one-day mtime guard band around the requested
+    window.  Codex selection prefers its date partitions and falls back to the
+    same mtime guard when a test/custom path has no date partition.  The SQL
+    timestamp filter remains authoritative after this preselection.
+    """
+    if max_candidates < 1:
+        return CandidateFiles(
+            (),
+            (),
+            next(glob.iglob(jsonl_glob, recursive=True), None) is not None,  # noqa: PTH207
+        )
+    moment = now or datetime.now(UTC)
+    span_days = max(1, days)
+    claude_cutoff = (
+        moment - timedelta(days=span_days + CLAUDE_MTIME_GUARD_DAYS)
+    ).timestamp()
+    claude = (
+        path
+        for path in glob.iglob(jsonl_glob, recursive=True)  # noqa: PTH207
+        if _safe_mtime(path) >= claude_cutoff
+    )
+
+    codex: Iterable[str] = ()
+    if codex_glob is not None:
+        fallback_cutoff = (
+            moment - timedelta(days=span_days + CLAUDE_MTIME_GUARD_DAYS)
+        ).timestamp()
+        codex = (
+            path
+            for path in _codex_candidate_paths(
+                codex_glob, moment=moment, span_days=span_days
+            )
+            if (
+                _partition_date(path) is not None
+                or _safe_mtime(path) >= fallback_cutoff
+            )
+        )
+        # Date-partitioned Codex files are selected by partition, while
+        # unpartitioned custom paths retain the conservative mtime fallback.
+        codex = (
+            path
+            for path in codex
+            if (
+                (partition := _partition_date(path)) is None
+                or partition >= (moment - timedelta(days=span_days - 1)).date()
+            )
+        )
+
+    claude_selected, claude_truncated = _bounded(claude, max_candidates)
+    remaining = max(0, max_candidates - len(claude_selected))
+    codex_selected, codex_truncated = _bounded(codex, remaining)
+    return CandidateFiles(
+        claude_selected,
+        codex_selected,
+        claude_truncated or codex_truncated,
+    )
+
+
 class RefreshState(Protocol):
     """Contract between :func:`refresh_loop` (writer) and :func:`wait_for_refresh`
     (reader). FastAPI's ``app.state`` satisfies this after :mod:`api.main` sets
@@ -63,6 +329,9 @@ class RefreshState(Protocol):
     last_refreshed_at: datetime | None
     refresh_window: str
     last_built_days: int
+    refresh_target: RefreshTarget
+    refresh_pending: bool
+    loading_state: LoadingState
 
 
 class RefreshOutcome(Enum):
@@ -78,6 +347,7 @@ class RefreshOutcome(Enum):
 class RefreshResult:
     outcome: RefreshOutcome
     last_refreshed_at: datetime | None
+    loading_state: LoadingState | None = None
 
 
 # Internal poll cadence — kept private because callers tune *budgets*, not
@@ -102,8 +372,13 @@ async def wait_for_refresh(
     * ``COMPLETED`` — rebuild finished within ``finish_timeout``.
     * ``STILL_RUNNING`` — rebuild started but did not finish in time.
     """
+
+    def result(outcome: RefreshOutcome, timestamp: datetime | None) -> RefreshResult:
+        loading_state = getattr(state, "loading_state", None)
+        return RefreshResult(outcome, timestamp, loading_state)
+
     if state.refresh_trigger is None:
-        return RefreshResult(RefreshOutcome.DISABLED, state.last_refreshed_at)
+        return result(RefreshOutcome.DISABLED, state.last_refreshed_at)
 
     last_before = state.last_refreshed_at
     state.refresh_trigger.set()
@@ -125,10 +400,10 @@ async def wait_for_refresh(
 
     last_after = state.last_refreshed_at
     if last_after != last_before and last_after is not None:
-        return RefreshResult(RefreshOutcome.COMPLETED, last_after)
+        return result(RefreshOutcome.COMPLETED, last_after)
     if state.refresh_in_progress:
-        return RefreshResult(RefreshOutcome.STILL_RUNNING, last_after)
-    return RefreshResult(RefreshOutcome.UNCHANGED, last_after)
+        return result(RefreshOutcome.STILL_RUNNING, last_after)
+    return result(RefreshOutcome.UNCHANGED, last_after)
 
 
 def newest_mtime(jsonl_glob: str, codex_glob: str | None = None) -> float:
@@ -151,12 +426,17 @@ def newest_mtime(jsonl_glob: str, codex_glob: str | None = None) -> float:
     return latest
 
 
-def _rebuild_sidecar(
+def _rebuild_sidecar(  # noqa: PLR0913
     sidecar: Path,
     jsonl_glob: str,
     days: int,
     resolve_projects: bool,
     codex_glob: str | None = None,
+    *,
+    jsonl_candidates: list[str] | None = None,
+    codex_candidates: list[str] | None = None,
+    progress: Callable[[int, int], None] | None = None,
+    stage: Callable[[LoadingStage], None] | None = None,
 ) -> None:
     """Rebuild the materialized DB into a fresh sidecar file."""
     with contextlib.suppress(FileNotFoundError):
@@ -169,7 +449,15 @@ def _rebuild_sidecar(
             days,
             resolve_projects=resolve_projects,
             codex_glob=codex_glob,
+            jsonl_candidates=jsonl_candidates,
+            codex_candidates=codex_candidates,
+            progress=progress,
+            phase=(
+                (lambda name: stage(LoadingStage(name))) if stage is not None else None
+            ),
         )
+        if stage is not None:
+            stage(LoadingStage.SEARCH)
         build_search_corpus(conn)
     finally:
         conn.close()
@@ -194,9 +482,14 @@ def _compute_days(state: RefreshState, default: int) -> int:
     returns the ``DEFAULT_WINDOW`` days value — matching the lifespan's
     invalid-env fallback so the two code paths agree.
     """
+    target = getattr(state, "refresh_target", None)
+    if isinstance(target, RefreshTarget):
+        return target.days
     window = getattr(state, "refresh_window", None)
     if not isinstance(window, str):
         return default
+    if is_valid_refresh_target(window) and window not in VALID_WINDOWS:
+        return int(window)
     return window_to_days(window)
 
 
@@ -210,6 +503,167 @@ def _window_changed(state: RefreshState, current_days: int) -> bool:
     return last != current_days
 
 
+def _current_target(state: RefreshState, default_days: int) -> RefreshTarget:
+    target = getattr(state, "refresh_target", None)
+    if isinstance(target, RefreshTarget):
+        return target
+    window = getattr(state, "refresh_window", DEFAULT_WINDOW)
+    return target_for_window(window, days=_compute_days(state, default_days))
+
+
+def _set_loading(  # noqa: PLR0913
+    state: RefreshState,
+    phase: LoadingPhase,
+    target: RefreshTarget,
+    *,
+    stage: LoadingStage | None = None,
+    candidate_count: int = 0,
+    completed_candidates: int = 0,
+    error: str | None = None,
+) -> None:
+    state.loading_state = LoadingState(
+        phase,
+        target,
+        stage=stage,
+        candidate_count=candidate_count,
+        completed_candidates=completed_candidates,
+        error=error,
+    )
+
+
+def _start_refresh(state: RefreshState, target: RefreshTarget) -> None:
+    state.refresh_started_at = datetime.now(UTC)
+    state.refresh_in_progress = True
+    _set_loading(
+        state,
+        LoadingPhase.LOADING,
+        target,
+        stage=LoadingStage.PROVIDER,
+    )
+
+
+def _finish_refresh(state: RefreshState) -> None:
+    state.refresh_in_progress = False
+    state.refresh_started_at = None
+
+
+def _report_progress(
+    state: RefreshState,
+    default_days: int,
+    build_target: RefreshTarget,
+    completed: int,
+    total: int,
+) -> None:
+    """Publish provider progress while ignoring obsolete build callbacks."""
+    if _current_target(state, default_days) != build_target:
+        return
+    _set_loading(
+        state,
+        LoadingPhase.LOADING,
+        build_target,
+        stage=LoadingStage.PROVIDER,
+        candidate_count=total,
+        completed_candidates=completed,
+    )
+
+
+def _report_stage(
+    state: RefreshState,
+    default_days: int,
+    build_target: RefreshTarget,
+    current_stage: LoadingStage,
+) -> None:
+    """Publish build-stage progress while ignoring obsolete build callbacks."""
+    if _current_target(state, default_days) != build_target:
+        return
+    previous = getattr(state, "loading_state", None)
+    _set_loading(
+        state,
+        LoadingPhase.LOADING,
+        build_target,
+        stage=current_stage,
+        candidate_count=(
+            previous.candidate_count if isinstance(previous, LoadingState) else 0
+        ),
+        completed_candidates=(
+            previous.completed_candidates if isinstance(previous, LoadingState) else 0
+        ),
+    )
+
+
+async def _build_once(  # noqa: PLR0913
+    app: FastAPI,
+    db_path: Path,
+    sidecar: Path,
+    jsonl_glob: str,
+    target: RefreshTarget,
+    resolve_projects: bool,
+    codex_glob: str | None,
+    default_days: int,
+) -> bool:
+    """Build and promote one target, returning whether it was promoted."""
+    state = app.state
+    _start_refresh(state, target)
+
+    def report_progress(completed: int, total: int) -> None:
+        _report_progress(state, default_days, target, completed, total)
+
+    def report_stage(current_stage: LoadingStage) -> None:
+        _report_stage(state, default_days, target, current_stage)
+
+    build_task = asyncio.create_task(
+        asyncio.to_thread(
+            _rebuild_sidecar,
+            sidecar,
+            jsonl_glob,
+            target.days,
+            resolve_projects,
+            codex_glob,
+            progress=report_progress,
+            stage=report_stage,
+        )
+    )
+    try:
+        try:
+            await asyncio.shield(build_task)
+        except asyncio.CancelledError:
+            # Cancellation must not leave a worker writing the sidecar after
+            # shutdown has removed it. Wait for the non-cancellable thread,
+            # then let cancellation proceed.
+            with contextlib.suppress(BaseException):
+                await build_task
+            raise
+
+        # A picker change while the sidecar was being built makes it stale.
+        # Never publish a result for an obsolete generation.
+        current_target = _current_target(state, default_days)
+        if current_target != target:
+            with contextlib.suppress(FileNotFoundError):
+                sidecar.unlink()
+            _set_loading(state, LoadingPhase.DISCOVERING, current_target)
+            _finish_refresh(state)
+            return False
+
+        report_stage(LoadingStage.SWAP)
+        await asyncio.to_thread(_swap_in, db_path, sidecar)
+        state.database_snapshot = False
+        state.database_label = "authoritative"
+        # Record the post-swap window first so a freak exception on the
+        # timestamp assignment can't leave state thinking the DB still holds
+        # the previous window's data and force a needless rebuild on the next
+        # tick.
+        state.last_built_days = target.days
+        state.last_refreshed_at = datetime.now(UTC)
+        state.refresh_pending = False
+        _set_loading(state, LoadingPhase.READY, target)
+    except BaseException:
+        _finish_refresh(state)
+        raise
+    else:
+        _finish_refresh(state)
+        return True
+
+
 async def refresh_loop(  # noqa: PLR0913
     app: FastAPI,
     db_path: Path,
@@ -219,6 +673,9 @@ async def refresh_loop(  # noqa: PLR0913
     interval_seconds: float,
     trigger: asyncio.Event,
     codex_glob: str | None = None,
+    *,
+    initial: bool = False,
+    one_shot: bool = False,
 ) -> None:
     """Poll JSONL mtime and rebuild the materialized DB when files change.
 
@@ -236,57 +693,78 @@ async def refresh_loop(  # noqa: PLR0913
     """
     sidecar = db_path.with_name(db_path.name + ".next")
     last_mtime = newest_mtime(jsonl_glob, codex_glob)
-    while True:
-        try:
-            with contextlib.suppress(TimeoutError):
-                await asyncio.wait_for(trigger.wait(), timeout=interval_seconds)
-            trigger.clear()
-            current = newest_mtime(jsonl_glob, codex_glob)
-            current_days = _compute_days(app.state, days)
-            # Skip when nothing changed AND the window matches the last build.
-            # A manual wake with a new window forces a rebuild even on an
-            # idle filesystem. The handler may have optimistically flipped
-            # ``refresh_in_progress`` true on POST so the polling fragment
-            # always starts; clear it here so a no-op tick doesn't leave the
-            # indicator polling forever.
-            if current <= last_mtime and not _window_changed(app.state, current_days):
-                # The handler may have optimistically flipped these true on
-                # POST so the polling fragment always starts. Clear them on
-                # a no-op tick so the indicator doesn't poll forever.
-                # last_refreshed_at intentionally stays put — nothing was
-                # refreshed, so the UI honestly reverts to the prior value.
-                app.state.refresh_in_progress = False
-                app.state.refresh_started_at = None
-                continue
-            log.info("JSONL changed; rebuilding materialized DB")
-            app.state.refresh_started_at = datetime.now(UTC)
-            app.state.refresh_in_progress = True
+    first_run = initial
+    try:
+        while True:
             try:
-                await asyncio.to_thread(
-                    _rebuild_sidecar,
+                if first_run:
+                    first_run = False
+                else:
+                    if one_shot:
+                        return
+                    with contextlib.suppress(TimeoutError):
+                        await asyncio.wait_for(trigger.wait(), timeout=interval_seconds)
+                    trigger.clear()
+                current = newest_mtime(jsonl_glob, codex_glob)
+                target = _current_target(app.state, days)
+                current_days = target.days
+                # Skip when nothing changed AND the window matches the last build.
+                # A manual wake with a new window forces a rebuild even on an
+                # idle filesystem. The handler may have optimistically flipped
+                # ``refresh_in_progress`` true on POST so the polling fragment
+                # always starts; clear it here so a no-op tick doesn't leave the
+                # indicator polling forever.
+                pending = bool(getattr(app.state, "refresh_pending", False))
+                if (
+                    current <= last_mtime
+                    and not _window_changed(app.state, current_days)
+                    and not pending
+                ):
+                    # The handler may have optimistically flipped these true on
+                    # POST so the polling fragment always starts. Clear them on
+                    # a no-op tick so the indicator doesn't poll forever.
+                    # last_refreshed_at intentionally stays put — nothing was
+                    # refreshed, so the UI honestly reverts to the prior value.
+                    _finish_refresh(app.state)
+                    continue
+                log.info("JSONL changed; rebuilding materialized DB")
+                promoted = await _build_once(
+                    app,
+                    db_path,
                     sidecar,
                     jsonl_glob,
-                    current_days,
+                    target,
                     resolve_projects,
                     codex_glob,
+                    days,
                 )
-                await asyncio.to_thread(_swap_in, db_path, sidecar)
-                # Record the post-swap window first so a freak exception on
-                # the timestamp assignment can't leave state thinking the DB
-                # still holds the previous window's data and force a needless
-                # rebuild on the next tick.
-                app.state.last_built_days = current_days
-                app.state.last_refreshed_at = datetime.now(UTC)
-            finally:
-                app.state.refresh_in_progress = False
-                app.state.refresh_started_at = None
-            last_mtime = current
-            log.info("refresh complete")
-        except asyncio.CancelledError:
-            raise
-        except Exception:
-            log.warning(
-                "refresh failed; will retry next tick",
-                exc_info=True,
-            )
-            continue
+                if not promoted:
+                    first_run = one_shot
+                    continue
+                if one_shot:
+                    return
+                last_mtime = current
+                log.info("refresh complete")
+            except asyncio.CancelledError:
+                raise
+            except Exception:
+                target = _current_target(app.state, days)
+                _finish_refresh(app.state)
+                _set_loading(
+                    app.state,
+                    LoadingPhase.FAILED,
+                    target,
+                    error="refresh failed; retrying",
+                )
+                app.state.refresh_pending = True
+                log.warning(
+                    "refresh failed; will retry next tick",
+                    exc_info=True,
+                )
+                if one_shot:
+                    return
+                continue
+    finally:
+        _finish_refresh(app.state)
+        with contextlib.suppress(FileNotFoundError):
+            sidecar.unlink()

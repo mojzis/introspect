@@ -6,7 +6,7 @@ Explore Claude Code (and Codex) conversation logs via CLI, web UI, MCP server.
 
 - `db.py` — DuckDB schema over `~/.claude/projects/**/*.jsonl`; materialized at server startup, lazy views as fallback. The drop-list at the top of `materialize_views()` is the canonical relation list
 - `codex.py` — Codex rollout-log transcoder; rows land in `codex_raw_messages` and `UNION ALL BY NAME` into `raw_messages`, tagged `provider` / `harness`; session-meta naming/context lands in `codex_session_metadata`
-- `refresh.py` — background rebuild loop + window picker (`1`/`7`/`30`/`month`)
+- `refresh.py` — progressive preview/warm-snapshot startup + background sidecar rebuild loop; `RefreshTarget` / `LoadingState` are the shared lifecycle contract for picker targets (`1`/`7`/`30`/`month` or numeric days, with `0` for all data)
 - `pricing.py` — model pricing as Python `Rates` + DuckDB `CASE` SQL; five rates per model (input, cache_write_5m, cache_write_1h, cache_read, output). Unknown models bill $0
 - `cache_ttl.py` — the single prompt-cache-break detection rule (`cache_requests` view) plus the 5m-vs-1h counterfactual and its rollups; verify with `introspy cache-ttl --verify`
 - `sql_fragments.py` — shared SQL building blocks (cost / tool / file / command / skills / context-loads rollups)

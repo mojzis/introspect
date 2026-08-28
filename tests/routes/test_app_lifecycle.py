@@ -1,5 +1,6 @@
 """Tests for app lifecycle: DB swap, per-request connections, lifespan validation."""
 
+import asyncio
 import logging
 import os
 import tempfile
@@ -120,7 +121,7 @@ def test_per_request_connection_no_shared_read_conn():
         assert hasattr(app.state, "db_path")
 
 
-def test_lifespan_rejects_invalid_refresh_window_env(caplog):
+def test_lifespan_rejects_invalid_refresh_window_env(caplog, monkeypatch):
     """An invalid ``INTROSPECT_REFRESH_WINDOW`` env var falls back to default.
 
     Without validation, a typo would leave ``app.state.refresh_window`` set
@@ -130,6 +131,9 @@ def test_lifespan_rejects_invalid_refresh_window_env(caplog):
     """
     from introspect.refresh import DEFAULT_WINDOW  # noqa: PLC0415
 
+    # The test asserts the picker-window fallback rather than the separate
+    # numeric-days override. CI may define the latter for its own test setup.
+    monkeypatch.delenv("INTROSPECT_DAYS", raising=False)
     _write_sample_jsonl_path = tempfile.TemporaryDirectory()
     try:
         tmp = Path(_write_sample_jsonl_path.name)
@@ -156,3 +160,66 @@ def test_lifespan_rejects_invalid_refresh_window_env(caplog):
             )
     finally:
         _write_sample_jsonl_path.cleanup()
+
+
+def test_lifespan_keeps_numeric_days_in_initial_target():
+    """The CLI's numeric days override survives the picker default."""
+    with (
+        tempfile.TemporaryDirectory() as tmp,
+        _patched_client(
+            Path(tmp),
+            extra_env={
+                "INTROSPECT_DAYS": "7",
+                "INTROSPECT_REFRESH_INTERVAL_SECONDS": "0",
+            },
+        ) as client,
+    ):
+        assert client.get("/sessions").status_code == 200
+        assert app.state.refresh_target.days == 7
+        assert app.state.refresh_target.window == "7"
+        assert app.state.refresh_window == "7"
+
+
+def test_one_day_startup_schedules_an_authoritative_rebuild():
+    """A bounded one-day preview must be followed by the complete target build."""
+    refresh_calls: list[dict[str, object]] = []
+
+    async def fake_refresh_loop(*args, **kwargs) -> None:
+        refresh_calls.append(kwargs)
+        await asyncio.Event().wait()
+
+    with (
+        patch("introspect.api.main.refresh_loop", fake_refresh_loop),
+        tempfile.TemporaryDirectory() as tmp,
+        _patched_client(
+            Path(tmp),
+            extra_env={
+                "INTROSPECT_DAYS": "1",
+                "INTROSPECT_REFRESH_INTERVAL_SECONDS": "0",
+            },
+        ) as client,
+    ):
+        assert client.get("/sessions").status_code == 200
+        assert app.state.refresh_pending is True
+        assert len(refresh_calls) == 1
+        assert refresh_calls[0]["initial"] is True
+        assert refresh_calls[0]["one_shot"] is True
+
+
+def test_compatible_database_is_published_as_warm_snapshot():
+    """A prior complete build serves while the authoritative build runs."""
+    with tempfile.TemporaryDirectory() as tmp:
+        tmp_path = Path(tmp)
+        with _patched_client(
+            tmp_path,
+            extra_env={"INTROSPECT_REFRESH_INTERVAL_SECONDS": "0"},
+        ) as client:
+            assert client.get("/sessions").status_code == 200
+
+        with _patched_client(
+            tmp_path,
+            extra_env={"INTROSPECT_REFRESH_INTERVAL_SECONDS": "0"},
+        ) as client:
+            assert client.get("/sessions").status_code == 200
+            assert app.state.database_snapshot is True
+            assert app.state.database_label == "warm snapshot"

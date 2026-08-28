@@ -27,6 +27,7 @@ from introspect.db import (
     DEFAULT_JSONL_GLOB,
     connect_read_hardened,
     connect_writable,
+    has_compatible_materialized_db,
     materialize_views,
 )
 from introspect.mcp.refresh_bridge import set_state as set_mcp_refresh_state
@@ -34,7 +35,12 @@ from introspect.mcp.server import create_mcp_server
 from introspect.refresh import (
     DEFAULT_WINDOW,
     VALID_WINDOWS,
+    LoadingPhase,
+    LoadingStage,
+    LoadingState,
+    discover_cold_start_candidates,
     refresh_loop,
+    target_for_window,
     window_to_days,
 )
 from introspect.search import build_search_corpus
@@ -66,9 +72,84 @@ def _configure_sql_api(app: FastAPI) -> None:
     app.state.sql_api_enabled = api_toggle != "off" and is_loopback_host(bind_host)
 
 
+def _startup_preview(  # noqa: PLR0913
+    app: FastAPI,
+    conn,
+    jsonl_glob: str,
+    codex_glob: str | None,
+    days: int,
+    resolve_projects: bool,
+) -> None:
+    """Build the bounded preview and publish its terminal lifecycle state."""
+    target = app.state.refresh_target
+    preview_days = 0 if days == 0 else 1
+    candidates = discover_cold_start_candidates(
+        jsonl_glob, codex_glob, days=max(1, preview_days)
+    )
+    log.info(
+        "startup phase=%s candidates=%d",
+        LoadingPhase.PREVIEWING.value,
+        candidates.total,
+    )
+    app.state.loading_state = LoadingState(
+        LoadingPhase.PREVIEWING,
+        target,
+        stage=LoadingStage.PROVIDER,
+        candidate_count=candidates.total,
+    )
+
+    def report_progress(completed: int, total: int) -> None:
+        app.state.loading_state = LoadingState(
+            LoadingPhase.PREVIEWING,
+            target,
+            stage=LoadingStage.PROVIDER,
+            candidate_count=total,
+            completed_candidates=completed,
+        )
+
+    def report_phase(phase: str) -> None:
+        app.state.loading_state = LoadingState(
+            LoadingPhase.PREVIEWING,
+            target,
+            stage=LoadingStage(phase),
+            candidate_count=candidates.total,
+            completed_candidates=candidates.total,
+        )
+
+    materialize_views(
+        conn,
+        jsonl_glob,
+        preview_days,
+        resolve_projects=resolve_projects,
+        codex_glob=codex_glob,
+        jsonl_candidates=list(candidates.claude) if days else None,
+        codex_candidates=list(candidates.codex) if days else None,
+        progress=report_progress,
+        phase=report_phase,
+    )
+    app.state.loading_state = LoadingState(
+        LoadingPhase.PREVIEWING,
+        target,
+        stage=LoadingStage.SEARCH,
+        candidate_count=candidates.total,
+        completed_candidates=candidates.total,
+    )
+    build_search_corpus(conn)
+    app.state.loading_state = LoadingState(
+        LoadingPhase.PREVIEW_READY,
+        target,
+        stage=LoadingStage.SEARCH,
+        candidate_count=candidates.total,
+        completed_candidates=candidates.total,
+    )
+    app.state.last_built_days = preview_days
+    app.state.last_refreshed_at = datetime.now(UTC)
+    log.info("startup phase=%s", LoadingPhase.PREVIEW_READY.value)
+
+
 @asynccontextmanager
-async def lifespan(app: FastAPI):
-    """Materialize views on startup, then start MCP session manager."""
+async def lifespan(app: FastAPI):  # noqa: PLR0915
+    """Publish a bounded preview before serving, then finish in the background."""
     db_path = Path(os.environ.get("INTROSPECT_DB_PATH", str(DEFAULT_DB_PATH)))
     jsonl_glob = os.environ.get("INTROSPECT_JSONL_GLOB", DEFAULT_JSONL_GLOB)
     codex_glob = os.environ.get("INTROSPECT_CODEX_GLOB", DEFAULT_CODEX_GLOB)
@@ -88,38 +169,64 @@ async def lifespan(app: FastAPI):
     days_env = os.environ.get("INTROSPECT_DAYS")
     days = int(days_env) if days_env is not None else window_to_days(refresh_window)
     db_path.parent.mkdir(parents=True, exist_ok=True)
-    conn = connect_writable(db_path)
     resolve_projects = os.environ.get("INTROSPECT_RESOLVE_PROJECTS", "1") != "0"
-    try:
-        materialize_views(
-            conn,
-            jsonl_glob,
-            days,
-            resolve_projects=resolve_projects,
-            codex_glob=codex_glob,
-        )
-        build_search_corpus(conn)
-    finally:
-        conn.close()
 
-    # Persist config on app.state so middleware can open per-request connections
-    # (avoids the swap-during-query 500 caused by a shared read connection).
+    # Keep the target and lifecycle state available while the preview is built;
+    # requests are still held by FastAPI until this lifespan reaches ``yield``.
+    target = target_for_window(refresh_window, days=days)
     app.state.db_path = db_path
     app.state.days = days
-    app.state.refresh_window = refresh_window
-    app.state.last_built_days = days
-    app.state.last_refreshed_at = datetime.now(UTC)
+    app.state.refresh_window = target.window
+    app.state.refresh_target = target
+    app.state.refresh_pending = False
+    app.state.last_built_days = 0
+    app.state.last_refreshed_at = None
     app.state.refresh_in_progress = False
     app.state.refresh_started_at = None
-    # Always set the attribute (None when disabled) so callers can check
-    # ``state.refresh_trigger is None`` instead of falling back to ``getattr``.
+    app.state.loading_state = LoadingState(LoadingPhase.DISCOVERING, target)
     app.state.refresh_trigger = None
+    app.state.database_snapshot = False
+    app.state.database_label = "preview"
+
+    warm_snapshot = has_compatible_materialized_db(db_path)
+    if warm_snapshot:
+        # A complete prior build is immediately browseable. It remains the
+        # live path while the authoritative target is rebuilt into the sidecar.
+        app.state.database_snapshot = True
+        app.state.database_label = "warm snapshot"
+        app.state.last_built_days = 0
+        app.state.last_refreshed_at = datetime.now(UTC)
+        app.state.loading_state = LoadingState(
+            LoadingPhase.PREVIEW_READY,
+            target,
+            stage=LoadingStage.SEARCH,
+        )
+    else:
+        conn = connect_writable(db_path)
+        try:
+            _startup_preview(app, conn, jsonl_glob, codex_glob, days, resolve_projects)
+        except Exception as exc:
+            app.state.loading_state = LoadingState(
+                LoadingPhase.FAILED,
+                target,
+                error=str(exc),
+            )
+            raise
+        finally:
+            conn.close()
 
     _configure_sql_api(app)
 
+    # A startup preview is deliberately candidate-bounded, so every positive
+    # target needs an authoritative rebuild. With interval 0 this is a one-shot
+    # task; recurring auto-refresh remains disabled because the public trigger
+    # stays unset. An unlimited target already includes all available data.
+    needs_initial_load = days > 0 or warm_snapshot
+    app.state.refresh_pending = needs_initial_load
     refresh_task: asyncio.Task[None] | None = None
-    if interval > 0:
-        app.state.refresh_trigger = asyncio.Event()
+    if interval > 0 or needs_initial_load:
+        refresh_trigger = asyncio.Event()
+        app.state.refresh_trigger = refresh_trigger if interval > 0 else None
         refresh_task = asyncio.create_task(
             refresh_loop(
                 app,
@@ -128,8 +235,10 @@ async def lifespan(app: FastAPI):
                 days,
                 resolve_projects,
                 interval,
-                trigger=app.state.refresh_trigger,
+                trigger=refresh_trigger,
                 codex_glob=codex_glob,
+                initial=needs_initial_load,
+                one_shot=interval <= 0,
             )
         )
 
@@ -152,6 +261,8 @@ async def lifespan(app: FastAPI):
                 refresh_task.cancel()
                 with contextlib.suppress(asyncio.CancelledError):
                     await refresh_task
+            with contextlib.suppress(FileNotFoundError):
+                db_path.with_name(db_path.name + ".next").unlink()
 
 
 app = FastAPI(title="Introspect", lifespan=lifespan)

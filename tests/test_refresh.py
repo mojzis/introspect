@@ -15,7 +15,14 @@ import pytest
 
 from introspect import refresh
 from introspect.db import materialize_views
-from introspect.refresh import newest_mtime, refresh_loop
+from introspect.refresh import (
+    LoadingPhase,
+    discover_cold_start_candidates,
+    newest_mtime,
+    refresh_loop,
+    set_refresh_target,
+    target_for_window,
+)
 from introspect.search import build_search_corpus
 from tests.conftest import (
     codex_glob_pattern,
@@ -109,6 +116,105 @@ def test_newest_mtime_watches_codex_glob_too(tmp_path: Path) -> None:
     assert newest_mtime(jsonl_glob, codex_glob) > baseline
     # Without codex_glob, the new Codex file is invisible.
     assert newest_mtime(jsonl_glob) == baseline
+
+
+def test_cold_start_candidates_use_guard_band_and_codex_partitions(
+    tmp_path: Path,
+) -> None:
+    now = refresh.datetime(2026, 8, 28, 12, tzinfo=refresh.UTC)
+    claude = tmp_path / "claude" / "session.jsonl"
+    stale_claude = tmp_path / "claude" / "stale.jsonl"
+    codex = tmp_path / "codex" / "2026" / "08" / "28" / "rollout.jsonl"
+    old_codex = tmp_path / "codex" / "2026" / "08" / "01" / "rollout.jsonl"
+    for path in (claude, stale_claude, codex, old_codex):
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.touch()
+    os.utime(claude, (now.timestamp(), now.timestamp()))
+    stale_mtime = (now - refresh.timedelta(days=3)).timestamp()
+    os.utime(stale_claude, (stale_mtime, stale_mtime))
+    os.utime(codex, (stale_mtime, stale_mtime))
+    os.utime(old_codex, (now.timestamp(), now.timestamp()))
+
+    candidates = discover_cold_start_candidates(
+        str(tmp_path / "claude" / "*.jsonl"),
+        str(tmp_path / "codex" / "**" / "*.jsonl"),
+        days=1,
+        now=now,
+    )
+
+    assert candidates.claude == (str(claude),)
+    assert candidates.codex == (str(codex),)
+
+
+def test_target_override_advances_generation_and_loading_is_terminal() -> None:
+    state = types.SimpleNamespace(
+        refresh_target=target_for_window("30"),
+        refresh_window="30",
+        refresh_pending=False,
+    )
+    target = set_refresh_target(state, "7")
+
+    assert target.days == 7
+    assert target.generation == 1
+    assert state.refresh_target == target
+    assert state.refresh_pending is True
+    assert LoadingPhase.PREVIEW_READY.value == "preview_ready"
+
+    state.refresh_pending = False
+    same_target = set_refresh_target(state, "7")
+    assert same_target == target
+    assert same_target.generation == target.generation
+    assert state.refresh_pending is False
+
+
+def test_numeric_targets_include_custom_days_and_all_data() -> None:
+    custom = target_for_window("14")
+    all_data = target_for_window("30", days=0)
+
+    assert custom.window == "14"
+    assert custom.days == 14
+    assert all_data.window == "0"
+    assert all_data.days == 0
+
+
+def test_initial_refresh_runs_without_waiting_for_interval(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """An initial full-target refresh starts immediately, including one-shot mode."""
+    _write_session(tmp_path, "sess-initial")
+    jsonl_glob = glob_pattern(tmp_path)
+    db_path = tmp_path / "db.duckdb"
+    app = _fake_app()
+    app.state.refresh_target = target_for_window("7")
+    app.state.refresh_window = "7"
+    app.state.refresh_pending = True
+
+    rebuild_calls = {"n": 0}
+
+    def fake_rebuild(*args, **kwargs):
+        rebuild_calls["n"] += 1
+
+    monkeypatch.setattr(refresh, "_rebuild_sidecar", fake_rebuild)
+    monkeypatch.setattr(refresh, "_swap_in", lambda *args, **kwargs: None)
+
+    async def run() -> None:
+        task = asyncio.create_task(
+            refresh_loop(
+                app,  # ty: ignore[invalid-argument-type]
+                db_path,
+                jsonl_glob,
+                7,
+                False,
+                interval_seconds=600,
+                trigger=asyncio.Event(),
+                initial=True,
+                one_shot=True,
+            )
+        )
+        await asyncio.wait_for(task, timeout=0.5)
+
+    asyncio.run(run())
+    assert rebuild_calls["n"] == 1
 
 
 def test_refresh_short_circuits_when_unchanged(

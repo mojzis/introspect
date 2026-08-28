@@ -45,7 +45,7 @@ Nine hand-built tools, plus the ones generated per deterministic
 | `run_sql` | `sql`, `limit` | Execute one read-only `SELECT` query. Capped at 500 rows / 64 KB / 20 s. |
 | `describe_schema` | — | List relations available to `run_sql` with their columns. Call it before writing SQL. |
 | `list_query_templates` | `kind` | Render the curated SQL cookbook — see [below](#query-templates). |
-| `refresh_data` | — | Wake the refresh loop and wait for the rebuild. Only available when running embedded in `introspy serve`; the stdio server returns "unavailable". |
+| `refresh_data` | `window` (optional) | Wake the refresh loop and wait for the rebuild. `window` accepts `1`, `7`, `30`, `month`, `0` (all data), or a positive custom day count. The result includes the shared phase, target, database (preview/snapshot/authoritative), stage, and candidate-count contract. Only available when running embedded in `introspy serve`; the stdio server returns "unavailable". |
 
 `run_sql` accepts exactly one `SELECT` statement (`WITH` and DuckDB's
 FROM-first form count as one). Writes, `ATTACH`, `INSTALL`, `LOAD`, `PRAGMA`,
@@ -155,7 +155,11 @@ ones meant for the agent.
 ## What the MCP server does not do
 
 - It cannot modify your logs. Every tool is read-only, and `refresh_data` only
-  rebuilds the derived DuckDB.
+  rebuilds the derived DuckDB. It builds a sidecar and promotes it atomically;
+  a failed build leaves the previous preview or snapshot available. The web
+  button is non-blocking; the MCP call waits up to its bounded timeout and
+  reports `complete`, `unchanged`, `still running`, or `failed` together with
+  the current lifecycle contract.
 - `run_sql` is not a DuckDB shell — one `SELECT` statement, 500 rows maximum,
   no filesystem or network access, 20 s of wall clock. For larger result sets
   from a notebook, use the [SQL API](sql-api.md).

@@ -20,7 +20,12 @@ from fastapi import Request
 from fastapi.responses import HTMLResponse
 
 from introspect.api.handlers._helpers import templates
-from introspect.refresh import DEFAULT_WINDOW, VALID_WINDOWS
+from introspect.refresh import (
+    DEFAULT_WINDOW,
+    VALID_WINDOWS,
+    is_valid_refresh_target,
+    set_refresh_target,
+)
 
 # Relative-time thresholds for :func:`format_relative`.
 _JUST_NOW_SECONDS = 30
@@ -105,6 +110,9 @@ def _render(  # noqa: PLR0913
     window: str,
     poll_delay_ms: int,
     notify: bool,
+    loading_state: object | None = None,
+    database_snapshot: bool = False,
+    database_label: str = "authoritative",
 ) -> HTMLResponse:
     return templates.TemplateResponse(
         request,
@@ -117,13 +125,28 @@ def _render(  # noqa: PLR0913
             "window": window,
             "poll_delay_ms": poll_delay_ms,
             "notify": notify,
+            "loading_state": loading_state,
+            "database_snapshot": database_snapshot,
+            "database_label": database_label,
         },
     )
 
 
 def _current_window(request: Request) -> str:
     """Read the current window token from ``app.state``, defaulting to ``"30"``."""
-    value = getattr(request.app.state, "refresh_window", DEFAULT_WINDOW)
+    # Keep compatibility with small embedders/tests that set the legacy
+    # attribute directly; normal writes go through ``set_refresh_target``.
+    legacy = getattr(request.app.state, "refresh_window", None)
+    target = getattr(request.app.state, "refresh_target", None)
+    if target is not None and (
+        not isinstance(legacy, str)
+        or legacy not in VALID_WINDOWS
+        or legacy == target.window
+    ):
+        return target.window
+    if isinstance(legacy, str) and legacy in VALID_WINDOWS:
+        return legacy
+    value = legacy or DEFAULT_WINDOW
     return value or DEFAULT_WINDOW
 
 
@@ -138,21 +161,27 @@ def _current_indicator(request: Request, *, notify: bool = False) -> HTMLRespons
     state = request.app.state
     trigger: asyncio.Event | None = state.refresh_trigger
     window = _current_window(request)
+    loading_state = getattr(state, "loading_state", None)
+    database_snapshot = bool(getattr(state, "database_snapshot", False))
+    database_label = getattr(state, "database_label", "authoritative")
     if trigger is None:
         return _render(
             request,
             disabled=True,
-            in_progress=False,
-            last_refreshed_at=None,
+            in_progress=bool(getattr(state, "refresh_in_progress", False)),
+            last_refreshed_at=getattr(state, "last_refreshed_at", None),
             window=window,
             poll_delay_ms=_POLL_SCHEDULE[0][1],
             notify=False,
+            loading_state=loading_state,
+            database_snapshot=database_snapshot,
+            database_label=database_label,
         )
     in_progress = bool(state.refresh_in_progress)
     last_refreshed_at = state.last_refreshed_at
     started_at = getattr(state, "refresh_started_at", None)
     show_flash = notify and _just_completed(in_progress, last_refreshed_at)
-    return _render(
+    response = _render(
         request,
         disabled=False,
         in_progress=in_progress,
@@ -160,7 +189,16 @@ def _current_indicator(request: Request, *, notify: bool = False) -> HTMLRespons
         window=window,
         poll_delay_ms=_poll_delay_ms(started_at),
         notify=show_flash,
+        loading_state=loading_state,
+        database_snapshot=database_snapshot,
+        database_label=database_label,
     )
+    # The status request polls only while a rebuild is running. Once its atomic
+    # database swap has completed, reload the current page so every panel reads
+    # from the new connection.
+    if show_flash:
+        response.headers["HX-Refresh"] = "true"
+    return response
 
 
 async def refresh_status(request: Request) -> HTMLResponse:
@@ -176,9 +214,10 @@ async def refresh_status(request: Request) -> HTMLResponse:
 async def refresh_now(request: Request) -> HTMLResponse:
     """POST /refresh — wake the background loop and re-render the indicator.
 
-    Accepts an optional ``window`` form field. Valid values
-    (``"1" / "7" / "30" / "month"``) update ``app.state.refresh_window``;
-    invalid or missing input keeps the existing sticky choice.
+    Accepts an optional ``window`` form field. Valid values are the standard
+    picker tokens (``"1" / "7" / "30" / "month"``) or a numeric custom
+    target (``"0"`` means all data); invalid or missing input keeps the
+    existing sticky choice.
 
     Returns immediately after setting the trigger — the user keeps browsing
     on the existing DB while the rebuild runs in the background; the
@@ -193,8 +232,8 @@ async def refresh_now(request: Request) -> HTMLResponse:
     """
     form = await request.form()
     submitted = form.get("window")
-    if isinstance(submitted, str) and submitted in VALID_WINDOWS:
-        request.app.state.refresh_window = submitted
+    if isinstance(submitted, str) and is_valid_refresh_target(submitted):
+        set_refresh_target(request.app.state, submitted)
     state = request.app.state
     trigger = state.refresh_trigger
     if trigger is not None:

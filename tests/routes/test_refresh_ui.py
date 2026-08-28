@@ -7,6 +7,7 @@ from datetime import UTC, datetime, timedelta
 from pathlib import Path
 
 from introspect.api.main import app
+from introspect.refresh import LoadingPhase, LoadingState, RefreshTarget
 
 from .conftest import _patched_client
 
@@ -86,6 +87,36 @@ def test_refresh_status_polls_while_in_progress():
                     delattr(app.state, attr)
 
 
+def test_refresh_status_is_an_accessible_live_region_with_progress():
+    """The shared lifecycle state is visible to assistive technology."""
+    with tempfile.TemporaryDirectory() as tmp, _patched_client(Path(tmp)) as client:
+        app.state.refresh_trigger = asyncio.Event()
+        app.state.refresh_in_progress = True
+        app.state.last_refreshed_at = datetime.now(UTC)
+        app.state.loading_state = LoadingState(
+            LoadingPhase.LOADING,
+            RefreshTarget("14", 14),
+            candidate_count=4,
+            completed_candidates=2,
+        )
+        try:
+            response = client.get("/refresh-status")
+            assert response.status_code == 200
+            assert 'role="status"' in response.text
+            assert 'aria-live="polite"' in response.text
+            assert 'aria-busy="true"' in response.text
+            assert "2/4 files" in response.text
+        finally:
+            for attr in (
+                "refresh_trigger",
+                "refresh_in_progress",
+                "last_refreshed_at",
+                "loading_state",
+            ):
+                if hasattr(app.state, attr):
+                    delattr(app.state, attr)
+
+
 def test_refresh_indicator_label_has_no_date():
     """The rendered label never contains a YYYY-MM-DD date — only relative time."""
     with tempfile.TemporaryDirectory() as tmp, _patched_client(Path(tmp)) as client:
@@ -128,6 +159,37 @@ def test_post_refresh_with_window_updates_app_state():
                 "refresh_in_progress",
                 "last_refreshed_at",
                 "refresh_window",
+            ):
+                if hasattr(app.state, attr):
+                    delattr(app.state, attr)
+
+
+def test_post_refresh_accepts_custom_and_all_data_targets():
+    """The web control can continue a CLI target or select all data."""
+    with tempfile.TemporaryDirectory() as tmp, _patched_client(Path(tmp)) as client:
+        app.state.refresh_trigger = asyncio.Event()
+        app.state.refresh_in_progress = False
+        app.state.last_refreshed_at = datetime.now(UTC)
+        app.state.refresh_window = "30"
+        try:
+            response = client.post("/refresh", data={"window": "14"})
+            assert response.status_code == 200
+            assert app.state.refresh_target.days == 14
+            assert '<option value="14" selected>14 days (CLI)</option>' in response.text
+
+            response = client.post("/refresh", data={"window": "0"})
+            assert response.status_code == 200
+            assert app.state.refresh_target.days == 0
+            assert '<option value="0" selected>All data</option>' in response.text
+        finally:
+            for attr in (
+                "refresh_trigger",
+                "refresh_in_progress",
+                "last_refreshed_at",
+                "refresh_window",
+                "refresh_target",
+                "refresh_pending",
+                "refresh_started_at",
             ):
                 if hasattr(app.state, attr):
                     delattr(app.state, attr)
@@ -252,8 +314,8 @@ def test_refresh_status_poll_delay_tightens_with_elapsed_time():
                     delattr(app.state, attr)
 
 
-def test_refresh_status_shows_completion_flash():
-    """Polled status flipping to done with a fresh timestamp renders the ✓ flash."""
+def test_refresh_status_reloads_page_after_completion():
+    """A completed polled refresh tells HTMX to reload the current page."""
     with tempfile.TemporaryDirectory() as tmp, _patched_client(Path(tmp)) as client:
         app.state.refresh_trigger = asyncio.Event()
         app.state.refresh_in_progress = False
@@ -264,6 +326,7 @@ def test_refresh_status_shows_completion_flash():
             assert response.status_code == 200
             assert "refresh-flash" in response.text
             assert "refreshed" in response.text
+            assert response.headers["HX-Refresh"] == "true"
             # Polling stops once the flash is shown — no load-delay trigger remains.
             # (The window picker still has hx-trigger="change", which is unrelated.)
             assert "load delay:" not in response.text
@@ -273,6 +336,96 @@ def test_refresh_status_shows_completion_flash():
                 "refresh_in_progress",
                 "last_refreshed_at",
                 "refresh_started_at",
+            ):
+                if hasattr(app.state, attr):
+                    delattr(app.state, attr)
+
+
+def test_refresh_status_labels_preview_database():
+    """The indicator identifies data served from the startup preview."""
+    with tempfile.TemporaryDirectory() as tmp, _patched_client(Path(tmp)) as client:
+        app.state.refresh_trigger = asyncio.Event()
+        app.state.refresh_in_progress = False
+        app.state.last_refreshed_at = datetime.now(UTC)
+        app.state.database_snapshot = False
+        app.state.database_label = "preview"
+        app.state.loading_state = LoadingState(
+            LoadingPhase.PREVIEW_READY,
+            RefreshTarget("30", 30),
+        )
+        try:
+            response = client.get("/refresh-status")
+            assert response.status_code == 200
+            assert "preview" in response.text
+            assert "refreshed" in response.text
+        finally:
+            for attr in (
+                "refresh_trigger",
+                "refresh_in_progress",
+                "last_refreshed_at",
+                "database_snapshot",
+                "database_label",
+                "loading_state",
+            ):
+                if hasattr(app.state, attr):
+                    delattr(app.state, attr)
+
+
+def test_refresh_status_labels_warm_snapshot():
+    """The indicator identifies a compatible prior database snapshot."""
+    with tempfile.TemporaryDirectory() as tmp, _patched_client(Path(tmp)) as client:
+        app.state.refresh_trigger = asyncio.Event()
+        app.state.refresh_in_progress = False
+        app.state.last_refreshed_at = datetime.now(UTC)
+        app.state.database_snapshot = True
+        app.state.database_label = "warm snapshot"
+        app.state.loading_state = LoadingState(
+            LoadingPhase.PREVIEW_READY,
+            RefreshTarget("30", 30),
+        )
+        try:
+            response = client.get("/refresh-status")
+            assert response.status_code == 200
+            assert "warm snapshot" in response.text
+        finally:
+            for attr in (
+                "refresh_trigger",
+                "refresh_in_progress",
+                "last_refreshed_at",
+                "database_snapshot",
+                "database_label",
+                "loading_state",
+            ):
+                if hasattr(app.state, attr):
+                    delattr(app.state, attr)
+
+
+def test_refresh_status_reports_failed_authoritative_load():
+    """A failed build is visible while the prior snapshot remains usable."""
+    with tempfile.TemporaryDirectory() as tmp, _patched_client(Path(tmp)) as client:
+        app.state.refresh_trigger = asyncio.Event()
+        app.state.refresh_in_progress = False
+        app.state.last_refreshed_at = datetime.now(UTC)
+        app.state.database_snapshot = True
+        app.state.database_label = "warm snapshot"
+        app.state.loading_state = LoadingState(
+            LoadingPhase.FAILED,
+            RefreshTarget("30", 30),
+            error="refresh failed; retrying",
+        )
+        try:
+            response = client.get("/refresh-status")
+            assert response.status_code == 200
+            assert "Refresh failed" in response.text
+            assert "warm snapshot" in response.text
+        finally:
+            for attr in (
+                "refresh_trigger",
+                "refresh_in_progress",
+                "last_refreshed_at",
+                "database_snapshot",
+                "database_label",
+                "loading_state",
             ):
                 if hasattr(app.state, attr):
                     delattr(app.state, attr)

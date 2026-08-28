@@ -11,8 +11,8 @@ reads is listed below; `tests/test_docs_drift.py` fails if `src/` grows an
 | `INTROSPECT_DB_PATH` | `~/.introspect/introspect.duckdb` | CLI, web app, update check | Database file location. |
 | `INTROSPECT_JSONL_GLOB` | `~/.claude/projects/**/*.jsonl` | web app | Glob for Claude Code conversation logs. |
 | `INTROSPECT_CODEX_GLOB` | `~/.codex/sessions/**/*.jsonl` | web app | Glob for Codex CLI rollout logs. A missing directory or non-matching glob is a silent no-op. |
-| `INTROSPECT_DAYS` | resolved from `INTROSPECT_REFRESH_WINDOW` | web app | Days of history to load (`0` = no limit). `serve` / `devserve` set it from `-d`; it takes precedence over the window picker on startup. |
-| `INTROSPECT_REFRESH_WINDOW` | `30` | web app | Window-picker token: `1`, `7`, `30`, or `month` (calendar-month-to-date). An unrecognized value logs a warning and falls back to the default. |
+| `INTROSPECT_DAYS` | resolved from `INTROSPECT_REFRESH_WINDOW` | web app | Days of history to load (`0` = no limit). `serve` / `devserve` set it from `-d`; it takes precedence over the window picker on startup. A positive custom value remains selectable as `<N> days (CLI)`. |
+| `INTROSPECT_REFRESH_WINDOW` | `30` | web app | Window-picker token: `1`, `7`, `30`, or `month` (calendar-month-to-date). The refresh controls also accept a numeric target (`0` = all data, positive values = custom days). An unrecognized value logs a warning and falls back to the default. |
 | `INTROSPECT_REFRESH_INTERVAL_SECONDS` | `600` | web app | Background refresh poll interval; `0` disables auto-refresh. |
 | `INTROSPECT_RESOLVE_PROJECTS` | `1` | web app | When `0`, skip git worktree resolution for project names. Set by `serve --no-resolve-projects`. |
 | `INTROSPECT_HOST` | unset | set by `serve`, read by the web app | The address the server bound to. Gates the [SQL API](usage/sql-api.md) and the loopback `Host` allowlist — see below. |
@@ -108,5 +108,20 @@ file mtimes and rebuilds into a sidecar database, then atomically swaps it over
 the live one. The manual "Refresh now" button and the `refresh_data` MCP tool
 can wake the loop early.
 
+Startup is progressive: for a bounded target without a compatible existing
+database, the server first publishes a bounded one-day **preview**; with one,
+it serves the prior database immediately as a **warm snapshot**. The refresh
+indicator labels these states, and reports a failed authoritative rebuild
+while keeping the available preview or snapshot usable. The later
+authoritative build is promoted atomically when it succeeds. With
+`INTROSPECT_DAYS=0`, all data is loaded as the preview.
+
 The **window picker** scopes materialization to `1`, `7`, or `30` days, or the
-current calendar month. Changing it forces a rebuild on the next tick.
+current calendar month. Changing it forces a rebuild on the next tick. A
+positive numeric `INTROSPECT_DAYS` value takes precedence over
+`INTROSPECT_REFRESH_WINDOW` at startup; the picker shows it as a custom
+`<N> days (CLI)` window and the authoritative build uses that number of days.
+`INTROSPECT_DAYS=0` means all data and is shown as an `All data` custom target.
+The indicator announces preview, warm-snapshot, loading, ready, and failed
+states to assistive technology while the database remains available during a
+background build.

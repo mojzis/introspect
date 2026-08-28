@@ -299,7 +299,17 @@ the model no anchor. The same data is available over MCP as the
 A background loop polls the JSONL files and rebuilds the database automatically
 (every 10 minutes by default). You can also trigger a rebuild from the "Refresh
 now" button, and scope how much history is loaded with the window picker
-(`1` / `7` / `30` days, or the current calendar month).
+(`1` / `7` / `30` days, the current calendar month, or the selected custom CLI
+target). `0` means all data. The click returns immediately while the indicator
+polls its status fragment; the existing database remains browseable until the
+new sidecar is complete. After a successful swap, the current page reloads
+automatically so its panels use the refreshed data.
+
+The indicator is an accessible live status region. It announces preview or warm
+snapshot availability, discovery and loading stages (including truthful file
+counts when available), successful promotion, and failures. A failure leaves
+the last usable database in place and is reported without pretending that a
+percentage or ETA is known.
 
 See [Configuration](../configuration.md) for the environment variables that
 control refresh behaviour.
