@@ -35,6 +35,7 @@ __all__ = [
     "TOOL_COUNTS_SUBQUERY",
     "TOOL_COUNTS_WITH_ERRORS_SUBQUERY",
     "_build_session_cost_subquery",
+    "build_provider_summaries",
 ]
 
 log = logging.getLogger(__name__)
@@ -75,6 +76,30 @@ def safe_json(raw: str | None) -> dict:
     except (TypeError, ValueError):
         return {}
     return parsed if isinstance(parsed, dict) else {}
+
+
+def build_provider_summaries(
+    db: duckdb.DuckDBPyConnection,
+) -> list[dict[str, object]]:
+    """Return canonical session and cost totals grouped by provider."""
+    rows = db.execute(
+        """
+        SELECT provider, COUNT(*) AS sessions,
+               COALESCE(SUM(cost_usd), 0.0) AS cost_usd
+        FROM session_stats
+        WHERE provider IS NOT NULL
+        GROUP BY provider
+        ORDER BY provider
+        """
+    ).fetchall()
+    return [
+        {
+            "provider": row[0],
+            "sessions": int(row[1]),
+            "cost": format_cost(float(row[2] or 0.0)),
+        }
+        for row in rows
+    ]
 
 
 SESSIONS_PER_PAGE_DEFAULT = 50

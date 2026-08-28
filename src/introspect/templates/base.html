@@ -459,6 +459,10 @@
             ).then(function () {
                 if (el.dataset.onClick === 'hourly-drilldown') {
                     var breakdown = el.dataset.breakdown || 'total';
+                    var provider = el.dataset.provider || '';
+                    var providerParam = provider
+                        ? '&provider=' + encodeURIComponent(provider)
+                        : '';
                     el.on('plotly_click', function (evt) {
                         if (!evt || !evt.points || !evt.points.length) return;
                         var rawX = evt.points[0].x;
@@ -469,23 +473,30 @@
                             : String(rawX).slice(0, 10);
                         htmx.ajax('GET',
                             '/cost-overview/breakdown/' + encodeURIComponent(day)
-                            + '?breakdown=' + encodeURIComponent(breakdown),
+                            + '?breakdown=' + encodeURIComponent(breakdown)
+                            + providerParam,
                             {target: '#hourly-cost-panel', swap: 'innerHTML'}
                         );
                         htmx.ajax('GET',
-                            '/cost-overview/portfolio?day=' + encodeURIComponent(day),
+                            '/cost-overview/portfolio?day=' + encodeURIComponent(day)
+                            + providerParam,
                             {target: '#cost-portfolio-panel', swap: 'innerHTML'}
                         );
                     });
                 } else if (el.dataset.onClick === 'portfolio-hour') {
                     var day = el.dataset.day || '';
+                    var provider = el.dataset.provider || '';
+                    var providerParam = provider
+                        ? '&provider=' + encodeURIComponent(provider)
+                        : '';
                     el.on('plotly_click', function (evt) {
                         if (!evt || !evt.points || !evt.points.length) return;
                         // Hourly bucket arrives as the strftime "HH:00" string.
                         var hour = String(evt.points[0].x).slice(0, 2);
                         htmx.ajax('GET',
                             '/cost-overview/portfolio?day=' + encodeURIComponent(day)
-                            + '&hour=' + encodeURIComponent(hour),
+                            + '&hour=' + encodeURIComponent(hour)
+                            + providerParam,
                             {target: '#cost-portfolio-panel', swap: 'innerHTML'}
                         );
                     });

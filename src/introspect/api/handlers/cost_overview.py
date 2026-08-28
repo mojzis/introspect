@@ -39,7 +39,6 @@ import math
 from collections import defaultdict
 from datetime import UTC, datetime, timedelta
 from typing import Any
-from urllib.parse import parse_qs, urlsplit
 
 import duckdb
 from fastapi import HTTPException, Request
@@ -63,6 +62,7 @@ from ._helpers import (
     OBVIOUS_COMMANDS_SQL,
     SESSION_COST_SUBQUERY,
     build_cost_attribution_sql,
+    build_provider_summaries,
     clean_title,
     conn,
     format_cost,
@@ -95,36 +95,6 @@ HUGE_READS_MIN_TOKENS = 100_000
 # share rounds below this threshold — at that point the percentage is
 # noisier than informative.
 CACHE_LOSS_PCT_DISPLAY_THRESHOLD = 0.1
-
-
-def _provider_summaries(db: Any) -> list[dict[str, Any]]:
-    """Return canonical session and cost totals grouped by provider."""
-    rows = db.execute(
-        """
-        SELECT provider, COUNT(*) AS sessions,
-               COALESCE(SUM(cost_usd), 0.0) AS cost_usd
-        FROM session_stats
-        WHERE provider IS NOT NULL
-        GROUP BY provider
-        ORDER BY provider
-        """
-    ).fetchall()
-    return [
-        {
-            "provider": row[0],
-            "sessions": int(row[1]),
-            "cost": format_cost(float(row[2] or 0.0)),
-        }
-        for row in rows
-    ]
-
-
-def _request_provider(request: Request, provider: str) -> str:
-    """Keep provider scope on HTMX requests issued by chart click handlers."""
-    if provider.strip():
-        return provider.strip()
-    current_url = request.headers.get("HX-Current-URL", "")
-    return parse_qs(urlsplit(current_url).query).get("provider", [""])[0].strip()
 
 
 def _window_for(day: str | None, hour: str | None) -> TimeWindow | None:
@@ -532,7 +502,7 @@ async def cost_overview(request: Request, provider: str = "") -> HTMLResponse:
             "is_filtered": False,
             "filter_label": "",
             "provider": provider,
-            "provider_summaries": _provider_summaries(db),
+            "provider_summaries": build_provider_summaries(db),
             **panel,
             **daily_panel,
         },
@@ -553,7 +523,7 @@ async def cost_portfolio_panel(
         hour_str = parse_hour(hour) if hour else None
     except ValueError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
-    provider = _request_provider(request, provider)
+    provider = provider.strip()
     window = _window_for(day_str, hour_str)
 
     db = conn(request)

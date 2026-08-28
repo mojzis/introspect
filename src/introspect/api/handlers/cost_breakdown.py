@@ -13,7 +13,6 @@ this module is side-effect-free.
 from __future__ import annotations
 
 from typing import Any
-from urllib.parse import parse_qs, urlsplit
 
 import duckdb
 import nolegend
@@ -52,14 +51,6 @@ LABEL_TOP_N = 4
 # grand total. Tiny labels with arrows sticking into bigger neighbours
 # look noisy and don't help identification.
 LABEL_MIN_SHARE = 0.04
-
-
-def _request_provider(request: Request, provider: str) -> str:
-    """Keep provider scope on HTMX requests issued by chart click handlers."""
-    if provider.strip():
-        return provider.strip()
-    current_url = request.headers.get("HX-Current-URL", "")
-    return parse_qs(urlsplit(current_url).query).get("provider", [""])[0].strip()
 
 
 def _normalise_breakdown(value: str) -> str:
@@ -421,7 +412,7 @@ async def daily_panel(
     request: Request, breakdown: str, provider: str = ""
 ) -> HTMLResponse:
     """Return the daily-cost panel fragment (chart + controls)."""
-    provider = _request_provider(request, provider)
+    provider = provider.strip()
     context = build_daily_panel_context(conn(request), breakdown, provider)
     context["parent"] = parent(request)
     return templates.TemplateResponse(request, "_daily_cost_panel.html", context)
@@ -438,7 +429,7 @@ async def hourly_panel(
         day_str = parse_day(day)
     except ValueError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
-    provider = _request_provider(request, provider)
+    provider = provider.strip()
     context = _build_hourly_panel_context(
         conn(request), day_str, breakdown, provider.strip()
     )

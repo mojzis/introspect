@@ -4,6 +4,7 @@ from datetime import datetime, timedelta
 from pathlib import Path
 
 from ..conftest import (
+    codex_glob_pattern,
     local_client,
     make_assistant_message,
     make_user_message,
@@ -267,7 +268,7 @@ def _run_with_client(tmp: Path, fn):
             {
                 "INTROSPECT_DB_PATH": str(db_path),
                 "INTROSPECT_JSONL_GLOB": glob_pattern(tmp),
-                "INTROSPECT_CODEX_GLOB": str(tmp / "codex" / "**" / "*.jsonl"),
+                "INTROSPECT_CODEX_GLOB": codex_glob_pattern(tmp),
                 "INTROSPECT_DAYS": "0",
             },
         ),
