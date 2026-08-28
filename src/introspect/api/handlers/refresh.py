@@ -105,6 +105,9 @@ def _render(  # noqa: PLR0913
     window: str,
     poll_delay_ms: int,
     notify: bool,
+    loading_state: object | None = None,
+    database_snapshot: bool = False,
+    database_label: str = "authoritative",
 ) -> HTMLResponse:
     return templates.TemplateResponse(
         request,
@@ -117,6 +120,9 @@ def _render(  # noqa: PLR0913
             "window": window,
             "poll_delay_ms": poll_delay_ms,
             "notify": notify,
+            "loading_state": loading_state,
+            "database_snapshot": database_snapshot,
+            "database_label": database_label,
         },
     )
 
@@ -150,15 +156,21 @@ def _current_indicator(request: Request, *, notify: bool = False) -> HTMLRespons
     state = request.app.state
     trigger: asyncio.Event | None = state.refresh_trigger
     window = _current_window(request)
+    loading_state = getattr(state, "loading_state", None)
+    database_snapshot = bool(getattr(state, "database_snapshot", False))
+    database_label = getattr(state, "database_label", "authoritative")
     if trigger is None:
         return _render(
             request,
             disabled=True,
-            in_progress=False,
-            last_refreshed_at=None,
+            in_progress=bool(getattr(state, "refresh_in_progress", False)),
+            last_refreshed_at=getattr(state, "last_refreshed_at", None),
             window=window,
             poll_delay_ms=_POLL_SCHEDULE[0][1],
             notify=False,
+            loading_state=loading_state,
+            database_snapshot=database_snapshot,
+            database_label=database_label,
         )
     in_progress = bool(state.refresh_in_progress)
     last_refreshed_at = state.last_refreshed_at
@@ -172,6 +184,9 @@ def _current_indicator(request: Request, *, notify: bool = False) -> HTMLRespons
         window=window,
         poll_delay_ms=_poll_delay_ms(started_at),
         notify=show_flash,
+        loading_state=loading_state,
+        database_snapshot=database_snapshot,
+        database_label=database_label,
     )
 
 

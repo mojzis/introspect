@@ -108,5 +108,17 @@ file mtimes and rebuilds into a sidecar database, then atomically swaps it over
 the live one. The manual "Refresh now" button and the `refresh_data` MCP tool
 can wake the loop early.
 
+Startup is progressive: for a bounded target without a compatible existing
+database, the server first publishes a bounded one-day **preview**; with one,
+it serves the prior database immediately as a **warm snapshot**. The refresh
+indicator labels these states, and reports a failed authoritative rebuild
+while keeping the available preview or snapshot usable. The later
+authoritative build is promoted atomically when it succeeds. With
+`INTROSPECT_DAYS=0`, all data is loaded as the preview.
+
 The **window picker** scopes materialization to `1`, `7`, or `30` days, or the
-current calendar month. Changing it forces a rebuild on the next tick.
+current calendar month. Changing it forces a rebuild on the next tick. A
+positive numeric `INTROSPECT_DAYS` value takes precedence over
+`INTROSPECT_REFRESH_WINDOW` at startup; the picker shows it as a custom
+`<N> days (CLI)` window and the authoritative build uses that number of days.
+`INTROSPECT_DAYS=0` means all data.

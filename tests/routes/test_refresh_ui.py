@@ -7,6 +7,7 @@ from datetime import UTC, datetime, timedelta
 from pathlib import Path
 
 from introspect.api.main import app
+from introspect.refresh import LoadingPhase, LoadingState, RefreshTarget
 
 from .conftest import _patched_client
 
@@ -273,6 +274,96 @@ def test_refresh_status_shows_completion_flash():
                 "refresh_in_progress",
                 "last_refreshed_at",
                 "refresh_started_at",
+            ):
+                if hasattr(app.state, attr):
+                    delattr(app.state, attr)
+
+
+def test_refresh_status_labels_preview_database():
+    """The indicator identifies data served from the startup preview."""
+    with tempfile.TemporaryDirectory() as tmp, _patched_client(Path(tmp)) as client:
+        app.state.refresh_trigger = asyncio.Event()
+        app.state.refresh_in_progress = False
+        app.state.last_refreshed_at = datetime.now(UTC)
+        app.state.database_snapshot = False
+        app.state.database_label = "preview"
+        app.state.loading_state = LoadingState(
+            LoadingPhase.PREVIEW_READY,
+            RefreshTarget("30", 30),
+        )
+        try:
+            response = client.get("/refresh-status")
+            assert response.status_code == 200
+            assert "preview" in response.text
+            assert "refreshed" in response.text
+        finally:
+            for attr in (
+                "refresh_trigger",
+                "refresh_in_progress",
+                "last_refreshed_at",
+                "database_snapshot",
+                "database_label",
+                "loading_state",
+            ):
+                if hasattr(app.state, attr):
+                    delattr(app.state, attr)
+
+
+def test_refresh_status_labels_warm_snapshot():
+    """The indicator identifies a compatible prior database snapshot."""
+    with tempfile.TemporaryDirectory() as tmp, _patched_client(Path(tmp)) as client:
+        app.state.refresh_trigger = asyncio.Event()
+        app.state.refresh_in_progress = False
+        app.state.last_refreshed_at = datetime.now(UTC)
+        app.state.database_snapshot = True
+        app.state.database_label = "warm snapshot"
+        app.state.loading_state = LoadingState(
+            LoadingPhase.PREVIEW_READY,
+            RefreshTarget("30", 30),
+        )
+        try:
+            response = client.get("/refresh-status")
+            assert response.status_code == 200
+            assert "warm snapshot" in response.text
+        finally:
+            for attr in (
+                "refresh_trigger",
+                "refresh_in_progress",
+                "last_refreshed_at",
+                "database_snapshot",
+                "database_label",
+                "loading_state",
+            ):
+                if hasattr(app.state, attr):
+                    delattr(app.state, attr)
+
+
+def test_refresh_status_reports_failed_authoritative_load():
+    """A failed build is visible while the prior snapshot remains usable."""
+    with tempfile.TemporaryDirectory() as tmp, _patched_client(Path(tmp)) as client:
+        app.state.refresh_trigger = asyncio.Event()
+        app.state.refresh_in_progress = False
+        app.state.last_refreshed_at = datetime.now(UTC)
+        app.state.database_snapshot = True
+        app.state.database_label = "warm snapshot"
+        app.state.loading_state = LoadingState(
+            LoadingPhase.FAILED,
+            RefreshTarget("30", 30),
+            error="refresh failed; retrying",
+        )
+        try:
+            response = client.get("/refresh-status")
+            assert response.status_code == 200
+            assert "Refresh failed" in response.text
+            assert "warm snapshot" in response.text
+        finally:
+            for attr in (
+                "refresh_trigger",
+                "refresh_in_progress",
+                "last_refreshed_at",
+                "database_snapshot",
+                "database_label",
+                "loading_state",
             ):
                 if hasattr(app.state, attr):
                     delattr(app.state, attr)
