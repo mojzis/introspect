@@ -35,6 +35,7 @@ _RATE_CASES = [
     ("gpt-5.6-sol", Rates(4.00, 5.00, 8.00, 0.40, 20.00)),
     ("gpt-5.6-terra", Rates(2.00, 2.50, 4.00, 0.20, 12.00)),
     ("gpt-5.6-luna", Rates(0.20, 0.25, 0.40, 0.02, 1.20)),
+    ("codex-auto-review", Rates(0.20, 0.25, 0.40, 0.02, 1.20)),
     ("<synthetic>", Rates(0, 0, 0, 0, 0)),
     ("totally-made-up-model", Rates(0, 0, 0, 0, 0)),
     (None, Rates(0, 0, 0, 0, 0)),
@@ -177,6 +178,7 @@ _SQL_TEST_MODELS = [
     "gpt-5.6-sol",
     "gpt-5.6-terra",
     "gpt-5.6-luna",
+    "codex-auto-review",
     "<synthetic>",
     "unknown-model",
 ]

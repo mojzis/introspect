@@ -442,6 +442,12 @@ Prefixes are sorted longest-first at import so the most specific one wins in
 both the Python and the SQL lookup path. Anthropic and OpenAI (Codex
 `gpt-5.6-*`) models are both covered. There is no live fetch.
 
+Codex's internal `codex-auto-review` model has no published price or underlying
+public-model identifier in its local logs. Introspect therefore estimates it
+at Luna rates provisionally; this is tracked in
+[openai/codex#20981](https://github.com/openai/codex/issues/20981) and will be
+revisited when OpenAI provides authoritative pricing data.
+
 `Rates` is a five-field named tuple:
 
 | Field | Meaning |
