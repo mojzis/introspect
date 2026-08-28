@@ -531,7 +531,140 @@ def _set_loading(  # noqa: PLR0913
     )
 
 
-async def refresh_loop(  # noqa: PLR0913, PLR0915
+def _start_refresh(state: RefreshState, target: RefreshTarget) -> None:
+    state.refresh_started_at = datetime.now(UTC)
+    state.refresh_in_progress = True
+    _set_loading(
+        state,
+        LoadingPhase.LOADING,
+        target,
+        stage=LoadingStage.PROVIDER,
+    )
+
+
+def _finish_refresh(state: RefreshState) -> None:
+    state.refresh_in_progress = False
+    state.refresh_started_at = None
+
+
+def _report_progress(
+    state: RefreshState,
+    default_days: int,
+    build_target: RefreshTarget,
+    completed: int,
+    total: int,
+) -> None:
+    """Publish provider progress while ignoring obsolete build callbacks."""
+    if _current_target(state, default_days) != build_target:
+        return
+    _set_loading(
+        state,
+        LoadingPhase.LOADING,
+        build_target,
+        stage=LoadingStage.PROVIDER,
+        candidate_count=total,
+        completed_candidates=completed,
+    )
+
+
+def _report_stage(
+    state: RefreshState,
+    default_days: int,
+    build_target: RefreshTarget,
+    current_stage: LoadingStage,
+) -> None:
+    """Publish build-stage progress while ignoring obsolete build callbacks."""
+    if _current_target(state, default_days) != build_target:
+        return
+    previous = getattr(state, "loading_state", None)
+    _set_loading(
+        state,
+        LoadingPhase.LOADING,
+        build_target,
+        stage=current_stage,
+        candidate_count=(
+            previous.candidate_count if isinstance(previous, LoadingState) else 0
+        ),
+        completed_candidates=(
+            previous.completed_candidates if isinstance(previous, LoadingState) else 0
+        ),
+    )
+
+
+async def _build_once(  # noqa: PLR0913
+    app: FastAPI,
+    db_path: Path,
+    sidecar: Path,
+    jsonl_glob: str,
+    target: RefreshTarget,
+    resolve_projects: bool,
+    codex_glob: str | None,
+    default_days: int,
+) -> bool:
+    """Build and promote one target, returning whether it was promoted."""
+    state = app.state
+    _start_refresh(state, target)
+
+    def report_progress(completed: int, total: int) -> None:
+        _report_progress(state, default_days, target, completed, total)
+
+    def report_stage(current_stage: LoadingStage) -> None:
+        _report_stage(state, default_days, target, current_stage)
+
+    build_task = asyncio.create_task(
+        asyncio.to_thread(
+            _rebuild_sidecar,
+            sidecar,
+            jsonl_glob,
+            target.days,
+            resolve_projects,
+            codex_glob,
+            progress=report_progress,
+            stage=report_stage,
+        )
+    )
+    try:
+        try:
+            await asyncio.shield(build_task)
+        except asyncio.CancelledError:
+            # Cancellation must not leave a worker writing the sidecar after
+            # shutdown has removed it. Wait for the non-cancellable thread,
+            # then let cancellation proceed.
+            with contextlib.suppress(BaseException):
+                await build_task
+            raise
+
+        # A picker change while the sidecar was being built makes it stale.
+        # Never publish a result for an obsolete generation.
+        current_target = _current_target(state, default_days)
+        if current_target != target:
+            with contextlib.suppress(FileNotFoundError):
+                sidecar.unlink()
+            _set_loading(state, LoadingPhase.DISCOVERING, current_target)
+            _finish_refresh(state)
+            return False
+
+        report_stage(LoadingStage.SWAP)
+        await asyncio.to_thread(_swap_in, db_path, sidecar)
+        state.database_snapshot = False
+        state.database_label = "authoritative"
+        # Record the post-swap window first so a freak exception on the
+        # timestamp assignment can't leave state thinking the DB still holds
+        # the previous window's data and force a needless rebuild on the next
+        # tick.
+        state.last_built_days = target.days
+        state.last_refreshed_at = datetime.now(UTC)
+        state.refresh_pending = False
+        _set_loading(state, LoadingPhase.READY, target)
+    except BaseException:
+        _finish_refresh(state)
+        raise
+    else:
+        _finish_refresh(state)
+        return True
+
+
+async def refresh_loop(  # noqa: PLR0913
     app: FastAPI,
     db_path: Path,
     jsonl_glob: str,
@@ -592,108 +725,22 @@ async def refresh_loop(  # noqa: PLR0913, PLR0915
                     # a no-op tick so the indicator doesn't poll forever.
                     # last_refreshed_at intentionally stays put — nothing was
                     # refreshed, so the UI honestly reverts to the prior value.
-                    app.state.refresh_in_progress = False
-                    app.state.refresh_started_at = None
+                    _finish_refresh(app.state)
                     continue
                 log.info("JSONL changed; rebuilding materialized DB")
-                app.state.refresh_started_at = datetime.now(UTC)
-                app.state.refresh_in_progress = True
-                _set_loading(
-                    app.state,
-                    LoadingPhase.LOADING,
+                promoted = await _build_once(
+                    app,
+                    db_path,
+                    sidecar,
+                    jsonl_glob,
                     target,
-                    stage=LoadingStage.PROVIDER,
+                    resolve_projects,
+                    codex_glob,
+                    days,
                 )
-
-                def report_progress(
-                    completed: int, total: int, *, build_target: RefreshTarget = target
-                ) -> None:
-                    # The callback runs in the worker thread. The state fields
-                    # are replaced atomically, and stale workers must not
-                    # overwrite a newer target's progress.
-                    if _current_target(app.state, days) == build_target:
-                        _set_loading(
-                            app.state,
-                            LoadingPhase.LOADING,
-                            build_target,
-                            stage=LoadingStage.PROVIDER,
-                            candidate_count=total,
-                            completed_candidates=completed,
-                        )
-
-                def report_stage(
-                    current_stage: LoadingStage,
-                    *,
-                    build_target: RefreshTarget = target,
-                ) -> None:
-                    if _current_target(app.state, days) == build_target:
-                        previous = getattr(app.state, "loading_state", None)
-                        _set_loading(
-                            app.state,
-                            LoadingPhase.LOADING,
-                            build_target,
-                            stage=current_stage,
-                            candidate_count=(
-                                previous.candidate_count
-                                if isinstance(previous, LoadingState)
-                                else 0
-                            ),
-                            completed_candidates=(
-                                previous.completed_candidates
-                                if isinstance(previous, LoadingState)
-                                else 0
-                            ),
-                        )
-
-                build_task = asyncio.create_task(
-                    asyncio.to_thread(
-                        _rebuild_sidecar,
-                        sidecar,
-                        jsonl_glob,
-                        current_days,
-                        resolve_projects,
-                        codex_glob,
-                        progress=report_progress,
-                        stage=report_stage,
-                    )
-                )
-                try:
-                    await asyncio.shield(build_task)
-                except asyncio.CancelledError:
-                    # Cancellation must not leave a worker writing the
-                    # sidecar after shutdown has removed it. Wait for the
-                    # non-cancellable thread, then let cancellation proceed.
-                    with contextlib.suppress(BaseException):
-                        await build_task
-                    raise
-                # A picker change while the sidecar was being built makes it
-                # stale.  Never publish a result for an obsolete generation.
-                if _current_target(app.state, days) != target:
-                    with contextlib.suppress(FileNotFoundError):
-                        sidecar.unlink()
-                    _set_loading(
-                        app.state,
-                        LoadingPhase.DISCOVERING,
-                        _current_target(app.state, days),
-                    )
-                    app.state.refresh_in_progress = False
-                    app.state.refresh_started_at = None
+                if not promoted:
                     first_run = one_shot
                     continue
-                report_stage(LoadingStage.SWAP)
-                await asyncio.to_thread(_swap_in, db_path, sidecar)
-                app.state.database_snapshot = False
-                app.state.database_label = "authoritative"
-                # Record the post-swap window first so a freak exception on
-                # the timestamp assignment can't leave state thinking the DB
-                # still holds the previous window's data and force a needless
-                # rebuild on the next tick.
-                app.state.last_built_days = current_days
-                app.state.last_refreshed_at = datetime.now(UTC)
-                app.state.refresh_pending = False
-                _set_loading(app.state, LoadingPhase.READY, target)
-                app.state.refresh_in_progress = False
-                app.state.refresh_started_at = None
                 if one_shot:
                     return
                 last_mtime = current
@@ -702,8 +749,7 @@ async def refresh_loop(  # noqa: PLR0913, PLR0915
                 raise
             except Exception:
                 target = _current_target(app.state, days)
-                app.state.refresh_in_progress = False
-                app.state.refresh_started_at = None
+                _finish_refresh(app.state)
                 _set_loading(
                     app.state,
                     LoadingPhase.FAILED,
@@ -719,7 +765,6 @@ async def refresh_loop(  # noqa: PLR0913, PLR0915
                     return
                 continue
     finally:
-        app.state.refresh_in_progress = False
-        app.state.refresh_started_at = None
+        _finish_refresh(app.state)
         with contextlib.suppress(FileNotFoundError):
             sidecar.unlink()
