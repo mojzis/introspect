@@ -121,7 +121,7 @@ def test_per_request_connection_no_shared_read_conn():
         assert hasattr(app.state, "db_path")
 
 
-def test_lifespan_rejects_invalid_refresh_window_env(caplog):
+def test_lifespan_rejects_invalid_refresh_window_env(caplog, monkeypatch):
     """An invalid ``INTROSPECT_REFRESH_WINDOW`` env var falls back to default.
 
     Without validation, a typo would leave ``app.state.refresh_window`` set
@@ -131,6 +131,9 @@ def test_lifespan_rejects_invalid_refresh_window_env(caplog):
     """
     from introspect.refresh import DEFAULT_WINDOW  # noqa: PLC0415
 
+    # The test asserts the picker-window fallback rather than the separate
+    # numeric-days override. CI may define the latter for its own test setup.
+    monkeypatch.delenv("INTROSPECT_DAYS", raising=False)
     _write_sample_jsonl_path = tempfile.TemporaryDirectory()
     try:
         tmp = Path(_write_sample_jsonl_path.name)
