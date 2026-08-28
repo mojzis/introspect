@@ -819,6 +819,7 @@ def materialize_views(  # noqa: PLR0913
     jsonl_candidates: Sequence[str] | None = None,
     codex_candidates: Sequence[str] | None = None,
     progress: Callable[[int, int], None] | None = None,
+    phase: Callable[[str], None] | None = None,
 ) -> None:
     """Materialize raw data into tables for fast querying.
 
@@ -900,6 +901,8 @@ def materialize_views(  # noqa: PLR0913
     conn.execute("CREATE INDEX idx_rm_timestamp ON raw_messages(timestamp)")
 
     _build_project_map(conn, resolve_projects=resolve_projects)
+    if phase is not None:
+        phase("derived")
     _create_derived_views(conn, materialize=True)
     _create_indexes(conn, _DERIVED_INDEXES)
     _create_session_stats(conn, materialize=True)
@@ -1031,20 +1034,38 @@ def _column_exists(conn: duckdb.DuckDBPyConnection, table: str, column: str) -> 
 def _has_materialized_schema(conn: duckdb.DuckDBPyConnection) -> bool:
     """True when the materialized schema has the required support relations.
 
-    ``raw_messages`` alone used to identify a usable on-disk database.  That
-    lets databases made before cache-TTL and Codex-title support pass the
-    probe, even though derived views now require ``cache_requests`` and
-    ``codex_session_metadata``. Rebuild those databases on their next CLI use
-    rather than treating an incomplete schema as current.
+    ``raw_messages`` alone used to identify a usable on-disk database. That
+    lets databases made before cache-TTL, Codex-title, search-corpus, and
+    materialization metadata support pass the probe. Rebuild those databases
+    on their next CLI use rather than treating an incomplete schema as
+    current.
     """
     row = conn.execute(
         "SELECT 1 FROM information_schema.tables "
         "WHERE table_name IN "
-        "('raw_messages', 'cache_requests', 'codex_session_metadata') "
+        "('raw_messages', 'cache_requests', 'codex_session_metadata', "
+        "'search_corpus', 'materialize_meta') "
         "AND table_type = 'BASE TABLE' "
-        "GROUP BY table_type HAVING COUNT(*) = 3"
+        "GROUP BY table_type HAVING COUNT(*) = 5"
     ).fetchone()
     return row is not None
+
+
+def has_compatible_materialized_db(db_path: Path) -> bool:
+    """Return whether ``db_path`` is a complete database safe to publish.
+
+    A warm database is only useful during progressive startup when all base
+    relations needed by the current derived-view pipeline are present.  Probe
+    it through the same hardened read factory used by requests so a stale or
+    corrupt file is never published as the warm snapshot.
+    """
+    if not db_path.exists():
+        return False
+    try:
+        with contextlib.closing(connect_read_hardened(db_path)) as conn:
+            return _has_materialized_schema(conn)
+    except duckdb.Error:
+        return False
 
 
 def _has_materialized_raw_table(conn: duckdb.DuckDBPyConnection) -> bool:

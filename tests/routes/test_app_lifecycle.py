@@ -174,3 +174,22 @@ def test_lifespan_keeps_numeric_days_in_initial_target():
         assert app.state.refresh_target.days == 7
         assert app.state.refresh_target.window == "7"
         assert app.state.refresh_window == "7"
+
+
+def test_compatible_database_is_published_as_warm_snapshot():
+    """A prior complete build serves while the authoritative build runs."""
+    with tempfile.TemporaryDirectory() as tmp:
+        tmp_path = Path(tmp)
+        with _patched_client(
+            tmp_path,
+            extra_env={"INTROSPECT_REFRESH_INTERVAL_SECONDS": "0"},
+        ) as client:
+            assert client.get("/sessions").status_code == 200
+
+        with _patched_client(
+            tmp_path,
+            extra_env={"INTROSPECT_REFRESH_INTERVAL_SECONDS": "0"},
+        ) as client:
+            assert client.get("/sessions").status_code == 200
+            assert app.state.database_snapshot is True
+            assert app.state.database_label == "warm snapshot"

@@ -52,6 +52,15 @@ class LoadingPhase(StrEnum):
     FAILED = "failed"
 
 
+class LoadingStage(StrEnum):
+    """Concrete work currently being performed for a loading phase."""
+
+    PROVIDER = "provider"
+    DERIVED = "derived"
+    SEARCH = "search"
+    SWAP = "swap"
+
+
 @dataclass(frozen=True)
 class RefreshTarget:
     """The sole value used by a refresh build to identify its target window."""
@@ -75,6 +84,7 @@ class LoadingState:
     candidate_count: int = 0
     completed_candidates: int = 0
     error: str | None = None
+    stage: LoadingStage | None = None
 
 
 @dataclass(frozen=True)
@@ -391,6 +401,7 @@ def _rebuild_sidecar(  # noqa: PLR0913
     jsonl_candidates: list[str] | None = None,
     codex_candidates: list[str] | None = None,
     progress: Callable[[int, int], None] | None = None,
+    stage: Callable[[LoadingStage], None] | None = None,
 ) -> None:
     """Rebuild the materialized DB into a fresh sidecar file."""
     with contextlib.suppress(FileNotFoundError):
@@ -406,7 +417,12 @@ def _rebuild_sidecar(  # noqa: PLR0913
             jsonl_candidates=jsonl_candidates,
             codex_candidates=codex_candidates,
             progress=progress,
+            phase=(
+                (lambda name: stage(LoadingStage(name))) if stage is not None else None
+            ),
         )
+        if stage is not None:
+            stage(LoadingStage.SEARCH)
         build_search_corpus(conn)
     finally:
         conn.close()
@@ -463,6 +479,7 @@ def _set_loading(  # noqa: PLR0913
     phase: LoadingPhase,
     target: RefreshTarget,
     *,
+    stage: LoadingStage | None = None,
     candidate_count: int = 0,
     completed_candidates: int = 0,
     error: str | None = None,
@@ -470,6 +487,7 @@ def _set_loading(  # noqa: PLR0913
     state.loading_state = LoadingState(
         phase,
         target,
+        stage=stage,
         candidate_count=candidate_count,
         completed_candidates=completed_candidates,
         error=error,
@@ -506,52 +524,111 @@ async def refresh_loop(  # noqa: PLR0913, PLR0915
     sidecar = db_path.with_name(db_path.name + ".next")
     last_mtime = newest_mtime(jsonl_glob, codex_glob)
     first_run = initial
-    while True:
-        try:
-            if first_run:
-                first_run = False
-            else:
-                if one_shot:
-                    return
-                with contextlib.suppress(TimeoutError):
-                    await asyncio.wait_for(trigger.wait(), timeout=interval_seconds)
-                trigger.clear()
-            current = newest_mtime(jsonl_glob, codex_glob)
-            target = _current_target(app.state, days)
-            current_days = target.days
-            # Skip when nothing changed AND the window matches the last build.
-            # A manual wake with a new window forces a rebuild even on an
-            # idle filesystem. The handler may have optimistically flipped
-            # ``refresh_in_progress`` true on POST so the polling fragment
-            # always starts; clear it here so a no-op tick doesn't leave the
-            # indicator polling forever.
-            pending = bool(getattr(app.state, "refresh_pending", False))
-            if (
-                current <= last_mtime
-                and not _window_changed(app.state, current_days)
-                and not pending
-            ):
-                # The handler may have optimistically flipped these true on
-                # POST so the polling fragment always starts. Clear them on
-                # a no-op tick so the indicator doesn't poll forever.
-                # last_refreshed_at intentionally stays put — nothing was
-                # refreshed, so the UI honestly reverts to the prior value.
-                app.state.refresh_in_progress = False
-                app.state.refresh_started_at = None
-                continue
-            log.info("JSONL changed; rebuilding materialized DB")
-            app.state.refresh_started_at = datetime.now(UTC)
-            app.state.refresh_in_progress = True
-            _set_loading(app.state, LoadingPhase.LOADING, target)
+    try:
+        while True:
             try:
-                await asyncio.to_thread(
-                    _rebuild_sidecar,
-                    sidecar,
-                    jsonl_glob,
-                    current_days,
-                    resolve_projects,
-                    codex_glob,
+                if first_run:
+                    first_run = False
+                else:
+                    if one_shot:
+                        return
+                    with contextlib.suppress(TimeoutError):
+                        await asyncio.wait_for(trigger.wait(), timeout=interval_seconds)
+                    trigger.clear()
+                current = newest_mtime(jsonl_glob, codex_glob)
+                target = _current_target(app.state, days)
+                current_days = target.days
+                # Skip when nothing changed AND the window matches the last build.
+                # A manual wake with a new window forces a rebuild even on an
+                # idle filesystem. The handler may have optimistically flipped
+                # ``refresh_in_progress`` true on POST so the polling fragment
+                # always starts; clear it here so a no-op tick doesn't leave the
+                # indicator polling forever.
+                pending = bool(getattr(app.state, "refresh_pending", False))
+                if (
+                    current <= last_mtime
+                    and not _window_changed(app.state, current_days)
+                    and not pending
+                ):
+                    # The handler may have optimistically flipped these true on
+                    # POST so the polling fragment always starts. Clear them on
+                    # a no-op tick so the indicator doesn't poll forever.
+                    # last_refreshed_at intentionally stays put — nothing was
+                    # refreshed, so the UI honestly reverts to the prior value.
+                    app.state.refresh_in_progress = False
+                    app.state.refresh_started_at = None
+                    continue
+                log.info("JSONL changed; rebuilding materialized DB")
+                app.state.refresh_started_at = datetime.now(UTC)
+                app.state.refresh_in_progress = True
+                _set_loading(
+                    app.state,
+                    LoadingPhase.LOADING,
+                    target,
+                    stage=LoadingStage.PROVIDER,
                 )
+
+                def report_progress(
+                    completed: int, total: int, *, build_target: RefreshTarget = target
+                ) -> None:
+                    # The callback runs in the worker thread. The state fields
+                    # are replaced atomically, and stale workers must not
+                    # overwrite a newer target's progress.
+                    if _current_target(app.state, days) == build_target:
+                        _set_loading(
+                            app.state,
+                            LoadingPhase.LOADING,
+                            build_target,
+                            stage=LoadingStage.PROVIDER,
+                            candidate_count=total,
+                            completed_candidates=completed,
+                        )
+
+                def report_stage(
+                    current_stage: LoadingStage,
+                    *,
+                    build_target: RefreshTarget = target,
+                ) -> None:
+                    if _current_target(app.state, days) == build_target:
+                        previous = getattr(app.state, "loading_state", None)
+                        _set_loading(
+                            app.state,
+                            LoadingPhase.LOADING,
+                            build_target,
+                            stage=current_stage,
+                            candidate_count=(
+                                previous.candidate_count
+                                if isinstance(previous, LoadingState)
+                                else 0
+                            ),
+                            completed_candidates=(
+                                previous.completed_candidates
+                                if isinstance(previous, LoadingState)
+                                else 0
+                            ),
+                        )
+
+                build_task = asyncio.create_task(
+                    asyncio.to_thread(
+                        _rebuild_sidecar,
+                        sidecar,
+                        jsonl_glob,
+                        current_days,
+                        resolve_projects,
+                        codex_glob,
+                        progress=report_progress,
+                        stage=report_stage,
+                    )
+                )
+                try:
+                    await asyncio.shield(build_task)
+                except asyncio.CancelledError:
+                    # Cancellation must not leave a worker writing the
+                    # sidecar after shutdown has removed it. Wait for the
+                    # non-cancellable thread, then let cancellation proceed.
+                    with contextlib.suppress(BaseException):
+                        await build_task
+                    raise
                 # A picker change while the sidecar was being built makes it
                 # stale.  Never publish a result for an obsolete generation.
                 if _current_target(app.state, days) != target:
@@ -562,9 +639,14 @@ async def refresh_loop(  # noqa: PLR0913, PLR0915
                         LoadingPhase.DISCOVERING,
                         _current_target(app.state, days),
                     )
+                    app.state.refresh_in_progress = False
+                    app.state.refresh_started_at = None
                     first_run = one_shot
                     continue
+                report_stage(LoadingStage.SWAP)
                 await asyncio.to_thread(_swap_in, db_path, sidecar)
+                app.state.database_snapshot = False
+                app.state.database_label = "authoritative"
                 # Record the post-swap window first so a freak exception on
                 # the timestamp assignment can't leave state thinking the DB
                 # still holds the previous window's data and force a needless
@@ -573,27 +655,34 @@ async def refresh_loop(  # noqa: PLR0913, PLR0915
                 app.state.last_refreshed_at = datetime.now(UTC)
                 app.state.refresh_pending = False
                 _set_loading(app.state, LoadingPhase.READY, target)
-            finally:
                 app.state.refresh_in_progress = False
                 app.state.refresh_started_at = None
-            if one_shot:
-                return
-            last_mtime = current
-            log.info("refresh complete")
-        except asyncio.CancelledError:
-            raise
-        except Exception:
-            target = _current_target(app.state, days)
-            _set_loading(
-                app.state,
-                LoadingPhase.FAILED,
-                target,
-                error="refresh failed; retrying",
-            )
-            log.warning(
-                "refresh failed; will retry next tick",
-                exc_info=True,
-            )
-            if one_shot:
-                return
-            continue
+                if one_shot:
+                    return
+                last_mtime = current
+                log.info("refresh complete")
+            except asyncio.CancelledError:
+                raise
+            except Exception:
+                target = _current_target(app.state, days)
+                app.state.refresh_in_progress = False
+                app.state.refresh_started_at = None
+                _set_loading(
+                    app.state,
+                    LoadingPhase.FAILED,
+                    target,
+                    error="refresh failed; retrying",
+                )
+                app.state.refresh_pending = True
+                log.warning(
+                    "refresh failed; will retry next tick",
+                    exc_info=True,
+                )
+                if one_shot:
+                    return
+                continue
+    finally:
+        app.state.refresh_in_progress = False
+        app.state.refresh_started_at = None
+        with contextlib.suppress(FileNotFoundError):
+            sidecar.unlink()

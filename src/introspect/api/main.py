@@ -27,6 +27,7 @@ from introspect.db import (
     DEFAULT_JSONL_GLOB,
     connect_read_hardened,
     connect_writable,
+    has_compatible_materialized_db,
     materialize_views,
 )
 from introspect.mcp.refresh_bridge import set_state as set_mcp_refresh_state
@@ -35,6 +36,7 @@ from introspect.refresh import (
     DEFAULT_WINDOW,
     VALID_WINDOWS,
     LoadingPhase,
+    LoadingStage,
     LoadingState,
     discover_cold_start_candidates,
     refresh_loop,
@@ -92,8 +94,28 @@ def _startup_preview(  # noqa: PLR0913
     app.state.loading_state = LoadingState(
         LoadingPhase.PREVIEWING,
         target,
+        stage=LoadingStage.PROVIDER,
         candidate_count=candidates.total,
     )
+
+    def report_progress(completed: int, total: int) -> None:
+        app.state.loading_state = LoadingState(
+            LoadingPhase.PREVIEWING,
+            target,
+            stage=LoadingStage.PROVIDER,
+            candidate_count=total,
+            completed_candidates=completed,
+        )
+
+    def report_phase(phase: str) -> None:
+        app.state.loading_state = LoadingState(
+            LoadingPhase.PREVIEWING,
+            target,
+            stage=LoadingStage(phase),
+            candidate_count=candidates.total,
+            completed_candidates=candidates.total,
+        )
+
     materialize_views(
         conn,
         jsonl_glob,
@@ -102,11 +124,21 @@ def _startup_preview(  # noqa: PLR0913
         codex_glob=codex_glob,
         jsonl_candidates=list(candidates.claude) if days else None,
         codex_candidates=list(candidates.codex) if days else None,
+        progress=report_progress,
+        phase=report_phase,
+    )
+    app.state.loading_state = LoadingState(
+        LoadingPhase.PREVIEWING,
+        target,
+        stage=LoadingStage.SEARCH,
+        candidate_count=candidates.total,
+        completed_candidates=candidates.total,
     )
     build_search_corpus(conn)
     app.state.loading_state = LoadingState(
         LoadingPhase.PREVIEW_READY,
         target,
+        stage=LoadingStage.SEARCH,
         candidate_count=candidates.total,
         completed_candidates=candidates.total,
     )
@@ -153,19 +185,35 @@ async def lifespan(app: FastAPI):  # noqa: PLR0915
     app.state.refresh_started_at = None
     app.state.loading_state = LoadingState(LoadingPhase.DISCOVERING, target)
     app.state.refresh_trigger = None
+    app.state.database_snapshot = False
+    app.state.database_label = "preview"
 
-    conn = connect_writable(db_path)
-    try:
-        _startup_preview(app, conn, jsonl_glob, codex_glob, days, resolve_projects)
-    except Exception as exc:
+    warm_snapshot = has_compatible_materialized_db(db_path)
+    if warm_snapshot:
+        # A complete prior build is immediately browseable. It remains the
+        # live path while the authoritative target is rebuilt into the sidecar.
+        app.state.database_snapshot = True
+        app.state.database_label = "warm snapshot"
+        app.state.last_built_days = 0
+        app.state.last_refreshed_at = datetime.now(UTC)
         app.state.loading_state = LoadingState(
-            LoadingPhase.FAILED,
+            LoadingPhase.PREVIEW_READY,
             target,
-            error=str(exc),
+            stage=LoadingStage.SEARCH,
         )
-        raise
-    finally:
-        conn.close()
+    else:
+        conn = connect_writable(db_path)
+        try:
+            _startup_preview(app, conn, jsonl_glob, codex_glob, days, resolve_projects)
+        except Exception as exc:
+            app.state.loading_state = LoadingState(
+                LoadingPhase.FAILED,
+                target,
+                error=str(exc),
+            )
+            raise
+        finally:
+            conn.close()
 
     _configure_sql_api(app)
 
@@ -173,7 +221,7 @@ async def lifespan(app: FastAPI):  # noqa: PLR0915
     # interval 0 this is a one-shot task; recurring auto-refresh remains
     # disabled because the public trigger stays unset. A one-day or unlimited
     # preview is already the complete target and needs no second build.
-    needs_initial_load = days > 1
+    needs_initial_load = days > 1 or warm_snapshot
     app.state.refresh_pending = needs_initial_load
     refresh_task: asyncio.Task[None] | None = None
     if interval > 0 or needs_initial_load:
@@ -213,6 +261,8 @@ async def lifespan(app: FastAPI):  # noqa: PLR0915
                 refresh_task.cancel()
                 with contextlib.suppress(asyncio.CancelledError):
                     await refresh_task
+            with contextlib.suppress(FileNotFoundError):
+                db_path.with_name(db_path.name + ".next").unlink()
 
 
 app = FastAPI(title="Introspect", lifespan=lifespan)

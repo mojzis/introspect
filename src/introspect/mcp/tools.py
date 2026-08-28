@@ -705,6 +705,11 @@ async def refresh_data() -> str:
                 f"{int(REFRESH_TIMEOUT)} seconds; still running."
             )
         case RefreshOutcome.UNCHANGED:
+            loading = getattr(state, "loading_state", None)
+            if getattr(getattr(loading, "phase", None), "value", None) == "failed":
+                return (
+                    "Refresh failed; the previous database snapshot remains available."
+                )
             return "No refresh needed: JSONL files unchanged since last refresh."
         case _:
             # Defensive: future variants of RefreshOutcome must update this
