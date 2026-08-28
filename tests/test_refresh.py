@@ -160,6 +160,22 @@ def test_target_override_advances_generation_and_loading_is_terminal() -> None:
     assert state.refresh_pending is True
     assert LoadingPhase.PREVIEW_READY.value == "preview_ready"
 
+    state.refresh_pending = False
+    same_target = set_refresh_target(state, "7")
+    assert same_target == target
+    assert same_target.generation == target.generation
+    assert state.refresh_pending is False
+
+
+def test_numeric_targets_include_custom_days_and_all_data() -> None:
+    custom = target_for_window("14")
+    all_data = target_for_window("30", days=0)
+
+    assert custom.window == "14"
+    assert custom.days == 14
+    assert all_data.window == "0"
+    assert all_data.days == 0
+
 
 def test_initial_refresh_runs_without_waiting_for_interval(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch

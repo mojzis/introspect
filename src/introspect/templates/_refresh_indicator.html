@@ -25,7 +25,10 @@
 {% set _database_label = database_label if database_label is defined else (_state.database_label|default("authoritative")) %}
 {% set _phase = _loading.phase.value if _loading and _loading.phase is defined else none %}
 {% set _stage = _loading.stage.value if _loading and _loading.stage is defined and _loading.stage else none %}
+{% set _candidate_total = _loading.candidate_count if _loading and _loading.candidate_count is defined else 0 %}
+{% set _candidate_done = _loading.completed_candidates if _loading and _loading.completed_candidates is defined else 0 %}
 <span id="refresh-state" class="refresh-indicator"
+      role="status" aria-live="polite" aria-atomic="true" aria-busy="{{ 'true' if _in_progress else 'false' }}"
       {%- if _in_progress and not _disabled %} hx-get="/refresh-status" hx-trigger="load delay:{{ _poll_delay_ms }}ms" hx-target="#refresh-state" hx-swap="outerHTML"{% endif %}>
     {% if _disabled %}
         <span class="refresh-muted">auto-refresh off{% if _database_snapshot %} · {{ _database_label }}{% elif _database_label == "preview" %} · preview{% endif %}</span>
@@ -33,7 +36,7 @@
         <span class="refresh-error">Refresh failed{% if _database_label != "authoritative" %} · {{ _database_label }}{% endif %}</span>
     {% else %}
         {% if _in_progress %}
-            <span class="refresh-muted">{% if _phase == "previewing" %}loading preview{% elif _phase == "discovering" %}discovering logs{% else %}refreshing{% if _stage %} · loading {{ _stage }}{% endif %}{% endif %}&hellip;</span>
+            <span class="refresh-muted">{% if _phase == "previewing" %}loading preview{% elif _phase == "discovering" %}discovering logs{% else %}refreshing{% if _stage %} · loading {{ _stage }}{% endif %}{% endif %}{% if _candidate_total %} ({{ _candidate_done }}/{{ _candidate_total }} files){% endif %}&hellip;</span>
         {% elif _notify %}
             <span class="refresh-flash">&check; refreshed{% if _database_label != "authoritative" %} · {{ _database_label }}{% endif %}</span>
         {% elif _database_snapshot %}
@@ -57,9 +60,7 @@
                     hx-trigger="change"
                     {% if _in_progress %}disabled{% endif %}>
                 {% if _window not in ("1", "7", "30", "month") %}
-                    <option value="{{ _window }}" selected>
-                        {% if _window == "0" %}All data{% else %}{{ _window }} days (CLI){% endif %}
-                    </option>
+                    <option value="{{ _window }}" selected>{% if _window == "0" %}All data{% else %}{{ _window }} days (CLI){% endif %}</option>
                 {% endif %}
                 <option value="1"{% if _window == "1" %} selected{% endif %}>Today</option>
                 <option value="7"{% if _window == "7" %} selected{% endif %}>7 days</option>

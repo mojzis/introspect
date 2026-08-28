@@ -27,7 +27,12 @@ from introspect.query_templates import (
     get_template,
     templates_by_kind,
 )
-from introspect.refresh import RefreshOutcome, wait_for_refresh
+from introspect.refresh import (
+    RefreshOutcome,
+    is_valid_refresh_target,
+    set_refresh_target,
+    wait_for_refresh,
+)
 from introspect.search import ensure_search_corpus, fts_search
 from introspect.sql_fragments import (
     CACHE_READ_COST_SQL,
@@ -662,7 +667,31 @@ def list_query_templates(kind: str = "") -> str:
     return header + "\n\n".join(blocks)
 
 
-async def refresh_data() -> str:
+def _refresh_contract(state: object, loading_state: object | None = None) -> str:
+    """Render the lifecycle fields shared with the HTMX refresh indicator."""
+    loading = loading_state or getattr(state, "loading_state", None)
+    phase = getattr(getattr(loading, "phase", None), "value", None) or "unknown"
+    target = getattr(loading, "target", None)
+    if target is None:
+        target = getattr(state, "refresh_target", None)
+    target_text = "unknown"
+    if target is not None:
+        days = getattr(target, "days", None)
+        window = getattr(target, "window", None)
+        target_text = f"{window} ({days} days)" if window is not None else str(days)
+    label = getattr(state, "database_label", "authoritative")
+    stage = getattr(getattr(loading, "stage", None), "value", None)
+    progress = ""
+    total = getattr(loading, "candidate_count", 0)
+    completed = getattr(loading, "completed_candidates", 0)
+    if total:
+        progress = f"; candidates={completed}/{total}"
+    if stage:
+        progress += f"; stage={stage}"
+    return f"phase={phase}; target={target_text}; database={label}{progress}"
+
+
+async def refresh_data(window: str | None = None) -> str:  # noqa: PLR0911
     """Trigger an immediate rebuild of the materialized DB from JSONL files.
 
     The server normally rescans every 10 minutes by default
@@ -671,7 +700,10 @@ async def refresh_data() -> str:
     that just ended. The rebuild only runs when JSONL files actually
     changed, so calling this on an unchanged filesystem is a fast no-op.
 
-    Returns a status string describing what happened.
+    ``window`` optionally selects the same standard or numeric target as the
+    web picker. ``0`` means all data. Returns a status string containing the
+    shared lifecycle contract (phase, target, database label, and truthful
+    candidate progress where available).
     """
     state = refresh_bridge.get_state()
     if state is None:
@@ -680,14 +712,23 @@ async def refresh_data() -> str:
             "Start `introspect serve` to enable refresh."
         )
 
+    if window is not None and not is_valid_refresh_target(window):
+        return (
+            f"Invalid refresh target {window!r}; choose 1, 7, 30, month, "
+            "or a non-negative number of days."
+        )
+    if window is not None and getattr(state, "refresh_trigger", None) is not None:
+        set_refresh_target(state, window)
+
     result = await wait_for_refresh(state, finish_timeout=REFRESH_TIMEOUT)
+    contract = _refresh_contract(state, result.loading_state)
 
     match result.outcome:
         case RefreshOutcome.DISABLED:
             return (
                 "Auto-refresh is disabled "
                 "(INTROSPECT_REFRESH_INTERVAL_SECONDS=0); "
-                "manual refresh unavailable."
+                f"manual refresh unavailable. [{contract}]"
             )
         case RefreshOutcome.COMPLETED:
             # COMPLETED only fires when last_refreshed_at advanced to a non-None
@@ -698,19 +739,23 @@ async def refresh_data() -> str:
                 if result.last_refreshed_at
                 else "?"
             )
-            return f"Refresh complete. Last refreshed at {ts}."
+            return f"Refresh complete. Last refreshed at {ts}. [{contract}]"
         case RefreshOutcome.STILL_RUNNING:
             return (
                 f"Refresh started but did not complete within "
-                f"{int(REFRESH_TIMEOUT)} seconds; still running."
+                f"{int(REFRESH_TIMEOUT)} seconds; still running. [{contract}]"
             )
         case RefreshOutcome.UNCHANGED:
             loading = getattr(state, "loading_state", None)
             if getattr(getattr(loading, "phase", None), "value", None) == "failed":
                 return (
-                    "Refresh failed; the previous database snapshot remains available."
+                    "Refresh failed; the previous database snapshot remains "
+                    f"available. [{contract}]"
                 )
-            return "No refresh needed: JSONL files unchanged since last refresh."
+            return (
+                "No refresh needed: JSONL files unchanged since last refresh. "
+                f"[{contract}]"
+            )
         case _:
             # Defensive: future variants of RefreshOutcome must update this
             # match. Raising rather than returning a vague string surfaces the

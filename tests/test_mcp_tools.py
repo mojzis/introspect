@@ -29,6 +29,7 @@ from introspect.mcp.tools import (
     search_conversations,
     tool_failures,
 )
+from introspect.refresh import LoadingPhase, LoadingState, RefreshTarget
 from introspect.search import build_search_corpus
 from introspect.sql_query import CELL_TRUNCATION_MARKER, MCP_SQL_CELL_CAP
 
@@ -779,6 +780,12 @@ def test_refresh_data_completes():
             refresh_trigger=trigger,
             refresh_in_progress=False,
             last_refreshed_at=datetime.now(UTC) - timedelta(hours=1),
+            refresh_target=RefreshTarget("30", 30),
+            database_label="warm snapshot",
+            loading_state=LoadingState(
+                LoadingPhase.LOADING,
+                RefreshTarget("30", 30),
+            ),
         )
         refresh_bridge.set_state(fake_state)
 
@@ -789,6 +796,10 @@ def test_refresh_data_completes():
             await asyncio.sleep(0.1)
             fake_state.last_refreshed_at = datetime.now(UTC)
             fake_state.refresh_in_progress = False
+            fake_state.loading_state = LoadingState(
+                LoadingPhase.READY,
+                fake_state.refresh_target,
+            )
 
         loop_task = asyncio.create_task(simulated_loop())
         try:
@@ -799,6 +810,62 @@ def test_refresh_data_completes():
     result = asyncio.run(go())
 
     assert "Refresh complete" in result
+    assert "phase=ready" in result
+    assert "target=30 (30 days)" in result
+
+
+@pytest.mark.usefixtures("clear_refresh_bridge")
+def test_refresh_data_accepts_custom_target_and_reports_contract():
+    """MCP target selection uses the same contract as the web control."""
+
+    async def go() -> str:
+        trigger = asyncio.Event()
+        target = RefreshTarget("14", 14)
+        fake_state = types.SimpleNamespace(
+            refresh_trigger=trigger,
+            refresh_in_progress=False,
+            last_refreshed_at=datetime.now(UTC) - timedelta(hours=1),
+            refresh_target=target,
+            database_label="authoritative",
+            loading_state=LoadingState(LoadingPhase.LOADING, target),
+        )
+        refresh_bridge.set_state(fake_state)
+
+        async def simulated_loop() -> None:
+            await trigger.wait()
+            trigger.clear()
+            fake_state.refresh_in_progress = True
+            await asyncio.sleep(0.01)
+            fake_state.last_refreshed_at = datetime.now(UTC)
+            fake_state.loading_state = LoadingState(
+                LoadingPhase.READY,
+                fake_state.refresh_target,
+            )
+            fake_state.refresh_in_progress = False
+
+        loop_task = asyncio.create_task(simulated_loop())
+        try:
+            return await refresh_data("14")
+        finally:
+            await loop_task
+
+    result = asyncio.run(go())
+
+    assert "Refresh complete" in result
+    assert "phase=ready" in result
+    assert "target=14 (14 days)" in result
+
+
+@pytest.mark.usefixtures("clear_refresh_bridge")
+def test_refresh_data_rejects_invalid_target():
+    async def go() -> str:
+        fake_state = types.SimpleNamespace(refresh_trigger=asyncio.Event())
+        refresh_bridge.set_state(fake_state)
+        return await refresh_data("two-weeks")
+
+    result = asyncio.run(go())
+
+    assert "Invalid refresh target" in result
 
 
 @pytest.mark.usefixtures("clear_refresh_bridge")

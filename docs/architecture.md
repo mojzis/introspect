@@ -118,10 +118,17 @@ A FastAPI application launched via `introspy serve`.
   mtime and rebuilds into a sidecar file, then atomically `os.replace`s it over
   the live DB. An `asyncio.Event` (`app.state.refresh_trigger`) lets the manual
   "Refresh now" button and the MCP `refresh_data` tool wake the loop early.
-- **Window picker**: materialization can be scoped to `1`, `7`, `30` days, or
-  `month` (calendar-month-to-date). The choice lives on
-  `app.state.refresh_window` and forces a rebuild on the next tick when it
-  changes.
+  `RefreshTarget` and `LoadingState` are the shared contract for the selected
+  window, generation, lifecycle phase, stage, and truthful candidate counts.
+  Preview/snapshot, loading, ready, and failed states are published on
+  `app.state` for both the HTMX indicator and MCP status responses; a stale
+  generation is discarded before it can swap in.
+- **Window picker**: materialization can be scoped to `1`, `7`, `30` days,
+  `month` (calendar-month-to-date), or a numeric custom target (`0` means all
+  data). The choice lives on `RefreshTarget` (with the legacy
+  `app.state.refresh_window` mirror) and forces a rebuild on the next tick when
+  it changes. The indicator is an accessible `role="status"` live region and
+  reports lifecycle transitions without fabricated percentage or ETA values.
 - **Middleware**, three of them: `db_middleware` opens a fresh per-request
   *hardened* read connection (`connect_read_hardened`) on
   `request.state.conn`, so in-flight queries are decoupled from the background
@@ -161,7 +168,10 @@ so the MCP session manager runs concurrently with request handling.
 
 `mcp/refresh_bridge.py` is a module-level holder that lets stateless MCP tool
 functions reach the live `app.state` for `refresh_data`. It enforces
-single-app registration to surface accidental multi-app setups.
+single-app registration to surface accidental multi-app setups. `refresh_data`
+accepts the same standard or numeric target as the web picker and returns the
+shared lifecycle fields alongside its complete, unchanged, still-running, or
+failed outcome.
 
 See [MCP server](usage/mcp.md) for the tool and prompt catalogue.
 

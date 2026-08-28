@@ -20,7 +20,12 @@ from fastapi import Request
 from fastapi.responses import HTMLResponse
 
 from introspect.api.handlers._helpers import templates
-from introspect.refresh import DEFAULT_WINDOW, VALID_WINDOWS, set_refresh_target
+from introspect.refresh import (
+    DEFAULT_WINDOW,
+    VALID_WINDOWS,
+    is_valid_refresh_target,
+    set_refresh_target,
+)
 
 # Relative-time thresholds for :func:`format_relative`.
 _JUST_NOW_SECONDS = 30
@@ -203,9 +208,10 @@ async def refresh_status(request: Request) -> HTMLResponse:
 async def refresh_now(request: Request) -> HTMLResponse:
     """POST /refresh — wake the background loop and re-render the indicator.
 
-    Accepts an optional ``window`` form field. Valid values
-    (``"1" / "7" / "30" / "month"``) update ``app.state.refresh_window``;
-    invalid or missing input keeps the existing sticky choice.
+    Accepts an optional ``window`` form field. Valid values are the standard
+    picker tokens (``"1" / "7" / "30" / "month"``) or a numeric custom
+    target (``"0"`` means all data); invalid or missing input keeps the
+    existing sticky choice.
 
     Returns immediately after setting the trigger — the user keeps browsing
     on the existing DB while the rebuild runs in the background; the
@@ -220,7 +226,7 @@ async def refresh_now(request: Request) -> HTMLResponse:
     """
     form = await request.form()
     submitted = form.get("window")
-    if isinstance(submitted, str) and submitted in VALID_WINDOWS:
+    if isinstance(submitted, str) and is_valid_refresh_target(submitted):
         set_refresh_target(request.app.state, submitted)
     state = request.app.state
     trigger = state.refresh_trigger

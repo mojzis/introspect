@@ -7,6 +7,7 @@ import contextlib
 import glob
 import logging
 import os
+import re
 from collections.abc import Callable, Iterable, Iterator
 from dataclasses import dataclass
 from datetime import UTC, date, datetime, timedelta
@@ -30,6 +31,7 @@ log = logging.getLogger(__name__)
 # keeps the dependency direction (handler -> refresh) one-way.
 VALID_WINDOWS = frozenset({"1", "7", "30", "month"})
 DEFAULT_WINDOW = "30"
+_CUSTOM_WINDOW_RE = re.compile(r"(?:0|[1-9][0-9]*)\Z")
 # Days returned for fixed-length tokens. ``"month"`` is computed at call time.
 _FIXED_WINDOW_DAYS: dict[str, int] = {"1": 1, "7": 7, "30": 30}
 
@@ -124,16 +126,35 @@ def target_for_window(
     days: int | None = None,
     generation: int = 0,
 ) -> RefreshTarget:
-    """Build a target, keeping an explicit numeric override displayable."""
-    if days is not None and days > 0 and days != window_to_days(window):
-        display_window = str(days)
+    """Build a target, keeping an explicit numeric override displayable.
+
+    Numeric values are deliberately part of the target contract. ``0`` means
+    all data, while a positive value is the custom day count supplied by the
+    CLI or a refresh control. This keeps the picker, refresh loop, and MCP
+    control from silently disagreeing about the database being built.
+    """
+    if window in VALID_WINDOWS:
+        canonical_days = window_to_days(window)
+        resolved_days = canonical_days if days is None else max(0, days)
+        display_window = (
+            window if resolved_days == canonical_days else str(resolved_days)
+        )
+    elif _CUSTOM_WINDOW_RE.fullmatch(window):
+        resolved_days = int(window) if days is None else max(0, days)
+        display_window = str(resolved_days)
     else:
-        display_window = window if window in VALID_WINDOWS else DEFAULT_WINDOW
+        resolved_days = window_to_days(DEFAULT_WINDOW) if days is None else max(0, days)
+        display_window = str(resolved_days) if days is not None else DEFAULT_WINDOW
     return RefreshTarget(
         window=display_window,
-        days=window_to_days(window) if days is None else max(0, days),
+        days=resolved_days,
         generation=generation,
     )
+
+
+def is_valid_refresh_target(value: str) -> bool:
+    """Return whether ``value`` is a picker token or a numeric day target."""
+    return value in VALID_WINDOWS or _CUSTOM_WINDOW_RE.fullmatch(value) is not None
 
 
 def set_refresh_target(
@@ -148,11 +169,19 @@ def set_refresh_target(
     existing templates/callers, but refresh decisions use ``refresh_target``.
     """
     current = getattr(state, "refresh_target", None)
-    generation = current.generation + 1 if isinstance(current, RefreshTarget) else 1
-    target = target_for_window(window, days=days, generation=generation)
+    requested = target_for_window(window, days=days)
+    changed = True
+    if isinstance(current, RefreshTarget) and (
+        current.window == requested.window and current.days == requested.days
+    ):
+        target = current
+        changed = False
+    else:
+        generation = current.generation + 1 if isinstance(current, RefreshTarget) else 1
+        target = target_for_window(window, days=days, generation=generation)
     state.refresh_target = target
     state.refresh_window = target.window
-    state.refresh_pending = True
+    state.refresh_pending = bool(getattr(state, "refresh_pending", False)) or changed
     return target
 
 
@@ -318,6 +347,7 @@ class RefreshOutcome(Enum):
 class RefreshResult:
     outcome: RefreshOutcome
     last_refreshed_at: datetime | None
+    loading_state: LoadingState | None = None
 
 
 # Internal poll cadence — kept private because callers tune *budgets*, not
@@ -342,8 +372,13 @@ async def wait_for_refresh(
     * ``COMPLETED`` — rebuild finished within ``finish_timeout``.
     * ``STILL_RUNNING`` — rebuild started but did not finish in time.
     """
+
+    def result(outcome: RefreshOutcome, timestamp: datetime | None) -> RefreshResult:
+        loading_state = getattr(state, "loading_state", None)
+        return RefreshResult(outcome, timestamp, loading_state)
+
     if state.refresh_trigger is None:
-        return RefreshResult(RefreshOutcome.DISABLED, state.last_refreshed_at)
+        return result(RefreshOutcome.DISABLED, state.last_refreshed_at)
 
     last_before = state.last_refreshed_at
     state.refresh_trigger.set()
@@ -365,10 +400,10 @@ async def wait_for_refresh(
 
     last_after = state.last_refreshed_at
     if last_after != last_before and last_after is not None:
-        return RefreshResult(RefreshOutcome.COMPLETED, last_after)
+        return result(RefreshOutcome.COMPLETED, last_after)
     if state.refresh_in_progress:
-        return RefreshResult(RefreshOutcome.STILL_RUNNING, last_after)
-    return RefreshResult(RefreshOutcome.UNCHANGED, last_after)
+        return result(RefreshOutcome.STILL_RUNNING, last_after)
+    return result(RefreshOutcome.UNCHANGED, last_after)
 
 
 def newest_mtime(jsonl_glob: str, codex_glob: str | None = None) -> float:
@@ -453,6 +488,8 @@ def _compute_days(state: RefreshState, default: int) -> int:
     window = getattr(state, "refresh_window", None)
     if not isinstance(window, str):
         return default
+    if is_valid_refresh_target(window) and window not in VALID_WINDOWS:
+        return int(window)
     return window_to_days(window)
 
 
