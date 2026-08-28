@@ -471,11 +471,72 @@ _EMPTY_TOKEN_USAGE: dict = {
     "cost": "—",
 }
 
+_AUTO_REVIEW_MODEL = "codex-auto-review"
+
+
+def _query_token_usage(
+    db: duckdb.DuckDBPyConnection,
+    *,
+    session_id: str | None = None,
+    model: str | None = None,
+    exclude_model: str | None = None,
+) -> tuple[dict, int]:
+    """Return token usage and request count for an optional model slice."""
+    filters: list[str] = []
+    params: list[str] = []
+    if session_id is not None:
+        filters.append("session_id = ?")
+        params.append(session_id)
+    if model is not None:
+        filters.append("model = ?")
+        params.append(model)
+    if exclude_model is not None:
+        filters.append("(model IS NULL OR model <> ?)")
+        params.append(exclude_model)
+    where_clause = f"WHERE {' AND '.join(filters)}" if filters else ""
+
+    row = db.execute(
+        f"""
+        SELECT
+            COUNT(*),
+            COALESCE(SUM(input_tokens), 0),
+            COALESCE(SUM(output_tokens), 0),
+            COALESCE(SUM(cache_read_tokens), 0),
+            COALESCE(SUM(cache_creation_tokens), 0),
+            COALESCE(SUM(cache_creation_5m), 0),
+            COALESCE(SUM(cache_creation_1h), 0),
+            COALESCE(SUM({COST_EXPR_SQL}), 0) / 1e6
+        FROM assistant_message_costs
+        {where_clause}
+        """,  # noqa: S608
+        params,
+    ).fetchone()
+
+    if row is None:  # pragma: no cover - ungrouped aggregate always yields
+        return dict(_EMPTY_TOKEN_USAGE), 0
+
+    calls, in_tok, out_tok, cache_read, cc_tok, cc_5m, cc_1h, cost = row
+    cost_usd = float(cost or 0.0)
+    return (
+        {
+            "input": int(in_tok or 0),
+            "output": int(out_tok or 0),
+            "cache_read": int(cache_read or 0),
+            "cache_creation": int(cc_tok or 0),
+            "cache_creation_5m": int(cc_5m or 0),
+            "cache_creation_1h": int(cc_1h or 0),
+            "cost_usd": cost_usd,
+            "cost": format_cost(cost_usd),
+        },
+        int(calls or 0),
+    )
+
 
 def fetch_token_usage(
     db: duckdb.DuckDBPyConnection,
     *,
     session_id: str | None = None,
+    exclude_model: str | None = None,
 ) -> dict:
     """Fetch deduped token usage + estimated $ cost.
 
@@ -493,48 +554,32 @@ def fetch_token_usage(
     Always returns a dict (empty totals + ``"—"`` cost when the query fails
     or there is no data) so templates don't need ``or {}`` guards.
     """
-    session_filter = ""
-    params: list[str] = []
-    if session_id is not None:
-        session_filter = "WHERE session_id = ?"
-        params.append(session_id)
-
     try:
-        row = db.execute(
-            f"""
-            SELECT
-                COALESCE(SUM(input_tokens), 0),
-                COALESCE(SUM(output_tokens), 0),
-                COALESCE(SUM(cache_read_tokens), 0),
-                COALESCE(SUM(cache_creation_tokens), 0),
-                COALESCE(SUM(cache_creation_5m), 0),
-                COALESCE(SUM(cache_creation_1h), 0),
-                COALESCE(SUM({COST_EXPR_SQL}), 0) / 1e6
-            FROM assistant_message_costs
-            {session_filter}
-        """,  # noqa: S608
-            params,
-        ).fetchone()
+        usage, _calls = _query_token_usage(
+            db, session_id=session_id, exclude_model=exclude_model
+        )
     except duckdb.CatalogException:
         # Lazy-mode read connections may not yet have the derived view; the
         # caller can still render with empty totals.  Any other failure is a
         # bug we want to surface, not a zeroed-out template.
         log.warning("assistant_message_costs view missing", exc_info=True)
         return dict(_EMPTY_TOKEN_USAGE)
+    else:
+        return usage
 
-    if row is None:  # pragma: no cover - ungrouped aggregate always yields
-        # a row; the guard is what lets the unpacking below type-check.
-        return dict(_EMPTY_TOKEN_USAGE)
 
-    in_tok, out_tok, cache_read, cc_tok, cc_5m, cc_1h, cost = row
-    cost_usd = float(cost or 0.0)
-    return {
-        "input": int(in_tok or 0),
-        "output": int(out_tok or 0),
-        "cache_read": int(cache_read or 0),
-        "cache_creation": int(cc_tok or 0),
-        "cache_creation_5m": int(cc_5m or 0),
-        "cache_creation_1h": int(cc_1h or 0),
-        "cost_usd": cost_usd,
-        "cost": format_cost(cost_usd),
-    }
+def fetch_auto_review_usage(
+    db: duckdb.DuckDBPyConnection,
+    *,
+    session_id: str | None = None,
+) -> dict:
+    """Fetch the session's exact Auto Review request and token totals."""
+    try:
+        usage, calls = _query_token_usage(
+            db, session_id=session_id, model=_AUTO_REVIEW_MODEL
+        )
+    except duckdb.CatalogException:
+        log.warning("assistant_message_costs view missing", exc_info=True)
+        usage, calls = dict(_EMPTY_TOKEN_USAGE), 0
+    usage["calls"] = calls
+    return usage

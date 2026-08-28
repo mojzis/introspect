@@ -5,11 +5,90 @@ from pathlib import Path
 
 from ..conftest import (
     codex_glob_pattern,
+    codex_record,
+    codex_session_meta,
+    codex_turn_context,
     local_client,
     make_assistant_message,
     make_user_message,
+    write_codex_rollout,
     write_jsonl,
 )
+
+
+def _codex_auto_review_session(tmp_dir: Path, session_id: str) -> None:
+    """Write a mixed session with one normal and one Auto Review request."""
+    write_jsonl(
+        tmp_dir,
+        session_id,
+        [
+            make_user_message(
+                session_id,
+                "main-user",
+                None,
+                "2026-08-20T10:00:00.000Z",
+                "please fix",
+                tool_use_result={"content": "seed"},
+            ),
+            make_assistant_message(
+                session_id,
+                "main-assistant",
+                "main-user",
+                "2026-08-20T10:00:01.000Z",
+                [{"type": "text", "text": "done"}],
+                model="claude-opus-4-6",
+                msg_id="main-message",
+                usage={"input_tokens": 1_000_000, "output_tokens": 0},
+            ),
+        ],
+    )
+    write_codex_rollout(
+        tmp_dir,
+        session_id,
+        [
+            codex_record(
+                "session_meta",
+                codex_session_meta(session_id, model_provider="openai"),
+                "2026-08-20T10:01:00Z",
+            ),
+            codex_record(
+                "turn_context",
+                codex_turn_context("turn-review", model="codex-auto-review"),
+                "2026-08-20T10:01:00Z",
+            ),
+            codex_record(
+                "event_msg",
+                {"type": "user_message", "message": "review", "text_elements": []},
+                "2026-08-20T10:01:01Z",
+            ),
+            codex_record(
+                "response_item",
+                {
+                    "type": "message",
+                    "role": "assistant",
+                    "id": "review-message",
+                    "content": [{"type": "output_text", "text": "approved"}],
+                },
+                "2026-08-20T10:01:02Z",
+            ),
+            codex_record(
+                "event_msg",
+                {
+                    "type": "token_count",
+                    "info": {
+                        "total_token_usage": {"total_tokens": 2_000_010},
+                        "last_token_usage": {
+                            "input_tokens": 2_000_000,
+                            "cached_input_tokens": 0,
+                            "cache_write_input_tokens": 0,
+                            "output_tokens": 10,
+                        },
+                    },
+                },
+                "2026-08-20T10:01:02Z",
+            ),
+        ],
+    )
 
 
 def _cache_loss_session_lines(

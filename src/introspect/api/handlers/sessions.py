@@ -32,6 +32,7 @@ from ._helpers import (
     clean_title,
     conn,
     ensure_chart_template,
+    fetch_auto_review_usage,
     fetch_token_usage,
     format_cost,
     parent,
@@ -1815,7 +1816,10 @@ async def session_detail(  # noqa: PLR0913
     ).fetchone()
     session_title = clean_title(title_row[0] or "") if title_row else ""
 
-    token_usage = fetch_token_usage(db, session_id=session_id)
+    token_usage = fetch_token_usage(
+        db, session_id=session_id, exclude_model="codex-auto-review"
+    )
+    auto_review_usage = fetch_auto_review_usage(db, session_id=session_id)
 
     # Tool call summary
     tool_summary = db.execute(
@@ -1936,6 +1940,7 @@ async def session_detail(  # noqa: PLR0913
             "messages": parsed_messages,
             "messages_pagination": messages_pagination,
             "token_usage": token_usage,
+            "auto_review_usage": auto_review_usage,
             "tool_summary": tool_summary,
             "active_tab": active_tab,
             "cost_ctx": cost_ctx,

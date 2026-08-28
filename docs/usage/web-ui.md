@@ -133,7 +133,12 @@ A per-model token/cost rollup, plus **bloat** tables: every unit of context the
 session paid for, bucketed by what produced it (`file read: db.py`,
 `bash: uv run`, `WebFetch`, a write, a conversation turn) and rolled up by
 category. The question is *which specific reads and commands are responsible for
-this bill?* Selecting a range of messages re-scopes the tables to that range.
+this bill? Selecting a range of messages re-scopes the tables to that range.
+Sessions containing Codex approval-review requests also show a separate Auto
+Review summary in the session header with its call count, token breakdown, and a
+provisional Luna-priced estimate. Those requests are excluded from the primary
+session token and cost totals; the estimate links to the
+[upstream pricing issue](https://github.com/openai/codex/issues/20981).
 
 ### Tokenscape
 

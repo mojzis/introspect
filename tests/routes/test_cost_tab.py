@@ -16,7 +16,12 @@ from ..conftest import (
     write_jsonl,
 )
 from .conftest import SID, _patched_client
-from .cost_helpers import _dup_jsonl, _subagent_jsonl
+from .cost_helpers import (
+    _codex_auto_review_session,
+    _dup_jsonl,
+    _run_with_client,
+    _subagent_jsonl,
+)
 
 
 def test_session_detail_has_tab_strip():
@@ -42,6 +47,36 @@ def test_session_detail_cost_tab_renders():
         assert "Read" in text
         assert "Created" in text
         assert "<svg" in text
+
+
+def test_session_detail_shows_separate_auto_review_summary():
+    """Auto Review requests get their own count, tokens, and estimate."""
+    sid = "auto-review-session-0000-0000-000000000001"
+    with tempfile.TemporaryDirectory() as tmp_str:
+        tmp = Path(tmp_str)
+        _codex_auto_review_session(tmp, sid)
+
+        def _assert_auto_review(client):
+            response = client.get(f"/sessions/{sid}")
+            assert response.status_code == 200
+            text = response.text
+            assert "Auto Review" in text
+            assert "1 approval review call" in text
+            assert "2,000,000" in text
+            assert "$0.40" in text
+            assert "https://github.com/openai/codex/issues/20981" in text
+            # The primary summary keeps only the normal assistant request.
+            assert 'class="meta-label">Est. Cost</span> $5.00' in text
+
+        _run_with_client(tmp, _assert_auto_review)
+
+
+def test_session_detail_hides_auto_review_summary_when_absent():
+    """Sessions without approval-review requests have no empty card."""
+    with tempfile.TemporaryDirectory() as tmp, _patched_client(Path(tmp)) as client:
+        response = client.get(f"/sessions/{SID}")
+        assert response.status_code == 200
+        assert "Auto Review" not in response.text
 
 
 def test_session_cost_dedup():
