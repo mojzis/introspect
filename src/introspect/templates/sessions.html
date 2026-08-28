@@ -22,6 +22,18 @@ page={{ kwargs.get("page", page) }}&page_size={{ kwargs.get("page_size", page_si
 {% block content %}
 <h1>Sessions <span style="font-size:0.9rem;color:#666;">({{ total }} total)</span></h1>
 
+<div class="filter-bar" aria-label="Provider summaries">
+    <span style="color:#666;font-size:0.85rem;">Providers:</span>
+    {% for summary in provider_summaries %}
+    <a class="tool-btn tool-btn-sm{% if summary.provider == filter_provider %} tool-btn-active{% endif %}"
+       href="/sessions?{{ qs(page=1, provider=summary.provider) }}"
+       hx-get="/sessions?{{ qs(page=1, provider=summary.provider) }}"
+       hx-target="#content" hx-push-url="true">
+        {{ summary.provider }} · {{ summary.sessions }} session{{ '' if summary.sessions == 1 else 's' }} · {{ summary.cost }}
+    </a>
+    {% endfor %}
+</div>
+
 {# ── Filter bar ── #}
 <div class="filter-bar">
     <form action="/sessions" method="get" style="display:inline-flex;gap:0.3rem;margin-right:0.5rem;">

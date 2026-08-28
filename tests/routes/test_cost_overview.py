@@ -5,7 +5,15 @@ from pathlib import Path
 
 import pytest
 
-from ..conftest import make_assistant_message, make_user_message, write_jsonl
+from ..conftest import (
+    codex_record,
+    codex_session_meta,
+    codex_turn_context,
+    make_assistant_message,
+    make_user_message,
+    write_codex_rollout,
+    write_jsonl,
+)
 from .cost_helpers import (
     _cache_loss_session_lines,
     _cost_overview_setup,
@@ -48,6 +56,116 @@ def _subagent_overview_session(session_id: str, input_tokens: int) -> list[dict]
         ),
     ]
     return lines
+
+
+def _codex_cache_loss_session(session_id: str) -> list[dict]:
+    """Three-request OpenAI session with two cache misses for scope tests."""
+    model = "gpt-5.6-terra"
+    return [
+        codex_record(
+            "session_meta",
+            codex_session_meta(session_id, model_provider="openai"),
+            "2026-04-22T09:30:00Z",
+        ),
+        codex_record(
+            "turn_context",
+            codex_turn_context("turn-1", model=model),
+            "2026-04-22T09:30:00Z",
+        ),
+        codex_record(
+            "event_msg",
+            {"type": "user_message", "message": "first", "text_elements": []},
+            "2026-04-22T09:30:00Z",
+        ),
+        codex_record(
+            "response_item",
+            {
+                "type": "message",
+                "role": "assistant",
+                "id": "codex-a1",
+                "content": [{"type": "output_text", "text": "first"}],
+            },
+            "2026-04-22T09:30:01Z",
+        ),
+        codex_record(
+            "event_msg",
+            {
+                "type": "token_count",
+                "info": {
+                    "total_token_usage": {"total_tokens": 1_008_000},
+                    "last_token_usage": {
+                        "input_tokens": 1_000_000,
+                        "cached_input_tokens": 0,
+                        "cache_write_input_tokens": 8_000,
+                        "output_tokens": 0,
+                    },
+                },
+            },
+            "2026-04-22T09:30:01Z",
+        ),
+        codex_record(
+            "event_msg",
+            {"type": "user_message", "message": "second", "text_elements": []},
+            "2026-04-22T09:36:00Z",
+        ),
+        codex_record(
+            "response_item",
+            {
+                "type": "message",
+                "role": "assistant",
+                "id": "codex-a2",
+                "content": [{"type": "output_text", "text": "second"}],
+            },
+            "2026-04-22T09:36:01Z",
+        ),
+        codex_record(
+            "event_msg",
+            {
+                "type": "token_count",
+                "info": {
+                    "total_token_usage": {"total_tokens": 1_008_620},
+                    "last_token_usage": {
+                        "input_tokens": 120,
+                        "cached_input_tokens": 500,
+                        "cache_write_input_tokens": 8_500,
+                        "output_tokens": 0,
+                    },
+                },
+            },
+            "2026-04-22T09:36:01Z",
+        ),
+        codex_record(
+            "event_msg",
+            {"type": "user_message", "message": "third", "text_elements": []},
+            "2026-04-22T09:42:00Z",
+        ),
+        codex_record(
+            "response_item",
+            {
+                "type": "message",
+                "role": "assistant",
+                "id": "codex-a3",
+                "content": [{"type": "output_text", "text": "third"}],
+            },
+            "2026-04-22T09:42:01Z",
+        ),
+        codex_record(
+            "event_msg",
+            {
+                "type": "token_count",
+                "info": {
+                    "total_token_usage": {"total_tokens": 1_009_240},
+                    "last_token_usage": {
+                        "input_tokens": 120,
+                        "cached_input_tokens": 500,
+                        "cache_write_input_tokens": 8_500,
+                        "output_tokens": 0,
+                    },
+                },
+            },
+            "2026-04-22T09:42:01Z",
+        ),
+    ]
 
 
 def _huge_reads_session(session_id: str) -> list[dict]:
@@ -602,6 +720,83 @@ def test_cost_overview_portfolio_clear_link_targets_panel():
             assert 'hx-get="/cost-overview/portfolio"' in text
             assert 'hx-target="#cost-portfolio-panel"' in text
             assert "Clear" in text
+
+        _run_with_client(tmp, _check)
+
+
+def test_cost_overview_provider_buttons_and_scope():
+    """Provider summaries use canonical totals and scope the portfolio."""
+    anthropic_sid = "sess-provider-an-aaaa-aaaa-aaaaaaaaaaaa"
+    specs = [(anthropic_sid, _session_at_cost(anthropic_sid, 1_000_000))]
+    with tempfile.TemporaryDirectory() as tmp_str:
+        tmp = Path(tmp_str)
+        _cost_overview_setup(tmp, specs)
+
+        def _check(client):
+            response = client.get("/cost-overview?provider=anthropic")
+            assert response.status_code == 200
+            text = response.text
+            assert "anthropic · 1 session · $5.00" in text
+            assert 'data-provider="anthropic"' in text
+
+            portfolio = client.get("/cost-overview/portfolio?provider=anthropic")
+            assert portfolio.status_code == 200
+            assert "$5.00" in portfolio.text
+
+        _run_with_client(tmp, _check)
+
+
+def test_cost_overview_provider_scope_covers_all_cost_surfaces():
+    """Provider filtering excludes a second provider from every cost surface."""
+    anthropic_sid = "sess-provider-cache-an-aaaa-aaaaaaaaaaaa"
+    openai_sid = "sess-provider-cache-oa-aaaa-aaaaaaaaaaaa"
+    with tempfile.TemporaryDirectory() as tmp_str:
+        tmp = Path(tmp_str)
+        _cost_overview_setup(
+            tmp,
+            [(anthropic_sid, _cache_loss_session_lines(anthropic_sid, gap_minutes=6))],
+        )
+        write_codex_rollout(tmp, openai_sid, _codex_cache_loss_session(openai_sid))
+
+        def _check(client):
+            page = client.get("/cost-overview?provider=anthropic")
+            assert page.status_code == 200
+            assert 'data-provider="anthropic"' in page.text
+            # Both chart click handlers retain the active provider explicitly.
+            assert "var provider = el.dataset.provider || '';" in page.text
+            assert "+ providerParam" in page.text
+
+            daily = client.get("/cost-overview/breakdown?provider=anthropic")
+            assert daily.status_code == 200
+            assert 'data-provider="anthropic"' in daily.text
+            assert "$0.11" in daily.text
+            assert "$4.08" not in daily.text
+            assert "2026-04-21" in daily.text
+            assert "2026-04-22" not in daily.text
+
+            hourly = client.get(
+                "/cost-overview/breakdown/2026-04-21?provider=anthropic"
+            )
+            assert hourly.status_code == 200
+            assert 'data-provider="anthropic"' in hourly.text
+            assert "$0.11" in hourly.text
+            assert "$4.08" not in hourly.text
+
+            portfolio = client.get("/cost-overview/portfolio?provider=anthropic")
+            assert portfolio.status_code == 200
+            assert "$0.10" in portfolio.text
+            assert "$4.08" not in portfolio.text
+            assert "1 event" in portfolio.text
+            assert "2 events" not in portfolio.text
+            assert "2 requests." in portfolio.text
+            assert "5 requests." not in portfolio.text
+
+            # The unfiltered render proves the second-provider fixture is live
+            # and makes the scoped exclusions above discriminating.
+            unfiltered = client.get("/cost-overview/portfolio")
+            assert unfiltered.status_code == 200
+            assert "3 events" in unfiltered.text
+            assert "5 requests" in unfiltered.text
 
         _run_with_client(tmp, _check)
 

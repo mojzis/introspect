@@ -36,6 +36,19 @@
         {% endif %}
     </div>
 </div>
+{% if auto_review_usage and auto_review_usage.calls %}
+<div class="card" style="padding:0.75rem 1rem;margin-top:0.75rem;">
+    <div style="display:grid;grid-template-columns:repeat(auto-fill,minmax(220px,1fr));gap:0.4rem 1.5rem;">
+        <div><span class="meta-label">Auto Review</span> {{ auto_review_usage.calls }} approval review call{{ 's' if auto_review_usage.calls != 1 else '' }}</div>
+        <div><span class="meta-label">Input Tokens</span> {{ "{:,}".format(auto_review_usage.input or 0) }}</div>
+        <div><span class="meta-label">Output Tokens</span> {{ "{:,}".format(auto_review_usage.output or 0) }}</div>
+        {% if auto_review_usage.cache_creation %}<div><span class="meta-label">Cache Write</span> {{ "{:,}".format(auto_review_usage.cache_creation) }}</div>{% endif %}
+        {% if auto_review_usage.cache_read %}<div><span class="meta-label">Cache Read</span> {{ "{:,}".format(auto_review_usage.cache_read) }}</div>{% endif %}
+        <div><span class="meta-label">Est. Cost</span> {{ auto_review_usage.cost or '—' }}</div>
+    </div>
+    <small>Auto Review cost is provisionally estimated at Luna rates; see the <a href="https://github.com/openai/codex/issues/20981">upstream pricing issue</a>.</small>
+</div>
+{% endif %}
 
 <div class="tab-strip" style="display:flex;gap:0.5rem;border-bottom:1px solid #ddd;margin:1rem 0;">
     {% for slug, label in [('messages','Messages'),('cost','Cost'),('tokenscape','Tokenscape'),('trajectory','Trajectory')] %}

@@ -16,7 +16,7 @@
         <span style="color:#666;font-size:0.85rem;">Break down by:</span>
         {% for opt in breakdown_options %}
         <a class="tool-btn tool-btn-sm{% if opt == breakdown %} tool-btn-active{% endif %}"
-           hx-get="/cost-overview/breakdown?breakdown={{ opt }}"
+           hx-get="/cost-overview/breakdown?breakdown={{ opt }}&amp;provider={{ provider }}"
            hx-target="#daily-cost-panel"
            hx-swap="outerHTML">{{ opt }}</a>
         {% endfor %}
@@ -34,6 +34,7 @@
          data-figure-id="daily-cost-chart-data"
          data-height="360"
          data-breakdown="{{ breakdown }}"
+         data-provider="{{ provider }}"
          data-on-click="hourly-drilldown"></div>
     <p style="color:#888;font-size:0.78rem;margin-top:0.3rem;">
         Tip: click any bar to drill into hourly cost for that day.
