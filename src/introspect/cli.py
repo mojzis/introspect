@@ -756,7 +756,10 @@ def _run_web_ui(
             f"[dim]SQL API: POST http://{host}:{port}/api/query (local only)[/dim]"
         )
     if days > 0:
-        console.print(f"[dim]Loading last {days} days of data...[/dim]")
+        console.print(
+            "[dim]Preparing a one-day preview before serving; "
+            f"the full {days}-day target loads in the background...[/dim]"
+        )
     else:
         console.print("[dim]Loading all data (no day limit)...[/dim]")
 

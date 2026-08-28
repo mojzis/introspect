@@ -6,6 +6,7 @@ import json
 import logging
 import os
 import threading
+from collections.abc import Callable, Sequence
 from datetime import UTC, datetime
 from functools import cache
 from pathlib import Path
@@ -377,8 +378,9 @@ def _create_codex_session_metadata_table(
 
 def _create_codex_raw_messages_table(
     conn: duckdb.DuckDBPyConnection,
-    codex_glob: str | None,
+    codex_glob: str | Sequence[str] | None,
     day_filter: str = "",
+    progress: Callable[[int, int], None] | None = None,
 ) -> None:
     """Materialize ``codex_raw_messages`` once, streaming one rollout file at
     a time so peak memory is one file's rows rather than the whole corpus.
@@ -394,7 +396,14 @@ def _create_codex_raw_messages_table(
     insert_sql = _codex_insert_sql(day_filter)
     delete_later_copies_sql = _codex_delete_later_copies_sql(day_filter)
     metadata: list[dict[str, str]] = []
-    for path in sorted(glob.glob(codex_glob, recursive=True)):  # noqa: PTH207
+    paths = (
+        sorted(codex_glob)
+        if not isinstance(codex_glob, str)
+        else sorted(glob.glob(codex_glob, recursive=True))  # noqa: PTH207
+    )
+    total = len(paths)
+    completed = 0
+    for path in paths:
         try:
             rows, file_metadata = _transcode_codex_file(path)
             metadata.extend(file_metadata)
@@ -412,6 +421,10 @@ def _create_codex_raw_messages_table(
                 "Skipping unparseable Codex rollout file %s", path, exc_info=True
             )
             continue
+        finally:
+            completed += 1
+            if progress is not None:
+                progress(completed, total)
     _create_codex_session_metadata_table(conn, metadata)
 
 
@@ -796,13 +809,16 @@ def connect_writable(db_path: Path) -> duckdb.DuckDBPyConnection:
         raise
 
 
-def materialize_views(
+def materialize_views(  # noqa: PLR0913
     conn: duckdb.DuckDBPyConnection,
     jsonl_glob: str,
     days: int = 0,
     *,
     resolve_projects: bool = True,
     codex_glob: str | None = None,
+    jsonl_candidates: Sequence[str] | None = None,
+    codex_candidates: Sequence[str] | None = None,
+    progress: Callable[[int, int], None] | None = None,
 ) -> None:
     """Materialize raw data into tables for fast querying.
 
@@ -856,14 +872,25 @@ def materialize_views(
     # Materialized once here regardless of ``codex_glob`` — empty (zero rows)
     # when Codex wasn't requested or its glob matches nothing, so every
     # ``raw_messages`` construction below can union it in unconditionally.
-    _create_codex_raw_messages_table(conn, codex_glob, day_filter)
+    codex_source: str | Sequence[str] | None = (
+        codex_candidates if codex_candidates is not None else codex_glob
+    )
+    _create_codex_raw_messages_table(conn, codex_source, day_filter, progress)
 
     # ``read_json_auto`` raises IOException when no files match the glob, so
     # an empty Claude home (fresh install, sandboxed CI) needs explicit empty
     # stubs to keep the rest of the pipeline working without special-casing
     # every consumer.
-    if next(glob.iglob(jsonl_glob, recursive=True), None) is not None:  # noqa: PTH207
-        _load_raw_tables(conn, jsonl_glob, day_filter, and_day_filter)
+    jsonl_source: str | list[str] = (
+        list(jsonl_candidates) if jsonl_candidates is not None else jsonl_glob
+    )
+    has_claude = (
+        bool(jsonl_source)
+        if not isinstance(jsonl_source, str)
+        else next(glob.iglob(jsonl_source, recursive=True), None) is not None  # noqa: PTH207
+    )
+    if has_claude:
+        _load_raw_tables(conn, jsonl_source, day_filter, and_day_filter)
     else:
         _create_empty_raw_tables(conn)
 
@@ -1031,7 +1058,7 @@ def _has_materialized_raw_table(conn: duckdb.DuckDBPyConnection) -> bool:
 
 def _load_raw_tables(
     conn: duckdb.DuckDBPyConnection,
-    jsonl_glob: str,
+    jsonl_glob: str | list[str],
     day_filter: str,
     and_day_filter: str,
 ) -> None:
@@ -1061,7 +1088,11 @@ def _load_raw_tables(
         with contextlib.suppress(duckdb.CatalogException):
             conn.execute(f"DROP TABLE IF EXISTS {name}")
 
-    files = sorted(glob.glob(jsonl_glob, recursive=True))  # noqa: PTH207
+    files = (
+        sorted(jsonl_glob)
+        if not isinstance(jsonl_glob, str)
+        else sorted(glob.glob(jsonl_glob, recursive=True))  # noqa: PTH207
+    )
     parseable = _filter_parseable_files(files)
     if not parseable:
         # Surface a ``duckdb.Error`` subclass so existing catch sites

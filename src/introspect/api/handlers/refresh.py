@@ -20,7 +20,7 @@ from fastapi import Request
 from fastapi.responses import HTMLResponse
 
 from introspect.api.handlers._helpers import templates
-from introspect.refresh import DEFAULT_WINDOW, VALID_WINDOWS
+from introspect.refresh import DEFAULT_WINDOW, VALID_WINDOWS, set_refresh_target
 
 # Relative-time thresholds for :func:`format_relative`.
 _JUST_NOW_SECONDS = 30
@@ -123,7 +123,15 @@ def _render(  # noqa: PLR0913
 
 def _current_window(request: Request) -> str:
     """Read the current window token from ``app.state``, defaulting to ``"30"``."""
-    value = getattr(request.app.state, "refresh_window", DEFAULT_WINDOW)
+    # Keep compatibility with small embedders/tests that set the legacy
+    # attribute directly; normal writes go through ``set_refresh_target``.
+    legacy = getattr(request.app.state, "refresh_window", None)
+    if isinstance(legacy, str) and legacy in VALID_WINDOWS:
+        return legacy
+    target = getattr(request.app.state, "refresh_target", None)
+    if target is not None:
+        return target.window
+    value = legacy or DEFAULT_WINDOW
     return value or DEFAULT_WINDOW
 
 
@@ -194,7 +202,7 @@ async def refresh_now(request: Request) -> HTMLResponse:
     form = await request.form()
     submitted = form.get("window")
     if isinstance(submitted, str) and submitted in VALID_WINDOWS:
-        request.app.state.refresh_window = submitted
+        set_refresh_target(request.app.state, submitted)
     state = request.app.state
     trigger = state.refresh_trigger
     if trigger is not None:

@@ -15,7 +15,14 @@ import pytest
 
 from introspect import refresh
 from introspect.db import materialize_views
-from introspect.refresh import newest_mtime, refresh_loop
+from introspect.refresh import (
+    LoadingPhase,
+    discover_cold_start_candidates,
+    newest_mtime,
+    refresh_loop,
+    set_refresh_target,
+    target_for_window,
+)
 from introspect.search import build_search_corpus
 from tests.conftest import (
     codex_glob_pattern,
@@ -109,6 +116,49 @@ def test_newest_mtime_watches_codex_glob_too(tmp_path: Path) -> None:
     assert newest_mtime(jsonl_glob, codex_glob) > baseline
     # Without codex_glob, the new Codex file is invisible.
     assert newest_mtime(jsonl_glob) == baseline
+
+
+def test_cold_start_candidates_use_guard_band_and_codex_partitions(
+    tmp_path: Path,
+) -> None:
+    now = refresh.datetime(2026, 8, 28, 12, tzinfo=refresh.UTC)
+    claude = tmp_path / "claude" / "session.jsonl"
+    stale_claude = tmp_path / "claude" / "stale.jsonl"
+    codex = tmp_path / "codex" / "2026" / "08" / "28" / "rollout.jsonl"
+    old_codex = tmp_path / "codex" / "2026" / "08" / "01" / "rollout.jsonl"
+    for path in (claude, stale_claude, codex, old_codex):
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.touch()
+    os.utime(claude, (now.timestamp(), now.timestamp()))
+    stale_mtime = (now - refresh.timedelta(days=3)).timestamp()
+    os.utime(stale_claude, (stale_mtime, stale_mtime))
+    os.utime(codex, (stale_mtime, stale_mtime))
+    os.utime(old_codex, (now.timestamp(), now.timestamp()))
+
+    candidates = discover_cold_start_candidates(
+        str(tmp_path / "claude" / "*.jsonl"),
+        str(tmp_path / "codex" / "**" / "*.jsonl"),
+        days=1,
+        now=now,
+    )
+
+    assert candidates.claude == (str(claude),)
+    assert candidates.codex == (str(codex),)
+
+
+def test_target_override_advances_generation_and_loading_is_terminal() -> None:
+    state = types.SimpleNamespace(
+        refresh_target=target_for_window("30"),
+        refresh_window="30",
+        refresh_pending=False,
+    )
+    target = set_refresh_target(state, "7")
+
+    assert target.days == 7
+    assert target.generation == 1
+    assert state.refresh_target == target
+    assert state.refresh_pending is True
+    assert LoadingPhase.PREVIEW_READY.value == "preview_ready"
 
 
 def test_refresh_short_circuits_when_unchanged(

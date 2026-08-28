@@ -156,3 +156,22 @@ def test_lifespan_rejects_invalid_refresh_window_env(caplog):
             )
     finally:
         _write_sample_jsonl_path.cleanup()
+
+
+def test_lifespan_keeps_numeric_days_in_initial_target():
+    """The CLI's numeric days override survives the picker default."""
+    from introspect.refresh import LoadingPhase  # noqa: PLC0415
+
+    with (
+        tempfile.TemporaryDirectory() as tmp,
+        _patched_client(
+            Path(tmp),
+            extra_env={
+                "INTROSPECT_DAYS": "7",
+                "INTROSPECT_REFRESH_INTERVAL_SECONDS": "0",
+            },
+        ) as client,
+    ):
+        assert client.get("/sessions").status_code == 200
+        assert app.state.refresh_target.days == 7
+        assert app.state.loading_state.phase is LoadingPhase.PREVIEW_READY
