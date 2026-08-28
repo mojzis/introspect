@@ -49,7 +49,7 @@ human_review = false
 planner   = { harness = "codex", model = "gpt-5.6-terra", effort = "medium" }
 dev       = { harness = "codex", model = "gpt-5.6-luna",  effort = "high" }
 check     = { harness = "codex", model = "gpt-5.6-terra", effort = "medium" }
-review    = { harness = "codex", model = "gpt-5.6-terra", effort = "medium" }
+review    = { harness = "codex", model = "gpt-5.6-terra", effort = "high" }
 learnings = { harness = "codex", model = "gpt-5.6-terra", effort = "medium" }
 decider   = { harness = "codex", model = "gpt-5.6-terra", effort = "medium" }
 
