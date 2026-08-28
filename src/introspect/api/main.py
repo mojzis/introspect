@@ -217,11 +217,11 @@ async def lifespan(app: FastAPI):  # noqa: PLR0915
 
     _configure_sql_api(app)
 
-    # Finish targets larger than the one-day preview immediately. With
-    # interval 0 this is a one-shot task; recurring auto-refresh remains
-    # disabled because the public trigger stays unset. A one-day or unlimited
-    # preview is already the complete target and needs no second build.
-    needs_initial_load = days > 1 or warm_snapshot
+    # A startup preview is deliberately candidate-bounded, so every positive
+    # target needs an authoritative rebuild. With interval 0 this is a one-shot
+    # task; recurring auto-refresh remains disabled because the public trigger
+    # stays unset. An unlimited target already includes all available data.
+    needs_initial_load = days > 0 or warm_snapshot
     app.state.refresh_pending = needs_initial_load
     refresh_task: asyncio.Task[None] | None = None
     if interval > 0 or needs_initial_load:
