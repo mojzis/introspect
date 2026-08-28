@@ -181,7 +181,7 @@ def _current_indicator(request: Request, *, notify: bool = False) -> HTMLRespons
     last_refreshed_at = state.last_refreshed_at
     started_at = getattr(state, "refresh_started_at", None)
     show_flash = notify and _just_completed(in_progress, last_refreshed_at)
-    return _render(
+    response = _render(
         request,
         disabled=False,
         in_progress=in_progress,
@@ -193,6 +193,12 @@ def _current_indicator(request: Request, *, notify: bool = False) -> HTMLRespons
         database_snapshot=database_snapshot,
         database_label=database_label,
     )
+    # The status request polls only while a rebuild is running. Once its atomic
+    # database swap has completed, reload the current page so every panel reads
+    # from the new connection.
+    if show_flash:
+        response.headers["HX-Refresh"] = "true"
+    return response
 
 
 async def refresh_status(request: Request) -> HTMLResponse:

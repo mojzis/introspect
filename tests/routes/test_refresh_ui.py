@@ -314,8 +314,8 @@ def test_refresh_status_poll_delay_tightens_with_elapsed_time():
                     delattr(app.state, attr)
 
 
-def test_refresh_status_shows_completion_flash():
-    """Polled status flipping to done with a fresh timestamp renders the ✓ flash."""
+def test_refresh_status_reloads_page_after_completion():
+    """A completed polled refresh tells HTMX to reload the current page."""
     with tempfile.TemporaryDirectory() as tmp, _patched_client(Path(tmp)) as client:
         app.state.refresh_trigger = asyncio.Event()
         app.state.refresh_in_progress = False
@@ -326,6 +326,7 @@ def test_refresh_status_shows_completion_flash():
             assert response.status_code == 200
             assert "refresh-flash" in response.text
             assert "refreshed" in response.text
+            assert response.headers["HX-Refresh"] == "true"
             # Polling stops once the flash is shown — no load-delay trigger remains.
             # (The window picker still has hx-trigger="change", which is unrelated.)
             assert "load delay:" not in response.text

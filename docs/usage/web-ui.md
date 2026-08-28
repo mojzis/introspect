@@ -289,7 +289,8 @@ now" button, and scope how much history is loaded with the window picker
 (`1` / `7` / `30` days, the current calendar month, or the selected custom CLI
 target). `0` means all data. The click returns immediately while the indicator
 polls its status fragment; the existing database remains browseable until the
-new sidecar is complete.
+new sidecar is complete. After a successful swap, the current page reloads
+automatically so its panels use the refreshed data.
 
 The indicator is an accessible live status region. It announces preview or warm
 snapshot availability, discovery and loading stages (including truthful file
