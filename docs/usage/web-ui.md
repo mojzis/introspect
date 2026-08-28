@@ -27,7 +27,7 @@ If the target port is busy, the server falls forward to the next free port.
 | Path | Page | What it answers |
 |---|---|---|
 | `/` | Dashboard | Session count, recent sessions, headline token/cost stats. |
-| `/sessions` | Sessions | Every session, filterable by model, project, branch, command, provider, and free text; sortable by start, duration, message counts, tool calls, model, project, branch, provider, title, file counts, or cost. |
+| `/sessions` | Sessions | Every session, filterable by model, project, branch, command, provider, and free text; sortable by start, duration, message counts, tool calls, model, project, branch, provider, title, file counts, or cost. Provider summary buttons at the top show each provider's session count and canonical total cost. |
 | `/sessions/{session_id}` | Session detail | One session across five tabs, with its resolved title above the metadata — see [below](#session-detail-tabs). |
 | `/search` | Search | Full-text search across all message types (BM25, ILIKE fallback). |
 | `/tools` | Tools | Tool-call statistics; filter by name, session, project, or failures only. |
@@ -62,12 +62,20 @@ the sessions list shows, so the numbers always agree.
   [Cache loss](#cache-loss).
 - **Prompt-cache TTL** — both TTL policies replayed over the same requests, with
   the margin between them. See [Prompt-cache TTL](#prompt-cache-ttl).
+- **Provider buttons** — select a provider to scope the daily/hourly charts,
+  portfolio and Pareto table, binary splits, cache-loss totals, and prompt-cache
+  TTL comparison. The selection is retained while drilling into a day or hour
+  and changing the chart breakdown.
 
 When you filter by day or hour, the cost aggregation and the Pareto rows narrow
 to that window, but the subagent and skill classifiers stay all-time session
 properties. "Of the cost incurred at hour 14, this much came from sessions that
 ever used a subagent" is the intended reading — requiring the `Task` call to
 land *inside* hour 14 would be both noisy and unintuitive.
+
+The provider buttons use the same canonical session totals as the Sessions page.
+A provider selection is represented by `?provider=...` and composes with
+day/hour windows across all Cost Overview HTMX fragments.
 
 ### Spend shapes
 
@@ -125,7 +133,12 @@ A per-model token/cost rollup, plus **bloat** tables: every unit of context the
 session paid for, bucketed by what produced it (`file read: db.py`,
 `bash: uv run`, `WebFetch`, a write, a conversation turn) and rolled up by
 category. The question is *which specific reads and commands are responsible for
-this bill?* Selecting a range of messages re-scopes the tables to that range.
+this bill? Selecting a range of messages re-scopes the tables to that range.
+Sessions containing Codex approval-review requests also show a separate Auto
+Review summary in the session header with its call count, token breakdown, and a
+provisional Luna-priced estimate. Those requests are excluded from the primary
+session token and cost totals; the estimate links to the
+[upstream pricing issue](https://github.com/openai/codex/issues/20981).
 
 ### Tokenscape
 

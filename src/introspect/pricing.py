@@ -87,6 +87,10 @@ _PRICING: dict[str, Rates] = {
     "gpt-5.6-sol": Rates(4.00, 5.00, 8.00, 0.40, 20.00),
     "gpt-5.6-terra": Rates(2.00, 2.50, 4.00, 0.20, 12.00),
     "gpt-5.6-luna": Rates(0.20, 0.25, 0.40, 0.02, 1.20),
+    # Codex does not expose this internal approval-review model's price or
+    # underlying public model. Use Luna rates provisionally; revisit when
+    # https://github.com/openai/codex/issues/20981 provides authoritative data.
+    "codex-auto-review": Rates(0.20, 0.25, 0.40, 0.02, 1.20),
 }
 
 # OpenAI's long-context tier applies above 272K input tokens. It is deliberately

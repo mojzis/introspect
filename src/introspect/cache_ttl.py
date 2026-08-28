@@ -565,7 +565,11 @@ def _comparison_from_row(row: tuple | None) -> TtlComparison:
 
 
 def _sidechain_and_window(
-    *, sidechain: bool, window: tuple[str, str] | None, alias: str = ""
+    *,
+    sidechain: bool,
+    window: tuple[str, str] | None,
+    alias: str = "",
+    provider: str | None = None,
 ) -> tuple[str, list[Any]]:
     """WHERE clause shared by the global and per-project rollups.
 
@@ -578,6 +582,12 @@ def _sidechain_and_window(
     if window is not None:
         clause += f" AND {prefix}timestamp >= ? AND {prefix}timestamp < ?"
         params.extend(window)
+    if provider:
+        clause += (
+            f" AND {prefix}session_id IN "  # noqa: S608
+            "(SELECT session_id FROM logical_sessions WHERE provider = ?)"
+        )
+        params.append(provider)
     return clause, params
 
 
@@ -586,15 +596,21 @@ def global_ttl_comparison(
     *,
     sidechain: bool = False,
     window: tuple[str, str] | None = None,
+    provider: str | None = None,
 ) -> TtlComparison:
     """Portfolio-wide 5m-vs-1h verdict.
 
     ``sidechain=True`` scores subagent traffic, which carries its own
     ``subagentPromptCacheTtl`` setting — never merge the two.
     """
-    clause, params = _sidechain_and_window(sidechain=sidechain, window=window)
+    clause, params = _sidechain_and_window(
+        sidechain=sidechain,
+        window=window,
+        alias="cr",
+        provider=provider,
+    )
     row = db.execute(
-        f"SELECT {_rollup_select()} FROM cache_requests {clause}",  # noqa: S608
+        f"SELECT {_rollup_select('cr')} FROM cache_requests cr {clause}",  # noqa: S608
         params,
     ).fetchone()
     return _comparison_from_row(row)
@@ -634,6 +650,7 @@ def cache_miss_event_rows(
     session_id: str | None = None,
     timestamp_window: tuple[str, str] | None = None,
     sidechain: bool = False,
+    provider: str | None = None,
 ) -> list[dict[str, Any]]:
     """Every cache miss in scope, straight off ``cache_requests``.
 
@@ -654,6 +671,11 @@ def cache_miss_event_rows(
     if timestamp_window is not None:
         clauses.append("timestamp >= ? AND timestamp < ?")
         params.extend(timestamp_window)
+    if provider:
+        clauses.append(
+            "session_id IN (SELECT session_id FROM logical_sessions WHERE provider = ?)"
+        )
+        params.append(provider)
     relation = db.execute(
         "SELECT 1 FROM information_schema.tables WHERE table_name = 'cache_requests'"
     ).fetchone()

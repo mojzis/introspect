@@ -63,6 +63,7 @@ def _fetch_aggregated(
     bucket_expr: str,
     where_sql: str = "",
     params: tuple[Any, ...] = (),
+    provider: str = "",
 ) -> list[tuple[str, str, str, float]]:
     """Aggregate cost by ``(bucket, model, project)`` and return tuples.
 
@@ -72,6 +73,16 @@ def _fetch_aggregated(
     ``strftime(date_trunc('hour', timestamp::TIMESTAMP), '%H:00')`` for the
     hourly view). User input never reaches this string.
     """
+    if provider:
+        provider_filter = (
+            "session_id IN (SELECT session_id FROM logical_sessions WHERE provider = ?)"
+        )
+        where_sql = (
+            f"{where_sql} AND {provider_filter}"
+            if where_sql
+            else f"WHERE {provider_filter}"
+        )
+        params = (*params, provider)
     cost_expr = COST_EXPR_SQL
     sql = f"""
         WITH per_msg AS (
@@ -320,6 +331,7 @@ def _build_panel_context(  # noqa: PLR0913
     x_title: str,
     where_sql: str = "",
     params: tuple[Any, ...] = (),
+    provider: str = "",
 ) -> tuple[dict[str, Any], dict[str, dict[str, float]]]:
     """Shared aggregate → figure pipeline for both daily and hourly panels.
 
@@ -332,6 +344,7 @@ def _build_panel_context(  # noqa: PLR0913
         bucket_expr=bucket_expr,
         where_sql=where_sql,
         params=params,
+        provider=provider,
     )
     color_map = _canonical_color_map(db, bd)
     bucketed = _collapse_to_breakdown(rows, bd)
@@ -348,6 +361,7 @@ def _build_panel_context(  # noqa: PLR0913
         "breakdown": bd,
         "has_data": bool(bucketed),
         "total_cost": format_cost(total_cost),
+        "provider": provider,
     }
     return base_context, bucketed
 
@@ -355,6 +369,7 @@ def _build_panel_context(  # noqa: PLR0913
 def build_daily_panel_context(
     db: duckdb.DuckDBPyConnection,
     breakdown: str,
+    provider: str = "",
 ) -> dict[str, Any]:
     """Build the template context for the daily-cost panel.
 
@@ -366,6 +381,7 @@ def build_daily_panel_context(
         breakdown=breakdown,
         bucket_expr="CAST(timestamp AS DATE)",
         x_title="Day",
+        provider=provider,
     )
     base["breakdown_options"] = list(ALLOWED_BREAKDOWNS)
     base["day_count"] = len(bucketed)
@@ -376,6 +392,7 @@ def _build_hourly_panel_context(
     db: duckdb.DuckDBPyConnection,
     day_str: str,
     breakdown: str,
+    provider: str = "",
 ) -> dict[str, Any]:
     """Build the template context for the hourly-cost panel for ``day_str``."""
     base, _ = _build_panel_context(
@@ -385,14 +402,18 @@ def _build_hourly_panel_context(
         x_title="Hour (UTC)",
         where_sql="WHERE CAST(timestamp AS DATE) = ?",
         params=(day_str,),
+        provider=provider,
     )
     base["day"] = day_str
     return base
 
 
-async def daily_panel(request: Request, breakdown: str) -> HTMLResponse:
+async def daily_panel(
+    request: Request, breakdown: str, provider: str = ""
+) -> HTMLResponse:
     """Return the daily-cost panel fragment (chart + controls)."""
-    context = build_daily_panel_context(conn(request), breakdown)
+    provider = provider.strip()
+    context = build_daily_panel_context(conn(request), breakdown, provider)
     context["parent"] = parent(request)
     return templates.TemplateResponse(request, "_daily_cost_panel.html", context)
 
@@ -401,12 +422,16 @@ async def hourly_panel(
     request: Request,
     day: str,
     breakdown: str,
+    provider: str = "",
 ) -> HTMLResponse:
     """Return the hourly-cost panel fragment for ``day``."""
     try:
         day_str = parse_day(day)
     except ValueError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
-    context = _build_hourly_panel_context(conn(request), day_str, breakdown)
+    provider = provider.strip()
+    context = _build_hourly_panel_context(
+        conn(request), day_str, breakdown, provider.strip()
+    )
     context["parent"] = parent(request)
     return templates.TemplateResponse(request, "_hourly_cost_panel.html", context)

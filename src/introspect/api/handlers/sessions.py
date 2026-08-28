@@ -28,9 +28,11 @@ from ._helpers import (
     SESSIONS_SORT_COLS,
     SESSIONS_SORT_DEFAULT,
     build_cost_attribution_sql,
+    build_provider_summaries,
     clean_title,
     conn,
     ensure_chart_template,
+    fetch_auto_review_usage,
     fetch_token_usage,
     format_cost,
     parent,
@@ -348,6 +350,7 @@ async def sessions(  # noqa: PLR0913
         SELECT DISTINCT provider FROM logical_sessions
         WHERE provider IS NOT NULL ORDER BY provider
     """).fetchall()
+    provider_summaries = build_provider_summaries(db)
     commands_list = db.execute(f"""
         SELECT DISTINCT command FROM message_commands
         WHERE command NOT IN {OBVIOUS_COMMANDS_SQL}
@@ -377,6 +380,7 @@ async def sessions(  # noqa: PLR0913
             "projects": [r[0] for r in projects],
             "branches": [r[0] for r in branches],
             "providers": [r[0] for r in providers],
+            "provider_summaries": provider_summaries,
             "commands_list": [r[0] for r in commands_list],
         },
     )
@@ -1812,7 +1816,10 @@ async def session_detail(  # noqa: PLR0913
     ).fetchone()
     session_title = clean_title(title_row[0] or "") if title_row else ""
 
-    token_usage = fetch_token_usage(db, session_id=session_id)
+    token_usage = fetch_token_usage(
+        db, session_id=session_id, exclude_model="codex-auto-review"
+    )
+    auto_review_usage = fetch_auto_review_usage(db, session_id=session_id)
 
     # Tool call summary
     tool_summary = db.execute(
@@ -1933,6 +1940,7 @@ async def session_detail(  # noqa: PLR0913
             "messages": parsed_messages,
             "messages_pagination": messages_pagination,
             "token_usage": token_usage,
+            "auto_review_usage": auto_review_usage,
             "tool_summary": tool_summary,
             "active_tab": active_tab,
             "cost_ctx": cost_ctx,

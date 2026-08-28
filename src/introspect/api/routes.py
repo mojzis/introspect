@@ -181,16 +181,20 @@ async def stats(request: Request):
 
 
 @router.get("/cost-overview", response_class=HTMLResponse)
-async def cost_overview(request: Request):
-    return await _cost_overview(request)
+async def cost_overview(
+    request: Request,
+    provider: str = Query("", alias="provider"),
+):
+    return await _cost_overview(request, provider)
 
 
 @router.get("/cost-overview/breakdown", response_class=HTMLResponse)
 async def cost_daily_panel(
     request: Request,
     breakdown: str = Query(_COST_DEFAULT_BREAKDOWN),
+    provider: str = Query("", alias="provider"),
 ):
-    return await _cost_daily_panel(request, breakdown)
+    return await _cost_daily_panel(request, breakdown, provider)
 
 
 @router.get("/cost-overview/breakdown/{day}", response_class=HTMLResponse)
@@ -198,8 +202,9 @@ async def cost_hourly_panel(
     request: Request,
     day: str,
     breakdown: str = Query(_COST_DEFAULT_BREAKDOWN),
+    provider: str = Query("", alias="provider"),
 ):
-    return await _cost_hourly_panel(request, day, breakdown)
+    return await _cost_hourly_panel(request, day, breakdown, provider)
 
 
 @router.get("/cost-overview/portfolio", response_class=HTMLResponse)
@@ -207,8 +212,9 @@ async def cost_portfolio_panel(
     request: Request,
     day: str | None = Query(default=None),
     hour: str | None = Query(default=None),
+    provider: str = Query("", alias="provider"),
 ):
-    return await _cost_portfolio_panel(request, day, hour)
+    return await _cost_portfolio_panel(request, day, hour, provider)
 
 
 @router.post("/api/query", response_class=JSONResponse)

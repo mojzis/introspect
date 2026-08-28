@@ -62,6 +62,7 @@ from ._helpers import (
     OBVIOUS_COMMANDS_SQL,
     SESSION_COST_SUBQUERY,
     build_cost_attribution_sql,
+    build_provider_summaries,
     clean_title,
     conn,
     format_cost,
@@ -391,6 +392,7 @@ def _attach_spend_shapes(
 def _build_panel_context(
     db: duckdb.DuckDBPyConnection,
     window: TimeWindow | None,
+    provider: str = "",
 ) -> dict[str, Any]:
     """Build the Pareto + binary-splits context for the portfolio panel.
 
@@ -399,7 +401,7 @@ def _build_panel_context(
     the splits derive ``cost_rows`` from its rows — the rollup runs once
     per request, not twice.
     """
-    pareto = _build_pareto(db, window)
+    pareto = _build_pareto(db, window, provider)
     _attach_spend_shapes(db, pareto["rows"], window)
     cost_rows = [(r["session_id"], r["cost_usd"]) for r in pareto["rows"]]
     return {
@@ -408,14 +410,20 @@ def _build_panel_context(
         "huge_reads_split": _build_huge_reads_split(db, cost_rows, window),
         "skill_split": _build_skill_split(db, cost_rows),
         "cache_loss": _aggregate_cache_loss(
-            db, window, total_cost_usd=pareto["total_cost_usd"]
+            db,
+            window,
+            total_cost_usd=pareto["total_cost_usd"],
+            provider=provider,
         ),
-        "ttl_verdict": _build_ttl_verdict(db, window),
+        "ttl_verdict": _build_ttl_verdict(db, window, provider),
+        "provider": provider,
     }
 
 
 def _build_ttl_verdict(
-    db: duckdb.DuckDBPyConnection, window: TimeWindow | None
+    db: duckdb.DuckDBPyConnection,
+    window: TimeWindow | None,
+    provider: str = "",
 ) -> dict[str, Any]:
     """Would 1h or 5m have been cheaper, over the sessions in ``window``?
 
@@ -427,7 +435,7 @@ def _build_ttl_verdict(
     user/project — a per-session verdict would not be actionable. Subagents
     are excluded: they have their own ``subagentPromptCacheTtl``.
     """
-    verdict = global_ttl_comparison(db, window=window)
+    verdict = global_ttl_comparison(db, window=window, provider=provider or None)
     return {
         "n_requests": verdict.n_requests,
         "cost_5m": format_cost(verdict.cost_5m),
@@ -449,6 +457,7 @@ def _aggregate_cache_loss(
     window: TimeWindow | None,
     *,
     total_cost_usd: float,
+    provider: str = "",
 ) -> dict[str, Any]:
     """Cache-miss premium in ``window``, split by whether a TTL recovers it.
 
@@ -458,7 +467,9 @@ def _aggregate_cache_loss(
     setting helps, so counting them as waste would overstate the upside of
     switching. They are reported alongside as breaks instead.
     """
-    misses = summarize_misses(cache_miss_event_rows(db, timestamp_window=window))
+    misses = summarize_misses(
+        cache_miss_event_rows(db, timestamp_window=window, provider=provider or None)
+    )
     cost_usd = misses.recoverable_usd
     pct_of_total = 100.0 * cost_usd / total_cost_usd if total_cost_usd > 0 else 0.0
     break_pct = 100.0 * misses.break_usd / total_cost_usd if total_cost_usd > 0 else 0.0
@@ -476,11 +487,12 @@ def _aggregate_cache_loss(
     }
 
 
-async def cost_overview(request: Request) -> HTMLResponse:
+async def cost_overview(request: Request, provider: str = "") -> HTMLResponse:
     """Render the /cost-overview page."""
     db = conn(request)
-    panel = _build_panel_context(db, window=None)
-    daily_panel = build_daily_panel_context(db, DEFAULT_BREAKDOWN)
+    provider = provider.strip()
+    panel = _build_panel_context(db, window=None, provider=provider)
+    daily_panel = build_daily_panel_context(db, DEFAULT_BREAKDOWN, provider)
 
     return templates.TemplateResponse(
         request,
@@ -489,6 +501,8 @@ async def cost_overview(request: Request) -> HTMLResponse:
             "parent": parent(request),
             "is_filtered": False,
             "filter_label": "",
+            "provider": provider,
+            "provider_summaries": build_provider_summaries(db),
             **panel,
             **daily_panel,
         },
@@ -499,6 +513,7 @@ async def cost_portfolio_panel(
     request: Request,
     day: str | None,
     hour: str | None,
+    provider: str = "",
 ) -> HTMLResponse:
     """Render the portfolio fragment, optionally scoped to a time window."""
     if hour and not day:
@@ -508,10 +523,11 @@ async def cost_portfolio_panel(
         hour_str = parse_hour(hour) if hour else None
     except ValueError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
+    provider = provider.strip()
     window = _window_for(day_str, hour_str)
 
     db = conn(request)
-    panel = _build_panel_context(db, window)
+    panel = _build_panel_context(db, window, provider)
     return templates.TemplateResponse(
         request,
         "_cost_portfolio_panel.html",
@@ -527,6 +543,7 @@ async def cost_portfolio_panel(
 def _fetch_cost_rows(
     db: duckdb.DuckDBPyConnection,
     window: TimeWindow | None = None,
+    provider: str = "",
 ) -> list[tuple]:
     """Return ``[(session_id, cost_usd), ...]`` for every positive-cost session.
 
@@ -539,15 +556,25 @@ def _fetch_cost_rows(
     sessions outside drop out entirely.
     """
     subquery = _cost_subquery(window)
+    provider_sql = ""
+    params: list[Any] = []
+    if provider:
+        provider_sql = (
+            " AND session_id IN "
+            "(SELECT session_id FROM logical_sessions WHERE provider = ?)"
+        )
+        params.append(provider)
     return db.execute(
         f"SELECT session_id::VARCHAR AS session_id, cost_usd FROM {subquery} "  # noqa: S608
-        "WHERE cost_usd IS NOT NULL AND cost_usd > 0"
+        "WHERE cost_usd IS NOT NULL AND cost_usd > 0" + provider_sql,
+        params,
     ).fetchall()
 
 
 def _build_pareto(
     db: duckdb.DuckDBPyConnection,
     window: TimeWindow | None = None,
+    provider: str = "",
 ) -> dict[str, Any]:
     """Rank sessions by cost desc and cut at 80% cumulative share.
 
@@ -568,10 +595,18 @@ def _build_pareto(
     # SESSION_COST_SUBQUERY carries its own ``sc`` alias; the outer CTE below
     # uses a distinct ``session_costs`` name to avoid shadowing it.
     subquery = _cost_subquery(window)
+    provider_sql = ""
+    params: list[Any] = []
+    if provider:
+        provider_sql = "WHERE ls.provider = ?"
+        params.append(provider)
     rows = db.execute(
         f"""
         WITH session_costs AS (
-            SELECT session_id, cost_usd FROM {subquery}
+            SELECT sc.session_id, sc.cost_usd
+            FROM {subquery}
+            LEFT JOIN logical_sessions ls ON ls.session_id = sc.session_id
+            {provider_sql}
         ),
         ranked AS (
             SELECT
@@ -598,7 +633,8 @@ def _build_pareto(
         LEFT JOIN logical_sessions ls ON ls.session_id = r.session_id
         LEFT JOIN session_titles st ON st.session_id = r.session_id
         ORDER BY r.cost_usd DESC, r.session_id
-        """  # noqa: S608
+        """,  # noqa: S608
+        params,
     ).fetchall()
 
     total_cost_usd = float(rows[0][3]) if rows else 0.0
