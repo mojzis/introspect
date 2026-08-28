@@ -126,11 +126,15 @@ def _current_window(request: Request) -> str:
     # Keep compatibility with small embedders/tests that set the legacy
     # attribute directly; normal writes go through ``set_refresh_target``.
     legacy = getattr(request.app.state, "refresh_window", None)
+    target = getattr(request.app.state, "refresh_target", None)
+    if target is not None and (
+        not isinstance(legacy, str)
+        or legacy not in VALID_WINDOWS
+        or legacy == target.window
+    ):
+        return target.window
     if isinstance(legacy, str) and legacy in VALID_WINDOWS:
         return legacy
-    target = getattr(request.app.state, "refresh_target", None)
-    if target is not None:
-        return target.window
     value = legacy or DEFAULT_WINDOW
     return value or DEFAULT_WINDOW
 

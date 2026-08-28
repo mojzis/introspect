@@ -144,7 +144,7 @@ async def lifespan(app: FastAPI):  # noqa: PLR0915
     target = target_for_window(refresh_window, days=days)
     app.state.db_path = db_path
     app.state.days = days
-    app.state.refresh_window = refresh_window
+    app.state.refresh_window = target.window
     app.state.refresh_target = target
     app.state.refresh_pending = False
     app.state.last_built_days = 0
@@ -169,12 +169,16 @@ async def lifespan(app: FastAPI):  # noqa: PLR0915
 
     _configure_sql_api(app)
 
+    # Finish targets larger than the one-day preview immediately. With
+    # interval 0 this is a one-shot task; recurring auto-refresh remains
+    # disabled because the public trigger stays unset. A one-day or unlimited
+    # preview is already the complete target and needs no second build.
+    needs_initial_load = days > 1
+    app.state.refresh_pending = needs_initial_load
     refresh_task: asyncio.Task[None] | None = None
-    if interval > 0:
-        # The first loop tick is the explicit full-target load, even when no
-        # file mtime changed during the preview.
-        app.state.refresh_pending = True
-        app.state.refresh_trigger = asyncio.Event()
+    if interval > 0 or needs_initial_load:
+        refresh_trigger = asyncio.Event()
+        app.state.refresh_trigger = refresh_trigger if interval > 0 else None
         refresh_task = asyncio.create_task(
             refresh_loop(
                 app,
@@ -183,8 +187,10 @@ async def lifespan(app: FastAPI):  # noqa: PLR0915
                 days,
                 resolve_projects,
                 interval,
-                trigger=app.state.refresh_trigger,
+                trigger=refresh_trigger,
                 codex_glob=codex_glob,
+                initial=needs_initial_load,
+                one_shot=interval <= 0,
             )
         )
 

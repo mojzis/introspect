@@ -7,7 +7,7 @@ import contextlib
 import glob
 import logging
 import os
-from collections.abc import Callable
+from collections.abc import Callable, Iterable, Iterator
 from dataclasses import dataclass
 from datetime import UTC, date, datetime, timedelta
 from enum import Enum, StrEnum
@@ -114,9 +114,13 @@ def target_for_window(
     days: int | None = None,
     generation: int = 0,
 ) -> RefreshTarget:
-    """Build a target, allowing the numeric CLI override to remain exact."""
+    """Build a target, keeping an explicit numeric override displayable."""
+    if days is not None and days > 0 and days != window_to_days(window):
+        display_window = str(days)
+    else:
+        display_window = window if window in VALID_WINDOWS else DEFAULT_WINDOW
     return RefreshTarget(
-        window=window if window in VALID_WINDOWS else DEFAULT_WINDOW,
+        window=display_window,
         days=window_to_days(window) if days is None else max(0, days),
         generation=generation,
     )
@@ -161,10 +165,49 @@ def _safe_mtime(path: str) -> float:
         return 0.0
 
 
-def _bounded(paths: list[str], limit: int) -> tuple[tuple[str, ...], bool]:
-    """Return newest paths first, with deterministic tie-breaking and a cap."""
-    ordered = sorted(paths, key=lambda path: (_safe_mtime(path), path), reverse=True)
-    return tuple(ordered[:limit]), len(ordered) > limit
+def _bounded(paths: Iterable[str], limit: int) -> tuple[tuple[str, ...], bool]:
+    """Return newest paths first without retaining more than ``limit`` paths."""
+    import heapq  # noqa: PLC0415
+
+    iterator: Iterator[str] = iter(paths)
+    if limit < 1:
+        return (), next(iterator, None) is not None
+
+    selected: list[tuple[float, str]] = []
+    truncated = False
+    for path in iterator:
+        candidate = (_safe_mtime(path), path)
+        if len(selected) < limit:
+            heapq.heappush(selected, candidate)
+        elif candidate > selected[0]:
+            heapq.heapreplace(selected, candidate)
+            truncated = True
+        else:
+            truncated = True
+    selected.sort(reverse=True)
+    return tuple(path for _mtime, path in selected), truncated
+
+
+def _codex_candidate_paths(
+    codex_glob: str, *, moment: datetime, span_days: int
+) -> Iterator[str]:
+    """Yield Codex files from only the recent YYYY/MM/DD partitions."""
+    if "**" not in codex_glob:
+        return glob.iglob(codex_glob, recursive=True)  # noqa: PTH207
+
+    def paths():
+        seen: set[str] = set()
+        for offset in range(span_days):
+            partition = (moment - timedelta(days=offset)).date()
+            partition_glob = codex_glob.replace(
+                "**", f"{partition:%Y}/{partition:%m}/{partition:%d}", 1
+            )
+            for path in glob.iglob(partition_glob, recursive=True):  # noqa: PTH207
+                if path not in seen:
+                    seen.add(path)
+                    yield path
+
+    return paths()
 
 
 def discover_cold_start_candidates(
@@ -186,31 +229,44 @@ def discover_cold_start_candidates(
         return CandidateFiles(
             (),
             (),
-            bool(glob.glob(jsonl_glob, recursive=True)),  # noqa: PTH207
+            next(glob.iglob(jsonl_glob, recursive=True), None) is not None,  # noqa: PTH207
         )
     moment = now or datetime.now(UTC)
     span_days = max(1, days)
     claude_cutoff = (
         moment - timedelta(days=span_days + CLAUDE_MTIME_GUARD_DAYS)
     ).timestamp()
-    claude = [
+    claude = (
         path
-        for path in glob.glob(jsonl_glob, recursive=True)  # noqa: PTH207
+        for path in glob.iglob(jsonl_glob, recursive=True)  # noqa: PTH207
         if _safe_mtime(path) >= claude_cutoff
-    ]
+    )
 
-    codex: list[str] = []
+    codex: Iterable[str] = ()
     if codex_glob is not None:
-        partition_cutoff = (moment - timedelta(days=span_days - 1)).date()
         fallback_cutoff = (
             moment - timedelta(days=span_days + CLAUDE_MTIME_GUARD_DAYS)
         ).timestamp()
-        for path in glob.glob(codex_glob, recursive=True):  # noqa: PTH207
-            partition = _partition_date(path)
-            if (partition is not None and partition >= partition_cutoff) or (
-                partition is None and _safe_mtime(path) >= fallback_cutoff
-            ):
-                codex.append(path)
+        codex = (
+            path
+            for path in _codex_candidate_paths(
+                codex_glob, moment=moment, span_days=span_days
+            )
+            if (
+                _partition_date(path) is not None
+                or _safe_mtime(path) >= fallback_cutoff
+            )
+        )
+        # Date-partitioned Codex files are selected by partition, while
+        # unpartitioned custom paths retain the conservative mtime fallback.
+        codex = (
+            path
+            for path in codex
+            if (
+                (partition := _partition_date(path)) is None
+                or partition >= (moment - timedelta(days=span_days - 1)).date()
+            )
+        )
 
     claude_selected, claude_truncated = _bounded(claude, max_candidates)
     remaining = max(0, max_candidates - len(claude_selected))
@@ -218,7 +274,7 @@ def discover_cold_start_candidates(
     return CandidateFiles(
         claude_selected,
         codex_selected,
-        claude_truncated or codex_truncated or len(codex) > remaining,
+        claude_truncated or codex_truncated,
     )
 
 
@@ -420,7 +476,7 @@ def _set_loading(  # noqa: PLR0913
     )
 
 
-async def refresh_loop(  # noqa: PLR0913
+async def refresh_loop(  # noqa: PLR0913, PLR0915
     app: FastAPI,
     db_path: Path,
     jsonl_glob: str,
@@ -429,6 +485,9 @@ async def refresh_loop(  # noqa: PLR0913
     interval_seconds: float,
     trigger: asyncio.Event,
     codex_glob: str | None = None,
+    *,
+    initial: bool = False,
+    one_shot: bool = False,
 ) -> None:
     """Poll JSONL mtime and rebuild the materialized DB when files change.
 
@@ -446,11 +505,17 @@ async def refresh_loop(  # noqa: PLR0913
     """
     sidecar = db_path.with_name(db_path.name + ".next")
     last_mtime = newest_mtime(jsonl_glob, codex_glob)
+    first_run = initial
     while True:
         try:
-            with contextlib.suppress(TimeoutError):
-                await asyncio.wait_for(trigger.wait(), timeout=interval_seconds)
-            trigger.clear()
+            if first_run:
+                first_run = False
+            else:
+                if one_shot:
+                    return
+                with contextlib.suppress(TimeoutError):
+                    await asyncio.wait_for(trigger.wait(), timeout=interval_seconds)
+                trigger.clear()
             current = newest_mtime(jsonl_glob, codex_glob)
             target = _current_target(app.state, days)
             current_days = target.days
@@ -497,6 +562,7 @@ async def refresh_loop(  # noqa: PLR0913
                         LoadingPhase.DISCOVERING,
                         _current_target(app.state, days),
                     )
+                    first_run = one_shot
                     continue
                 await asyncio.to_thread(_swap_in, db_path, sidecar)
                 # Record the post-swap window first so a freak exception on
@@ -510,6 +576,8 @@ async def refresh_loop(  # noqa: PLR0913
             finally:
                 app.state.refresh_in_progress = False
                 app.state.refresh_started_at = None
+            if one_shot:
+                return
             last_mtime = current
             log.info("refresh complete")
         except asyncio.CancelledError:
@@ -526,4 +594,6 @@ async def refresh_loop(  # noqa: PLR0913
                 "refresh failed; will retry next tick",
                 exc_info=True,
             )
+            if one_shot:
+                return
             continue

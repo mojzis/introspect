@@ -161,6 +161,46 @@ def test_target_override_advances_generation_and_loading_is_terminal() -> None:
     assert LoadingPhase.PREVIEW_READY.value == "preview_ready"
 
 
+def test_initial_refresh_runs_without_waiting_for_interval(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """An initial full-target refresh starts immediately, including one-shot mode."""
+    _write_session(tmp_path, "sess-initial")
+    jsonl_glob = glob_pattern(tmp_path)
+    db_path = tmp_path / "db.duckdb"
+    app = _fake_app()
+    app.state.refresh_target = target_for_window("7")
+    app.state.refresh_window = "7"
+    app.state.refresh_pending = True
+
+    rebuild_calls = {"n": 0}
+
+    def fake_rebuild(*args, **kwargs):
+        rebuild_calls["n"] += 1
+
+    monkeypatch.setattr(refresh, "_rebuild_sidecar", fake_rebuild)
+    monkeypatch.setattr(refresh, "_swap_in", lambda *args, **kwargs: None)
+
+    async def run() -> None:
+        task = asyncio.create_task(
+            refresh_loop(
+                app,  # ty: ignore[invalid-argument-type]
+                db_path,
+                jsonl_glob,
+                7,
+                False,
+                interval_seconds=600,
+                trigger=asyncio.Event(),
+                initial=True,
+                one_shot=True,
+            )
+        )
+        await asyncio.wait_for(task, timeout=0.5)
+
+    asyncio.run(run())
+    assert rebuild_calls["n"] == 1
+
+
 def test_refresh_short_circuits_when_unchanged(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:

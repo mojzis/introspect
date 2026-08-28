@@ -45,6 +45,11 @@
                     hx-swap="outerHTML"
                     hx-trigger="change"
                     {% if _in_progress %}disabled{% endif %}>
+                {% if _window not in ("1", "7", "30", "month") %}
+                    <option value="{{ _window }}" selected>
+                        {% if _window == "0" %}All data{% else %}{{ _window }} days (CLI){% endif %}
+                    </option>
+                {% endif %}
                 <option value="1"{% if _window == "1" %} selected{% endif %}>Today</option>
                 <option value="7"{% if _window == "7" %} selected{% endif %}>7 days</option>
                 <option value="30"{% if _window == "30" %} selected{% endif %}>30 days</option>
