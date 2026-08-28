@@ -3,6 +3,18 @@
 {% block content %}
 <h1>Cost Overview</h1>
 
+<div class="filter-bar" aria-label="Provider summaries">
+    <span style="color:#666;font-size:0.85rem;">Providers:</span>
+    {% for summary in provider_summaries %}
+    <a class="tool-btn tool-btn-sm{% if summary.provider == provider %} tool-btn-active{% endif %}"
+       href="/cost-overview?provider={{ summary.provider }}"
+       hx-get="/cost-overview?provider={{ summary.provider }}"
+       hx-target="#content" hx-push-url="true">
+        {{ summary.provider }} · {{ summary.sessions }} session{{ '' if summary.sessions == 1 else 's' }} · {{ summary.cost }}
+    </a>
+    {% endfor %}
+</div>
+
 <h2>Daily breakdown</h2>
 <div class="card">
     {% include "_daily_cost_panel.html" %}

@@ -13,7 +13,8 @@
          data-figure-id="hourly-cost-chart-data-{{ day }}"
          data-height="320"
          data-on-click="portfolio-hour"
-         data-day="{{ day }}"></div>
+         data-day="{{ day }}"
+         data-provider="{{ provider }}"></div>
     <script type="application/json" id="hourly-cost-chart-data-{{ day }}">{{ chart_json|safe }}</script>
     {% else %}
     <p>No cost recorded for {{ day }}.</p>

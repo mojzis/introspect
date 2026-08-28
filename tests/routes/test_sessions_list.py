@@ -322,6 +322,8 @@ def test_sessions_provider_dropdown_populated():
             assert "All providers" in response.text
             assert "openai" in response.text
             assert "anthropic" in response.text
+            assert "openai · 1 session" in response.text
+            assert "anthropic · 1 session" in response.text
 
 
 def test_sessions_provider_filter_survives_sort_and_page_change():

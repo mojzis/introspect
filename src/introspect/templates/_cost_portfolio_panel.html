@@ -12,6 +12,7 @@
     <span>Filtered to <strong>{{ filter_label }}</strong></span>
     <a href="#"
        hx-get="/cost-overview/portfolio"
+       hx-vals='{"provider":"{{ provider }}"}'
        hx-target="#cost-portfolio-panel"
        hx-swap="innerHTML"
        hx-push-url="false"

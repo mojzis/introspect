@@ -5,6 +5,7 @@ import logging
 import math
 import re
 from dataclasses import dataclass, replace
+from typing import Any
 
 import plotly.graph_objects as go
 from fastapi import HTTPException, Request
@@ -76,6 +77,28 @@ _TOOL_HINT_KEYS: dict[str, tuple[str, ...]] = {
 
 _SECONDS_PER_MINUTE = 60
 _MIN_SENTENCE_LEN = 20
+
+
+def _provider_summaries(db: Any) -> list[dict[str, object]]:
+    """Return canonical session and cost totals grouped by provider."""
+    rows = db.execute(
+        """
+        SELECT provider, COUNT(*) AS sessions,
+               COALESCE(SUM(cost_usd), 0.0) AS cost_usd
+        FROM session_stats
+        WHERE provider IS NOT NULL
+        GROUP BY provider
+        ORDER BY provider
+        """
+    ).fetchall()
+    return [
+        {
+            "provider": row[0],
+            "sessions": int(row[1]),
+            "cost": format_cost(float(row[2] or 0.0)),
+        }
+        for row in rows
+    ]
 
 
 def _format_exec_time(seconds: float) -> str:
@@ -348,6 +371,7 @@ async def sessions(  # noqa: PLR0913
         SELECT DISTINCT provider FROM logical_sessions
         WHERE provider IS NOT NULL ORDER BY provider
     """).fetchall()
+    provider_summaries = _provider_summaries(db)
     commands_list = db.execute(f"""
         SELECT DISTINCT command FROM message_commands
         WHERE command NOT IN {OBVIOUS_COMMANDS_SQL}
@@ -377,6 +401,7 @@ async def sessions(  # noqa: PLR0913
             "projects": [r[0] for r in projects],
             "branches": [r[0] for r in branches],
             "providers": [r[0] for r in providers],
+            "provider_summaries": provider_summaries,
             "commands_list": [r[0] for r in commands_list],
         },
     )

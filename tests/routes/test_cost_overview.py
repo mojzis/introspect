@@ -5,7 +5,11 @@ from pathlib import Path
 
 import pytest
 
-from ..conftest import make_assistant_message, make_user_message, write_jsonl
+from ..conftest import (
+    make_assistant_message,
+    make_user_message,
+    write_jsonl,
+)
 from .cost_helpers import (
     _cache_loss_session_lines,
     _cost_overview_setup,
@@ -602,6 +606,28 @@ def test_cost_overview_portfolio_clear_link_targets_panel():
             assert 'hx-get="/cost-overview/portfolio"' in text
             assert 'hx-target="#cost-portfolio-panel"' in text
             assert "Clear" in text
+
+        _run_with_client(tmp, _check)
+
+
+def test_cost_overview_provider_buttons_and_scope():
+    """Provider summaries use canonical totals and scope the portfolio."""
+    anthropic_sid = "sess-provider-an-aaaa-aaaa-aaaaaaaaaaaa"
+    specs = [(anthropic_sid, _session_at_cost(anthropic_sid, 1_000_000))]
+    with tempfile.TemporaryDirectory() as tmp_str:
+        tmp = Path(tmp_str)
+        _cost_overview_setup(tmp, specs)
+
+        def _check(client):
+            response = client.get("/cost-overview?provider=anthropic")
+            assert response.status_code == 200
+            text = response.text
+            assert "anthropic · 1 session · $5.00" in text
+            assert 'data-provider="anthropic"' in text
+
+            portfolio = client.get("/cost-overview/portfolio?provider=anthropic")
+            assert portfolio.status_code == 200
+            assert "$5.00" in portfolio.text
 
         _run_with_client(tmp, _check)
 
