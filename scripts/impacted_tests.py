@@ -16,6 +16,10 @@ non-zero exit that way, so a crash here degrades to a full run rather than to
 a silent gap in coverage. Selection is deliberately conservative -- over-
 selecting costs seconds, under-selecting lets a break through the commit gate.
 
+The base ref comes from ``GERENUK_BASE``; the commit hook sets it to ``HEAD``
+so the selection covers the commit being made rather than the whole branch.
+Left unset, gerenuk's own default (``origin/main``) applies.
+
 Run it directly with ``uv run poe impacted-tests``.
 """
 
@@ -105,7 +109,10 @@ def test_files_importing(modules: list[str], root: Path) -> set[str]:
 
     A module-level edit (imports, constants, decorators) has no single owning
     symbol for tyf to trace, so fall back to asking git which test files
-    mention the module at all.
+    mention the module at all. The patterns are deliberately loose -- they
+    match the module named in a string or a comment, not just an import -- so
+    that a test reaching a module indirectly (importlib, a fixture path, a
+    subprocess invocation) is still picked up. Over-selecting costs seconds.
     """
     found: set[str] = set()
     for module in modules:

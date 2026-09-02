@@ -55,7 +55,14 @@ end_step
 # --- 4. impacted tests -------------------------------------------------------
 # The selector exits non-zero when it cannot map the diff to a trustworthy set;
 # that always means "run the whole suite", never "skip the tests".
+# Base the diff on HEAD, not gerenuk's default of origin/main: this hook gates
+# one commit, and earlier commits on the branch were gated when they were made.
+# Against origin/main the selected set only ever grows, so a branch that once
+# touched pyproject.toml would run the full suite on every later commit.
 start_step "gerenuk + tyf -> impacted tests"
+if git rev-parse --verify --quiet HEAD >/dev/null; then
+    export GERENUK_BASE="${GERENUK_BASE:-HEAD}"
+fi
 if IMPACTED=$(uv run python scripts/impacted_tests.py); then
     if [ -z "$IMPACTED" ]; then
         echo "[pre-commit] no test is impacted by this diff"
