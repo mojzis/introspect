@@ -538,6 +538,20 @@ wheels = [
 ]
 
 [[package]]
+name = "gerenuk"
+version = "0.1.0"
+source = { registry = "https://pypi.org/simple" }
+dependencies = [
+    { name = "ty-find" },
+]
+sdist = { url = "https://files.pythonhosted.org/packages/ea/e3/b97d33513251f5c5c8eddefa98c8ff04670def99d0fd0fc1399071642e57/gerenuk-0.1.0.tar.gz", hash = "sha256:b238191546de4a4b38ab1e78729a05ff68db774f49693865a7d34762722d2ebd", size = 892170, upload-time = "2026-08-29T19:46:10.638Z" }
+wheels = [
+    { url = "https://files.pythonhosted.org/packages/7a/fb/ebc5832b9047bb30225f0f49fab1b720087a292a2027dc0fa7fa34f785f0/gerenuk-0.1.0-py3-none-macosx_11_0_arm64.whl", hash = "sha256:065566d9f56c646b8342bb1bbb1cd5c07376160ae7ddf05c854ee273ce22b684", size = 971754, upload-time = "2026-08-29T19:46:06.417Z" },
+    { url = "https://files.pythonhosted.org/packages/31/9e/6bd102a75aaf2ffc4d0e913f65f89290441e119284d8989a5c73296bc374/gerenuk-0.1.0-py3-none-manylinux_2_28_x86_64.whl", hash = "sha256:f4d5137ef77a7e80474b3a96ac81465da1e4fde200ff7f6ddf1965b10c8a934b", size = 1096482, upload-time = "2026-08-29T19:46:07.967Z" },
+    { url = "https://files.pythonhosted.org/packages/01/ad/ca9e63b787f78058602e49ac8dbb383db1cc79e0425bfc71c37a66ea553a/gerenuk-0.1.0-py3-none-win_amd64.whl", hash = "sha256:411a100d4a9081925eced2aaacd02b04e1e0ff2240501b5a2401241a5fe00451", size = 995468, upload-time = "2026-08-29T19:46:09.296Z" },
+]
+
+[[package]]
 name = "ghp-import"
 version = "2.1.0"
 source = { registry = "https://pypi.org/simple" }
@@ -666,6 +680,7 @@ dev = [
     { name = "beautifulsoup4" },
     { name = "biston" },
     { name = "deptry" },
+    { name = "gerenuk" },
     { name = "httpx2" },
     { name = "poethepoet" },
     { name = "pytest" },
@@ -677,6 +692,7 @@ dev = [
     { name = "ty" },
     { name = "ty-find" },
     { name = "vulture" },
+    { name = "zorilla" },
 ]
 docs = [
     { name = "mkdocs" },
@@ -705,6 +721,7 @@ dev = [
     { name = "beautifulsoup4" },
     { name = "biston", specifier = ">=0.5.0" },
     { name = "deptry" },
+    { name = "gerenuk", specifier = ">=0.1.0" },
     { name = "httpx2" },
     { name = "poethepoet" },
     { name = "pytest" },
@@ -716,6 +733,7 @@ dev = [
     { name = "ty" },
     { name = "ty-find", specifier = ">=0.4.0" },
     { name = "vulture" },
+    { name = "zorilla", specifier = ">=0.1.4" },
 ]
 docs = [
     { name = "mkdocs", specifier = ">=1.6" },
@@ -1942,4 +1960,15 @@ source = { registry = "https://pypi.org/simple" }
 sdist = { url = "https://files.pythonhosted.org/packages/34/74/c6428f875774288bec1396f5bfcbc2d925700a4dad61727fd5f2b12f249d/wcwidth-0.8.2.tar.gz", hash = "sha256:91fbef97204b96a3d4d421609b80340b760cf33e26da123ff243d76b1fda8dda", size = 1466253, upload-time = "2026-06-29T18:11:11.601Z" }
 wheels = [
     { url = "https://files.pythonhosted.org/packages/96/42/3e5985a0a7e57de470b320c6d6a1a67c844f6737a587f3d44dd13d1819e7/wcwidth-0.8.2-py3-none-any.whl", hash = "sha256:d63947694a0539a1d51e01eda7caf800c291020e6cdd7e28ad7b14dd33ad4f85", size = 323166, upload-time = "2026-06-29T18:11:09.888Z" },
+]
+
+[[package]]
+name = "zorilla"
+version = "0.1.4"
+source = { registry = "https://pypi.org/simple" }
+sdist = { url = "https://files.pythonhosted.org/packages/f8/4d/68697f2f0859c537e820ff2b15e61a83f506da65d3073b363acb625af727/zorilla-0.1.4.tar.gz", hash = "sha256:ae207d1d23aedfaf57485acb51bedca8d15689a1c181f07df00ffb1e2e1734ea", size = 128873, upload-time = "2026-07-07T20:35:51.72Z" }
+wheels = [
+    { url = "https://files.pythonhosted.org/packages/82/78/0c201b6bdd292be92c9b05c48ba288f5d64a745e4a94f2571ac42c54a27e/zorilla-0.1.4-py3-none-macosx_11_0_arm64.whl", hash = "sha256:5714e12edb80ba64247d44beca35dc3d167db141e9f95fdc757788d99477ff6a", size = 1171348, upload-time = "2026-07-07T20:35:47.186Z" },
+    { url = "https://files.pythonhosted.org/packages/7f/55/85c347643f480dd6ce9a3dd82b8bb2ad382e87da6331a05eb522a491bab6/zorilla-0.1.4-py3-none-manylinux_2_28_x86_64.whl", hash = "sha256:66c77fa85f3cda4e52fbfd02c2331ca18e72b39db2f9c970d71dc41450c82997", size = 1366249, upload-time = "2026-07-07T20:35:49.063Z" },
+    { url = "https://files.pythonhosted.org/packages/1c/0f/f17be72f0d0a148a46c4cc3e7da3680228a3ee1ff30b6da0be0d7bf19438/zorilla-0.1.4-py3-none-win_amd64.whl", hash = "sha256:b5330dfda32b501cf4663e1dc9ad1757dd9bb7730ab1024eee45145b78687061", size = 1240338, upload-time = "2026-07-07T20:35:50.475Z" },
 ]
