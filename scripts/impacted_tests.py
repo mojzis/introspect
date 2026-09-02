@@ -30,6 +30,7 @@ import os
 import subprocess
 import sys
 from pathlib import Path
+from typing import Any
 
 # A change to any of these invalidates symbol-level selection entirely: shared
 # fixtures and dependency pins are reachable from tests that never name a
@@ -38,7 +39,7 @@ BROAD_CHANGE_NAMES = frozenset({"conftest.py", "pyproject.toml", "uv.lock"})
 
 RUN_EVERYTHING = 10
 
-GERENUK = os.environ.get("GERENUK", "gerenuk")
+GERENUK = "gerenuk"
 # ty-find ships its binary as `tyf`; GERENUK_TYF is the env var gerenuk itself
 # reads, so pointing it once redirects both tools.
 TYF = os.environ.get("GERENUK_TYF", "tyf")
@@ -53,12 +54,19 @@ def _note(message: str) -> None:
 
 
 def _run(cmd: list[str], stdin: str | None = None) -> subprocess.CompletedProcess[str]:
-    return subprocess.run(  # noqa: S603
-        cmd, input=stdin, capture_output=True, text=True, check=False
-    )
+    try:
+        return subprocess.run(  # noqa: S603
+            cmd, input=stdin, capture_output=True, text=True, check=False
+        )
+    except OSError as exc:
+        # Most likely a fresh clone that has not run `uv sync` yet. Every other
+        # failure here gets a one-line note; a traceback in the middle of a
+        # commit should not be the exception.
+        _note(f"could not run {cmd[0]}: {exc}")
+        raise SelectionFailed from exc
 
 
-def changed_symbols(base: str | None) -> dict:
+def changed_symbols(base: str | None) -> dict[str, Any]:
     """Ask gerenuk what the working tree changed, as parsed JSON."""
     cmd = [GERENUK, "changed-symbols", "--format", "json"]
     if base:
@@ -71,7 +79,7 @@ def changed_symbols(base: str | None) -> dict:
     return json.loads(proc.stdout)
 
 
-def test_files_referencing(symbols: list[str], root: Path) -> set[str]:
+def tests_referencing(symbols: list[str], root: Path) -> set[str]:
     """Ask tyf which test files reference any of these symbol names."""
     if not symbols:
         return set()
@@ -104,7 +112,7 @@ def test_files_referencing(symbols: list[str], root: Path) -> set[str]:
     return found
 
 
-def test_files_importing(modules: list[str], root: Path) -> set[str]:
+def tests_importing(modules: list[str], root: Path) -> set[str]:
     """Test files that name a module changed at module level.
 
     A module-level edit (imports, constants, decorators) has no single owning
@@ -121,6 +129,11 @@ def test_files_importing(modules: list[str], root: Path) -> set[str]:
             proc = _run(
                 ["git", "-C", str(root), "grep", "-l", "-E", pattern, "--", "tests/"]
             )
+            # git grep exits 1 for "no matches" (normal) but 128 on error, and
+            # an erroring grep must not be mistaken for an empty result.
+            if proc.returncode > 1:
+                _note(f"git grep exited {proc.returncode}: {proc.stderr.strip()}")
+                raise SelectionFailed
             found.update(line for line in proc.stdout.splitlines() if line.strip())
     return found
 
@@ -146,8 +159,14 @@ def select(root: Path, base: str | None) -> list[str]:
     modules = list(report.get("module_level_changes", []))
 
     selected = set(report.get("test_files_changed", []))
-    selected |= test_files_referencing(symbols, root)
-    selected |= test_files_importing(modules, root)
+    selected |= tests_referencing(symbols, root)
+    selected |= tests_importing(modules, root)
+
+    # gerenuk lists deleted test files under test_files_changed too. Handing a
+    # vanished path to pytest aborts collection for the whole batch, so the
+    # genuinely impacted tests would never run. Drop them before the guard
+    # below, so a pure deletion correctly selects nothing rather than widening.
+    selected = {path for path in selected if (root / path).exists()}
 
     # Source changed but nothing traced back to a test: assume the mapping
     # missed something rather than that the change is untested.
@@ -164,9 +183,10 @@ def main() -> int:
 
     try:
         selected = select(root, os.environ.get("GERENUK_BASE") or None)
-    except (SelectionFailed, json.JSONDecodeError, ValueError) as exc:
-        if not isinstance(exc, SelectionFailed):
-            _note(f"unreadable tool output: {exc}")
+    except SelectionFailed:
+        return RUN_EVERYTHING
+    except ValueError as exc:  # includes json.JSONDecodeError
+        _note(f"unreadable tool output: {exc}")
         return RUN_EVERYTHING
 
     sys.stdout.write("".join(f"{path}\n" for path in selected))

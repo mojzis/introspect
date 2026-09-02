@@ -13,7 +13,7 @@ from pathlib import Path
 import pytest
 
 REPO_ROOT = Path(__file__).resolve().parent.parent
-ROOT = Path("/repo")
+TEST_DB = str(REPO_ROOT / "tests" / "test_db.py")
 
 
 def _load_module():
@@ -55,7 +55,7 @@ def _stub_run(monkeypatch, *, gerenuk=None, tyf=None, git_grep=""):
     calls = []
 
     def fake_run(cmd, stdin=None):
-        calls.append(cmd)
+        calls.append((cmd, stdin))
         if cmd[0] == impacted_tests.GERENUK:
             return (
                 gerenuk if gerenuk is not None else _Proc(json.dumps(_gerenuk_report()))
@@ -70,7 +70,7 @@ def _stub_run(monkeypatch, *, gerenuk=None, tyf=None, git_grep=""):
 
 def test_no_changes_selects_nothing(monkeypatch):
     _stub_run(monkeypatch)
-    assert impacted_tests.select(ROOT, None) == []
+    assert impacted_tests.select(REPO_ROOT, None) == []
 
 
 def test_changed_test_file_is_selected(monkeypatch):
@@ -80,7 +80,7 @@ def test_changed_test_file_is_selected(monkeypatch):
             json.dumps(_gerenuk_report(test_files_changed=["tests/test_db.py"]))
         ),
     )
-    assert impacted_tests.select(ROOT, None) == ["tests/test_db.py"]
+    assert impacted_tests.select(REPO_ROOT, None) == ["tests/test_db.py"]
 
 
 def test_changed_symbol_maps_through_tyf(monkeypatch):
@@ -88,8 +88,8 @@ def test_changed_symbol_maps_through_tyf(monkeypatch):
         {
             "symbol": "materialize_views",
             "test_references": [
-                {"file": "/repo/tests/test_db.py"},
-                {"file": "/repo/tests/test_db.py"},
+                {"file": TEST_DB},
+                {"file": TEST_DB},
                 {"file": "tests/test_projects.py"},
             ],
         }
@@ -111,12 +111,13 @@ def test_changed_symbol_maps_through_tyf(monkeypatch):
         tyf=_Proc(json.dumps(tyf_payload)),
     )
 
-    selected = impacted_tests.select(ROOT, None)
+    selected = impacted_tests.select(REPO_ROOT, None)
 
     # Absolute and relative reference paths collapse to one repo-relative entry.
     assert selected == ["tests/test_db.py", "tests/test_projects.py"]
     # gerenuk's "module:name" form is reduced to the bare name tyf expects.
-    assert any(cmd[0] == impacted_tests.TYF for cmd in calls)
+    _, tyf_stdin = next(call for call in calls if call[0][0] == impacted_tests.TYF)
+    assert tyf_stdin == "materialize_views\n"
 
 
 def test_single_symbol_tyf_object_response(monkeypatch):
@@ -128,11 +129,9 @@ def test_single_symbol_tyf_object_response(monkeypatch):
                 _gerenuk_report(changed_symbols=[{"symbol": "introspect.db:only_one"}])
             )
         ),
-        tyf=_Proc(
-            json.dumps({"test_references": [{"file": "/repo/tests/test_db.py"}]})
-        ),
+        tyf=_Proc(json.dumps({"test_references": [{"file": TEST_DB}]})),
     )
-    assert impacted_tests.select(ROOT, None) == ["tests/test_db.py"]
+    assert impacted_tests.select(REPO_ROOT, None) == ["tests/test_db.py"]
 
 
 def test_module_level_change_falls_back_to_git_grep(monkeypatch):
@@ -143,7 +142,7 @@ def test_module_level_change_falls_back_to_git_grep(monkeypatch):
         ),
         git_grep="tests/test_projects.py\n",
     )
-    assert impacted_tests.select(ROOT, None) == ["tests/test_projects.py"]
+    assert impacted_tests.select(REPO_ROOT, None) == ["tests/test_projects.py"]
 
 
 @pytest.mark.parametrize(
@@ -155,7 +154,7 @@ def test_broad_change_runs_everything(monkeypatch, broad_file):
         gerenuk=_Proc(json.dumps(_gerenuk_report(non_python_changes=[broad_file]))),
     )
     with pytest.raises(impacted_tests.SelectionFailed):
-        impacted_tests.select(ROOT, None)
+        impacted_tests.select(REPO_ROOT, None)
 
 
 def test_unrelated_non_python_change_does_not_widen(monkeypatch):
@@ -163,7 +162,7 @@ def test_unrelated_non_python_change_does_not_widen(monkeypatch):
         monkeypatch,
         gerenuk=_Proc(json.dumps(_gerenuk_report(non_python_changes=["README.md"]))),
     )
-    assert impacted_tests.select(ROOT, None) == []
+    assert impacted_tests.select(REPO_ROOT, None) == []
 
 
 def test_gerenuk_errors_run_everything(monkeypatch):
@@ -172,13 +171,13 @@ def test_gerenuk_errors_run_everything(monkeypatch):
         gerenuk=_Proc(json.dumps(_gerenuk_report(errors=["could not resolve base"]))),
     )
     with pytest.raises(impacted_tests.SelectionFailed):
-        impacted_tests.select(ROOT, None)
+        impacted_tests.select(REPO_ROOT, None)
 
 
 def test_gerenuk_crash_runs_everything(monkeypatch):
     _stub_run(monkeypatch, gerenuk=_Proc("", returncode=2, stderr="boom"))
     with pytest.raises(impacted_tests.SelectionFailed):
-        impacted_tests.select(ROOT, None)
+        impacted_tests.select(REPO_ROOT, None)
 
 
 def test_gerenuk_findings_exit_code_is_not_a_crash(monkeypatch):
@@ -190,7 +189,7 @@ def test_gerenuk_findings_exit_code_is_not_a_crash(monkeypatch):
             returncode=1,
         ),
     )
-    assert impacted_tests.select(ROOT, None) == ["tests/test_db.py"]
+    assert impacted_tests.select(REPO_ROOT, None) == ["tests/test_db.py"]
 
 
 def test_tyf_crash_runs_everything(monkeypatch):
@@ -202,7 +201,7 @@ def test_tyf_crash_runs_everything(monkeypatch):
         tyf=_Proc("", returncode=1, stderr="daemon down"),
     )
     with pytest.raises(impacted_tests.SelectionFailed):
-        impacted_tests.select(ROOT, None)
+        impacted_tests.select(REPO_ROOT, None)
 
 
 def test_unmapped_symbol_runs_everything(monkeypatch):
@@ -215,9 +214,51 @@ def test_unmapped_symbol_runs_everything(monkeypatch):
         tyf=_Proc(json.dumps([{"test_references": []}])),
     )
     with pytest.raises(impacted_tests.SelectionFailed):
-        impacted_tests.select(ROOT, None)
+        impacted_tests.select(REPO_ROOT, None)
 
 
 def test_main_returns_run_everything_on_failure(monkeypatch):
     _stub_run(monkeypatch, gerenuk=_Proc("not json"))
     assert impacted_tests.main() == impacted_tests.RUN_EVERYTHING
+
+
+def test_deleted_test_file_is_dropped(monkeypatch):
+    """gerenuk lists deleted tests too; pytest cannot collect a vanished path."""
+    _stub_run(
+        monkeypatch,
+        gerenuk=_Proc(
+            json.dumps(
+                _gerenuk_report(
+                    test_files_changed=[
+                        "tests/test_db.py",
+                        "tests/test_deleted_in_this_commit.py",
+                    ]
+                )
+            )
+        ),
+    )
+    assert impacted_tests.select(REPO_ROOT, None) == ["tests/test_db.py"]
+
+
+def test_git_grep_error_runs_everything(monkeypatch):
+    """git grep exits 1 for 'no matches' but 128 on error — only 128 is a failure."""
+
+    def fake_run(cmd, stdin=None):
+        if cmd[0] == impacted_tests.GERENUK:
+            return _Proc(
+                json.dumps(
+                    _gerenuk_report(module_level_changes=["introspect.projects"])
+                )
+            )
+        return _Proc("", returncode=128, stderr="fatal: bad pattern")
+
+    monkeypatch.setattr(impacted_tests, "_run", fake_run)
+    with pytest.raises(impacted_tests.SelectionFailed):
+        impacted_tests.select(REPO_ROOT, None)
+
+
+def test_missing_binary_is_noted_not_raised(monkeypatch, capsys):
+    """A fresh clone before `uv sync` gets a one-line note, not a traceback."""
+    monkeypatch.setattr(impacted_tests, "GERENUK", "definitely-not-installed")
+    assert impacted_tests.main() == impacted_tests.RUN_EVERYTHING
+    assert "could not run definitely-not-installed" in capsys.readouterr().err

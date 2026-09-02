@@ -27,8 +27,7 @@ Tests run in parallel via `pytest-xdist`.
 ## Toolbox
 
 Four CLI tools ship as dev dependencies. Each documents itself — run
-`uv run <tool> guide` first (or `--help` on the tools without a `guide`
-subcommand) rather than guessing at flags.
+`uv run <tool> --help` first rather than guessing at flags.
 
 | Tool | Runs | Purpose |
 |---|---|---|
@@ -40,8 +39,8 @@ subcommand) rather than guessing at flags.
 Refresh them all to their latest versions:
 
 ```bash
-uv sync --upgrade-package madoqua --upgrade-package gerenuk \
-  --upgrade-package biston --upgrade-package zorilla --upgrade-package ty-find
+uv sync --upgrade-package gerenuk --upgrade-package biston \
+  --upgrade-package zorilla --upgrade-package ty-find
 ```
 
 ```bash
@@ -59,7 +58,10 @@ uv run biston overview .
 uv run biston scan --tests-only .   # tests sit outside the configured scan set
 
 # Which tests does the current diff impact?
+# Exits 10 when the diff is too broad to narrow — that means "run everything".
+# Diffs against origin/main by default; GERENUK_BASE picks another base ref.
 uv run poe impacted-tests
+GERENUK_BASE=HEAD uv run poe impacted-tests   # just the uncommitted changes
 uv run gerenuk audit <file.py>...   # unreferenced and test-only symbols
 
 # Test quality — on demand, when the suite has grown. Not in the hook or CI.
@@ -80,6 +82,17 @@ It is the only hook, and it runs four stages, each reporting its own duration:
    one is still caught.
 4. `gerenuk changed-symbols` → `tyf refs --tests` → `pytest` on just the
    impacted test files, via `scripts/impacted_tests.py`.
+
+Stages 1-3 act on the staged files. Stage 4 diffs and runs the working tree,
+so a partially staged commit (`git add -p`) is tested as it stands on disk
+rather than as it will land — stash the remainder first if that matters.
+
+The hook sets `GERENUK_BASE=HEAD`, so stage 4 selects for the commit being
+made, not the whole branch: earlier commits were gated when they were made,
+and against `origin/main` a branch that once touched `pyproject.toml` would
+fall back to the full suite on every later commit. Run by hand,
+`poe impacted-tests` keeps gerenuk's own default base (`origin/main`), so it
+reports the tests the whole branch impacts.
 
 Stage 4 is conservative by construction: a change to `conftest.py`,
 `pyproject.toml` or `uv.lock`, a symbol that maps to no test, or any tool
