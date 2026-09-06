@@ -1,5 +1,6 @@
 """CLI interface for introspect."""
 
+import sys
 from datetime import UTC, datetime
 from pathlib import Path
 from typing import TYPE_CHECKING
@@ -33,6 +34,7 @@ from introspect.db import (
     get_read_connection,
     materialize_views,
 )
+from introspect.guide import guide_text
 from introspect.search import build_search_corpus, ensure_search_corpus, fts_search
 from introspect.sql_query import is_loopback_host
 from introspect.version_check import maybe_notify_update, stderr_is_tty
@@ -408,6 +410,18 @@ def stats():
             console.print(f"  [dim]… {len(ttl_rows) - _STATS_TOP_N} more[/dim]")
 
     conn.close()
+
+
+@app.command()
+def guide():
+    """Print the guide: what introspect records, what it costs, where to start.
+
+    Reads no logs and builds no database, so it works before anything else
+    does.
+    """
+    # Verbatim, not through Rich: the page is piped and captured by agents,
+    # and a console would rewrap it and interpret its brackets as markup.
+    sys.stdout.write(guide_text())
 
 
 def _format_verdict(verdict: TtlComparison) -> str:
