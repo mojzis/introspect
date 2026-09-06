@@ -235,7 +235,7 @@ def _strip_noise(sql: str) -> str:
 def validate_read_only_sql(
     sql: str, *, max_bytes: int = API_BUDGET.max_sql_bytes
 ) -> str | None:
-    """Return an error message if `sql` isn't a safe read-only query, else None.
+    """Return an error message if `sql` is not a safe read-only query, else None.
 
     Uses ``duckdb.extract_statements`` — DuckDB's own parser — rather than a
     keyword regex, which gets four things right that hand-rolled scanning got
