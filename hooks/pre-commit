@@ -1,0 +1,4 @@
+#!/bin/sh
+root=$(git rev-parse --show-toplevel)
+[ -x "$root/.venv/bin/madoqua" ] && exec "$root/.venv/bin/madoqua" run
+exec madoqua run

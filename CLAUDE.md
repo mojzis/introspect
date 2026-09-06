@@ -62,91 +62,89 @@ User keeps worktrees under `~/worktrees/introspect-<branch>`. To set one up, ask
 
 ## Toolbox
 
-Four CLI tools ship as dev dependencies. Each documents itself — run
-`uv run <tool> --help` first and follow its own conventions rather than
-guessing at flags.
+Six aesop tools ship as dev dependencies (`madoqua`, `gerenuk`, `biston`,
+`zorilla`, `pycoati`, `ty-find`). Each documents itself — run
+`uv run <tool> guide` first and follow its conventions rather than guessing at
+flags (`uv run madoqua guide tune`, `uv run zorilla guide triage`, ...).
+Call every tool as `uv run <tool>`; ty-find's binary is `tyf`.
 
-**On every commit** (`scripts/pre-commit.sh`, installed by `uv run poe setup`):
-ruff format + autofix, ruff check, `ty check`, then `biston` on the staged
-files, then only the tests the diff impacts. Bypass with `git commit
---no-verify`.
+### On every commit — `madoqua`
 
-**On demand**: `zorilla` (test-quality) and the wider `biston` / `gerenuk`
-reports below.
+`hooks/pre-commit` (tracked) is the single hook; `core.hooksPath=hooks` points
+git at it. madoqua acts only on staged `.py`/`.pyi` files — a commit without
+one runs nothing and logs nothing. Configured under `[tool.madoqua]` in
+`pyproject.toml`:
 
-Refresh all four to their latest versions with:
+1. fix: `ruff check --fix`, `ruff format` on the staged files, re-staged
+2. check, in parallel: `ruff check`, `ty check`, `biston scan --focus-args`
+   (clone pairs involving a staged file), `zorilla check` (test smells in the
+   staged test files), `gerenuk run` (only the tests the diff reaches; the
+   whole suite when a non-Python file such as `pyproject.toml` changed)
+
+Typical timing (`uv run madoqua stats`): ruff/ty/biston/zorilla finish in
+well under a second; gerenuk is ~1–2 s of `tyf` round-trips plus the selected
+tests, or ~55 s for a full parallel run. Bypass with `git commit --no-verify`;
+skip one check for one run with `MADOQUA_SKIP="<step name>"`. A personal
+overlay goes in `.git/hooks.local.toml` (not committed).
+
+Differences from the hook this replaced: `ty check` is now staged-files only
+(run `uv run ty check` for the repo-wide view — it is part of `poe check`),
+and gerenuk diffs the *working tree* against `origin/main` (not `HEAD`, not the
+index), so unstaged edits count and a branch that touched `pyproject.toml`
+runs the full suite on every commit until it is pushed.
+
+Known baseline the hook will enforce on the next commit touching these files:
+`zorilla check .` still reports 163 findings (ZR004 assertion-roulette 78,
+ZR001 conditional-test-logic 41, ZR002 sleep-in-test 18, ZR005 25, ZR003 1)
+across 31 test files — fix the smells in a file before or while editing it.
+The residual ZR005 hits are `"/"` in `tests/e2e/test_crawl.py` /
+`tests/e2e/test_flows.py`, the fake `/a.py`-style paths in
+`tests/routes/test_trajectory.py`, `/a` `/b` `/c` in `tests/test_projects.py`,
+and `/clear` in `tests/routes/test_cost_overview.py`; every other synthetic
+route/path family is allowed via `[tool.zorilla.rules.ZR005] allowed_prefixes`.
+Never disable a rule. biston finds no clone pairs at the configured 0.75
+threshold; `ty check` is clean repo-wide.
+
+### On demand
+
+- `uv run tyf find <Symbol>` / `tyf show` / `tyf refs -t` / `tyf members` /
+  `tyf list <file.py>` — **agents must use `uv run tyf` instead of grep for
+  symbol definitions and references.** Reserve grep for string literals,
+  config values, TODOs and non-Python files. A background daemon auto-starts
+  (`uv run tyf daemon status`; `daemon stop` if results look stale)
+- `uv run gerenuk impacted-tests` (= `poe impacted-tests`) — which tests the
+  working-tree diff reaches, with the symbol chain; `--base <ref>` picks
+  another base. `uv run gerenuk audit <file.py>` — symbols nothing references.
+  `uv run gerenuk doctor` — check the `tyf` wiring
+- `uv run biston scan --suggest .` / `biston scan --tests-only .` /
+  `biston overview .` — clone detection beyond the staged files
+  (`[tool.biston.scan]`: first-party code only, threshold 0.75)
+- `uv run zorilla check .` (= `poe test-smells`, also in `poe check`) /
+  `zorilla stats .` / `zorilla overview .` / `zorilla explain ZR004`
+- `uv run pycoati . --format pretty` — periodic test-suite audit: scores every
+  test for suspicion and hands you a ranked list plus a remediation ladder.
+  Run it before a test cleanup session. **Never in the hook or CI.** It runs
+  the suite with `--cov`, so pytest-cov must stay installed
+
+### Fresh clone
 
 ```
-uv sync --upgrade-package gerenuk --upgrade-package biston \
-  --upgrade-package zorilla --upgrade-package ty-find
+uv sync --group docs        # docs group is optional; plain `uv sync` drops it
+uv run madoqua install      # = poe setup; core.hooksPath is local config
 ```
 
-### Code Search (`tyf`, from the `ty-find` package)
+### Refresh the toolbox
 
-Type-aware code search that gives LSP-quality results by symbol name.
-**Agents must use `uv run tyf` instead of grep for symbol definitions and
-references in this repo.** Reserve grep for string literals, config values,
-TODOs, and non-Python files. Note the binary is `tyf`, not `ty-find`; it runs
-a background daemon that auto-starts on first use (`uv run tyf daemon status`).
+```
+uv lock --refresh --upgrade-package madoqua --upgrade-package gerenuk --upgrade-package biston --upgrade-package zorilla --upgrade-package pycoati --upgrade-package ty-find && uv sync
+```
 
-- `uv run tyf show <name>` — definition + signature + usages (flags: `-d` docs, `-r` refs, `-t` test refs, `--all`)
-- `uv run tyf find <Symbol>` — locate definition
-- `uv run tyf refs <name>` — find all usages (`-t` splits out test references)
-- `uv run tyf members <Class>` — view class API
-- `uv run tyf list <file.py>` — file outline
-
-### Impacted Tests (`gerenuk` + `tyf`)
-
-`gerenuk changed-symbols` reports which symbols the working tree changed;
-`scripts/impacted_tests.py` feeds those to `tyf refs --tests` and prints the
-test files that reach them. The commit hook runs just those instead of the
-full suite. Selection is conservative: a change to `conftest.py`,
-`pyproject.toml` or `uv.lock`, an unmappable symbol, or any tool error falls
-back to the whole suite rather than risking a silent coverage gap.
-
-- `uv run poe impacted-tests` — list the test files the current diff impacts (exits 10 when the whole suite is needed). Diffs against `origin/main`; the hook sets `GERENUK_BASE=HEAD` so it selects for the commit being made
-- `uv run gerenuk audit <file.py>...` — symbols nothing references, and symbols only tests reach
-- `uv run gerenuk doctor` — check that `tyf` and the workspace resolve
-
-### Clone Detection (`biston`)
-
-Structural clone detector for Python — finds groups of functions that are
-structurally similar even when names/literals/argument order differ. Runs in
-the commit hook scoped to staged files; run it wider after producing multiple
-similar functions or when refactoring. Configured under `[tool.biston.scan]`
-in `pyproject.toml` (first-party code only, threshold 0.75).
-
-- `uv run biston scan --suggest .` — find clones with anti-unified template proposals
-- `uv run biston scan --tests-only .` — test-duplication scan (tests are outside the configured scan set)
-- `uv run biston overview .` — condensed file-centric summary
-- `uv run biston stats .` — aggregate counts
-
-### Test Quality (`zorilla`)
-
-A pytest test-smell linter: sleeps in tests, conditional logic, assertion
-roulette, hardcoded external resources. **Deliberately not in the hook or
-CI** — it is an on-demand check to run when the test suite has grown.
-
-- `uv run poe test-smells` — lint `tests/` (equivalently `uv run zorilla check tests`)
-- `uv run zorilla stats tests` — findings per rule, always exits 0
-- `uv run zorilla overview tests` — findings grouped by file
-- `uv run zorilla explain ZR004` — long-form docs for a rule
-
-### Commit hook
-
-`scripts/pre-commit.sh` is the single hook; `uv run poe setup` copies it into
-`.git/hooks/pre-commit`. All four stages live in that one file and nothing
-else in the repo depends on its shape. Stages 1-3 act on the staged files;
-stage 4 diffs and tests the working tree, so a partially staged commit
-(`git add -p`) is tested as it stands on disk, not as it will land.
-
-(`madoqua` was intended to own this hook but is not published on PyPI — 404 on
-both the JSON and simple indexes — so it is not a dependency here. Don't add
-it back without checking that it exists.)
+(`--refresh` matters: without it uv may serve a cached index and miss a
+release published minutes ago.)
 
 ## Stack
 
-uv, ruff (lint/format), ty (type check), tyf (code search), gerenuk (changed-symbol / test impact), biston (clone detection), zorilla (test-smell lint), pytest, poethepoet (task runner), mkdocs-material (docs)
+uv, ruff (lint/format), ty (type check), madoqua (commit hook), tyf (code search), gerenuk (test impact), biston (clone detection), zorilla (test-smell lint), pycoati (test-suite audit), pytest, poethepoet (task runner), mkdocs-material (docs)
 
 ## Notes
 

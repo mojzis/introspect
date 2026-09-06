@@ -1,4 +1,4 @@
-"""Git worktree-aware project resolution."""
+"""Git worktree-aware project resolution (``cwd`` → canonical project)."""
 
 import subprocess
 from concurrent.futures import ThreadPoolExecutor

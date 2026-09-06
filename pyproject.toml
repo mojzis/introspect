@@ -56,6 +56,8 @@ dev = [
     "pyyaml>=6.0",
     "gerenuk>=0.1.0",
     "zorilla>=0.1.4",
+    "madoqua>=0.2.2",
+    "pycoati>=0.2.7",
 ]
 docs = [
     "mkdocs>=1.6",
@@ -99,6 +101,30 @@ exclude = ["**/__init__.py"]
 threshold = 0.75
 min_lines = 5
 
+[tool.madoqua]
+# fix phase keeps the defaults: ruff check --fix, ruff format (re-staged).
+# check phase keeps the defaults (ruff check, ty check) and adds:
+extend_check = [
+    # madoqua appends the staged .py files. biston reads them as --focus-args focus files
+    # (only clone pairs touching a staged file); zorilla lints exactly those files.
+    { name = "biston",  cmd = "biston scan --focus-args", timeout_s = 60,  max_output_lines = 80 },
+    { name = "zorilla", cmd = "zorilla check",            timeout_s = 30,  max_output_lines = 80 },
+    # gerenuk scopes itself from the git diff, so no file list. `-o addopts=` drops the
+    # --cov from [tool.pytest.ini_options]; `-n auto` is what poe test-quick uses (full
+    # suite ~55 s parallel vs ~160 s serial).
+    { name = "gerenuk", cmd = "gerenuk run -- -q -o addopts= -n auto", pass_files = false, timeout_s = 300, max_output_lines = 120 },
+]
+
+[tool.zorilla.rules.ZR005]
+# Every literal below is synthetic test data: TestClient routes the app serves, or
+# fake filesystem paths the tests hand to path-mapping code. None is a real
+# external resource.
+allowed_prefixes = [
+    "/sessions", "/stats", "/tools", "/mcps", "/search", "/raw", "/api/",
+    "/tmp/", "/home/user/", "/usr/bin/", "/repo/", "/root/",
+    "http://127.0.0.1", "https://evil.example",
+]
+
 [tool.vulture]
 paths = ["src"]
 min_confidence = 80
@@ -138,12 +164,12 @@ interpreter = "bash"
 help = "Dependency vulnerability scan"
 
 [tool.poe.tasks.impacted-tests]
-cmd = "python scripts/impacted_tests.py"
-help = "List the test files impacted by the current diff (gerenuk -> tyf)"
+cmd = "gerenuk impacted-tests"
+help = "List the tests impacted by the current diff against origin/main (gerenuk -> tyf)"
 
 [tool.poe.tasks.test-smells]
 cmd = "zorilla check tests"
-help = "Test-quality lint (on demand — not part of `check` or the commit hook)"
+help = "Test-quality lint (also in `check`; the commit hook runs it on staged files)"
 
 [tool.poe.tasks.dead-code]
 cmd = "vulture src"
@@ -168,6 +194,7 @@ shell = """
   vulture src &                           pids+=($!)
   deptry . &                              pids+=($!)
   biston scan . &                         pids+=($!)
+  zorilla check . &                       pids+=($!)
   (uvx pysentry-rs --compact . || true) & pids+=($!)
   status=0
   for pid in "${pids[@]}"; do
@@ -215,8 +242,8 @@ cmd = "python scripts/gen_cli_docs.py"
 help = "Regenerate docs/usage/cli-reference.md from the CLI's own --help"
 
 [tool.poe.tasks.setup]
-cmd = "bash scripts/install-hooks.sh"
-help = "Install git hooks"
+cmd = "madoqua install"
+help = "Install the commit hook (writes hooks/pre-commit, sets core.hooksPath)"
 
 [tool.poe.tasks.worktree]
 cmd = "bash scripts/worktree.sh"
