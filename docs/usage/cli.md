@@ -17,6 +17,7 @@ For every option of every command, see the generated
 | `sessions` | Recent sessions with timestamps, message counts, model, cwd. |
 | `tools` | Tool-call history; `--failed` for errors only, `--name` to filter. |
 | `stats` | Summary statistics across your logs, ending with a prompt-cache TTL recommendation per project. |
+| `guide` | The opt-in pitch: what introspect records, what it costs, and the first three commands. Reads no logs; see [Guide](guide.md). |
 | `cache-ttl` | Would a 1h or 5m prompt-cache TTL have been cheaper? `--verify` runs the simulation's parity gate; `--subagents` scores sidechain traffic separately. |
 | `search` | Full-text search across conversations (BM25, ILIKE fallback). |
 | `query` | Ad-hoc read-only SQL against the views. |

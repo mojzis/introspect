@@ -28,6 +28,7 @@ Commands:
   query        Run an ad-hoc SQL query against the views.
   raw          Show raw unfiltered JSONL records — all fields, no...
   stats        Show summary statistics.
+  guide        Print the guide: what introspect records, what it costs,...
   cache-ttl    Would a 1h or 5m prompt-cache TTL have been cheaper?
   search       Full-text search across conversation logs.
   materialize  Materialize data into DuckDB for fast CLI and MCP queries.
@@ -130,6 +131,19 @@ Options:
   --clean                Rebuild this branch's dev DB from scratch instead of
                          reusing it
   --help                 Show this message and exit.
+```
+
+## `introspy guide`
+
+```
+Usage: introspy guide [OPTIONS]
+
+  Print the guide: what introspect records, what it costs, where to start.
+
+  Reads no logs and builds no database, so it works before anything else does.
+
+Options:
+  --help  Show this message and exit.
 ```
 
 ## `introspy materialize`
