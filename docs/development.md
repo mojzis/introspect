@@ -24,18 +24,82 @@ uv run poe check-all
 
 Tests run in parallel via `pytest-xdist`.
 
-## Code exploration tools
+## Toolbox
+
+Four CLI tools ship as dev dependencies. Each documents itself — run
+`uv run <tool> --help` first rather than guessing at flags.
+
+| Tool | Runs | Purpose |
+|---|---|---|
+| `tyf` (`ty-find`) | on demand + in the hook | Type-aware code search by symbol name |
+| `gerenuk` | in the hook | Which symbols the diff changed; feeds test selection |
+| `biston` | in the hook | Structural clone detection |
+| `zorilla` | on demand only | pytest test-smell lint |
+
+Refresh them all to their latest versions:
 
 ```bash
-# Type-aware code search (LSP-quality, by symbol name)
-uv run tyf show <name>      # definition + signature + usages
-uv run tyf refs <name>      # find all usages
-uv run tyf members <Class>  # view class API
+uv sync --upgrade-package gerenuk --upgrade-package biston \
+  --upgrade-package zorilla --upgrade-package ty-find
+```
 
-# Structural clone detection — spot extraction opportunities
+```bash
+# Type-aware code search (LSP-quality, by symbol name).
+# Prefer this over grep for Python symbols. Runs a daemon that auto-starts.
+uv run tyf show <name>      # definition + signature + usages
+uv run tyf refs <name>      # find all usages (-t splits out test references)
+uv run tyf members <Class>  # view class API
+uv run tyf daemon status    # inspect the background LSP server
+
+# Structural clone detection — spot extraction opportunities.
+# Configured under [tool.biston.scan] in pyproject.toml.
 uv run biston scan --suggest .
 uv run biston overview .
+uv run biston scan --tests-only .   # tests sit outside the configured scan set
+
+# Which tests does the current diff impact?
+# Exits 10 when the diff is too broad to narrow — that means "run everything".
+# Diffs against origin/main by default; GERENUK_BASE picks another base ref.
+uv run poe impacted-tests
+GERENUK_BASE=HEAD uv run poe impacted-tests   # just the uncommitted changes
+uv run gerenuk audit <file.py>...   # unreferenced and test-only symbols
+
+# Test quality — on demand, when the suite has grown. Not in the hook or CI.
+uv run poe test-smells              # = zorilla check tests
+uv run zorilla stats tests
+uv run zorilla explain ZR004
 ```
+
+## Commit hook
+
+`uv run poe setup` installs `scripts/pre-commit.sh` as `.git/hooks/pre-commit`.
+It is the only hook, and it runs four stages, each reporting its own duration:
+
+1. `ruff format` + `ruff check --fix` on staged Python, re-staged.
+2. `ruff check --no-fix` and `ty check`.
+3. `biston scan --files-from -` — clone pairs involving a staged file. The
+   whole tree stays in the comparison, so a staged file cloning an untouched
+   one is still caught.
+4. `gerenuk changed-symbols` → `tyf refs --tests` → `pytest` on just the
+   impacted test files, via `scripts/impacted_tests.py`.
+
+Stages 1-3 act on the staged files. Stage 4 diffs and runs the working tree,
+so a partially staged commit (`git add -p`) is tested as it stands on disk
+rather than as it will land — stash the remainder first if that matters.
+
+The hook sets `GERENUK_BASE=HEAD`, so stage 4 selects for the commit being
+made, not the whole branch: earlier commits were gated when they were made,
+and against `origin/main` a branch that once touched `pyproject.toml` would
+fall back to the full suite on every later commit. Run by hand,
+`poe impacted-tests` keeps gerenuk's own default base (`origin/main`), so it
+reports the tests the whole branch impacts.
+
+Stage 4 is conservative by construction: a change to `conftest.py`,
+`pyproject.toml` or `uv.lock`, a symbol that maps to no test, or any tool
+error makes the selector exit non-zero, and the hook then runs the full
+suite. It never turns an inconclusive answer into a skipped test.
+
+Bypass the hook with `git commit --no-verify`.
 
 ## Agentic skills
 

@@ -20,7 +20,8 @@ def get_canonical_project(cwd: str) -> str:
         )
         raw = Path(result.stdout.strip())
         # git may return a relative path (e.g. ".git"); resolve it
-        # relative to the target cwd, NOT the process's cwd.
+        # relative to the target cwd, NOT the process's cwd, so a worktree
+        # resolves the same way whatever directory the caller ran from.
         git_common = (Path(cwd) / raw).resolve() if not raw.is_absolute() else raw
 
         if git_common.name == ".git":

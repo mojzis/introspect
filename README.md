@@ -37,7 +37,7 @@ See [Installation](https://mojzis.github.io/introspect/installation/).
 | [Architecture](https://mojzis.github.io/introspect/architecture/) | Module map, every relation and its columns, pricing, the read-only SQL guard |
 | [JSONL schema](https://mojzis.github.io/introspect/schema/) | The raw records on disk, including the `usage` block |
 | [Configuration](https://mojzis.github.io/introspect/configuration/) | Every `INTROSPECT_*` environment variable |
-| [Development](https://mojzis.github.io/introspect/development/) | `poe` tasks, code exploration tools, worktrees, building the docs |
+| [Development](https://mojzis.github.io/introspect/development/) | `poe` tasks, the toolbox (`tyf`, `gerenuk`, `biston`, `zorilla`), the commit hook, worktrees, building the docs |
 | [For LLMs](https://mojzis.github.io/introspect/llms/) | `llms.txt` and `llms-full.txt` |
 
 ## Development

@@ -574,5 +574,8 @@ randomized order via `pytest-randomly`).
 | `ty` | Type checking (beta) |
 | `pytest` | Test runner with coverage |
 | `vulture` / `deptry` | Dead code and unused dependencies |
+| `tyf` (`ty-find`) | Type-aware code search by symbol name (daemon-backed) |
+| `gerenuk` | Changed-symbol reporting; drives commit-hook test selection |
 | `biston` | Structural clone detection |
-| `poethepoet` | Task runner (`poe check`, `poe fix`, `poe test`, `poe check-all`, `poe docs-cli`) |
+| `zorilla` | pytest test-smell lint (on demand only) |
+| `poethepoet` | Task runner (`poe check`, `poe fix`, `poe test`, `poe check-all`, `poe docs-cli`, `poe impacted-tests`, `poe test-smells`) |

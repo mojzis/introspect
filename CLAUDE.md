@@ -60,35 +60,98 @@ Explore Claude Code (and Codex) conversation logs via CLI, web UI, MCP server.
 
 User keeps worktrees under `~/worktrees/introspect-<branch>`. To set one up, ask: "set up a worktree for `<branch>`" and Claude will run `poe worktree <branch>`. The DuckDB at `~/.introspect/introspect.duckdb` is shared across worktrees (reads fine; avoid concurrent writes/refreshes).
 
-## Code Search (`tyf`)
+## Toolbox
 
-This project has `tyf` (ty-find) — type-aware code search that gives LSP-quality results by symbol name. Prefer it over grep for Python symbols. Reserve grep for string literals, config values, TODOs, non-Python files.
+Four CLI tools ship as dev dependencies. Each documents itself — run
+`uv run <tool> --help` first and follow its own conventions rather than
+guessing at flags.
+
+**On every commit** (`scripts/pre-commit.sh`, installed by `uv run poe setup`):
+ruff format + autofix, ruff check, `ty check`, then `biston` on the staged
+files, then only the tests the diff impacts. Bypass with `git commit
+--no-verify`.
+
+**On demand**: `zorilla` (test-quality) and the wider `biston` / `gerenuk`
+reports below.
+
+Refresh all four to their latest versions with:
+
+```
+uv sync --upgrade-package gerenuk --upgrade-package biston \
+  --upgrade-package zorilla --upgrade-package ty-find
+```
+
+### Code Search (`tyf`, from the `ty-find` package)
+
+Type-aware code search that gives LSP-quality results by symbol name.
+**Agents must use `uv run tyf` instead of grep for symbol definitions and
+references in this repo.** Reserve grep for string literals, config values,
+TODOs, and non-Python files. Note the binary is `tyf`, not `ty-find`; it runs
+a background daemon that auto-starts on first use (`uv run tyf daemon status`).
 
 - `uv run tyf show <name>` — definition + signature + usages (flags: `-d` docs, `-r` refs, `-t` test refs, `--all`)
 - `uv run tyf find <Symbol>` — locate definition
-- `uv run tyf refs <name>` — find all usages
+- `uv run tyf refs <name>` — find all usages (`-t` splits out test references)
 - `uv run tyf members <Class>` — view class API
 - `uv run tyf list <file.py>` — file outline
 
-## Clone Detection (`biston`)
+### Impacted Tests (`gerenuk` + `tyf`)
 
-Structural clone detector for Python — finds groups of functions that are structurally similar even when names/literals/argument order differ. Run after producing multiple similar functions, or when refactoring, to spot extraction opportunities.
+`gerenuk changed-symbols` reports which symbols the working tree changed;
+`scripts/impacted_tests.py` feeds those to `tyf refs --tests` and prints the
+test files that reach them. The commit hook runs just those instead of the
+full suite. Selection is conservative: a change to `conftest.py`,
+`pyproject.toml` or `uv.lock`, an unmappable symbol, or any tool error falls
+back to the whole suite rather than risking a silent coverage gap.
+
+- `uv run poe impacted-tests` — list the test files the current diff impacts (exits 10 when the whole suite is needed). Diffs against `origin/main`; the hook sets `GERENUK_BASE=HEAD` so it selects for the commit being made
+- `uv run gerenuk audit <file.py>...` — symbols nothing references, and symbols only tests reach
+- `uv run gerenuk doctor` — check that `tyf` and the workspace resolve
+
+### Clone Detection (`biston`)
+
+Structural clone detector for Python — finds groups of functions that are
+structurally similar even when names/literals/argument order differ. Runs in
+the commit hook scoped to staged files; run it wider after producing multiple
+similar functions or when refactoring. Configured under `[tool.biston.scan]`
+in `pyproject.toml` (first-party code only, threshold 0.75).
 
 - `uv run biston scan --suggest .` — find clones with anti-unified template proposals
-- `uv run biston scan --threshold 0.8 .` — stricter matching (default 0.7)
-- `uv run biston scan --min-lines 10 .` — ignore tiny functions (default 5)
-- `uv run biston scan --tests-only .` — test-duplication scan
+- `uv run biston scan --tests-only .` — test-duplication scan (tests are outside the configured scan set)
 - `uv run biston overview .` — condensed file-centric summary
 - `uv run biston stats .` — aggregate counts
 
+### Test Quality (`zorilla`)
+
+A pytest test-smell linter: sleeps in tests, conditional logic, assertion
+roulette, hardcoded external resources. **Deliberately not in the hook or
+CI** — it is an on-demand check to run when the test suite has grown.
+
+- `uv run poe test-smells` — lint `tests/` (equivalently `uv run zorilla check tests`)
+- `uv run zorilla stats tests` — findings per rule, always exits 0
+- `uv run zorilla overview tests` — findings grouped by file
+- `uv run zorilla explain ZR004` — long-form docs for a rule
+
+### Commit hook
+
+`scripts/pre-commit.sh` is the single hook; `uv run poe setup` copies it into
+`.git/hooks/pre-commit`. All four stages live in that one file and nothing
+else in the repo depends on its shape. Stages 1-3 act on the staged files;
+stage 4 diffs and tests the working tree, so a partially staged commit
+(`git add -p`) is tested as it stands on disk, not as it will land.
+
+(`madoqua` was intended to own this hook but is not published on PyPI — 404 on
+both the JSON and simple indexes — so it is not a dependency here. Don't add
+it back without checking that it exists.)
+
 ## Stack
 
-uv, ruff (lint/format), ty (type check), tyf (code search), biston (clone detection), pytest, poethepoet (task runner), mkdocs-material (docs)
+uv, ruff (lint/format), ty (type check), tyf (code search), gerenuk (changed-symbol / test impact), biston (clone detection), zorilla (test-smell lint), pytest, poethepoet (task runner), mkdocs-material (docs)
 
 ## Notes
 
 - ty is in beta — may produce false positives. Prefer `# ty: ignore[rule]` over blanket suppression.
-- Pre-commit hook auto-fixes and restages files. Only blocks on unfixable issues.
+- Pre-commit hook auto-fixes and restages files, then gates on ruff, `ty`, `biston`, and the tests the diff impacts. See "Toolbox" above.
 - All user-facing features must have tests. When adding new routes, template variables, query parameters, or UI functionality, add corresponding tests in `tests/routes/`.
 - **IMPORTANT**: After completing any task, you MUST run the `/python-review` skill to review all changes. Apply all 🔴 Must Fix and 🟡 Should Fix findings before marking work as complete.
 - **IMPORTANT**: Then run the `/docs-review` skill to check the diff against `docs/`, `README.md`, and `CLAUDE.md`. Apply all 🔴 Must Fix findings before marking work as complete.
