@@ -24,11 +24,12 @@ dependencies = [
     "plotly>=5.0",
     "nolegend>=0.1.2",
     "packaging>=21.0",
+    "typer-agentic>=0.1.3",
 ]
 
 [project.scripts]
-introspect = "introspect.cli:app"
-introspy = "introspect.cli:app"
+introspect = "introspect.cli:entry"
+introspy = "introspect.cli:entry"
 
 [build-system]
 requires = ["hatchling"]

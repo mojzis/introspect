@@ -13,6 +13,7 @@ if TYPE_CHECKING:
 import typer
 from rich.console import Console
 from rich.table import Table
+from typer_agentic import agent_errors
 
 from introspect.cache_ttl import (
     MAX_RECOVERABLE_GAP_SECONDS,
@@ -1377,5 +1378,9 @@ def refresh():
         conn.close()
 
 
+# Agent-facing usage errors (typer-agentic): humans get stock Typer output.
+# `main` is taken by the root callback above, hence `entry`.
+entry = agent_errors(app)
+
 if __name__ == "__main__":
-    app()
+    entry()
