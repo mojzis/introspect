@@ -539,6 +539,16 @@ async def run_stdio_refresh(state: StdioRefreshState) -> None:
     discovery or materialization.  Reads remain unavailable until the preview
     or a compatible warm snapshot has been published.
     """
+    # Only a persistent consumer can accept manual refresh requests. The
+    # one-shot startup build keeps its event private, including while loading.
+    state.refresh_trigger = asyncio.Event() if state.interval_seconds > 0 else None
+    try:
+        await _load_stdio_data(state)
+    finally:
+        state.refresh_trigger = None
+
+
+async def _load_stdio_data(state: StdioRefreshState) -> None:
     sidecar = state.db_path.with_name(state.db_path.name + ".next")
     warm_snapshot = has_compatible_materialized_db(state.db_path)
     state.db_path.parent.mkdir(parents=True, exist_ok=True)
@@ -602,21 +612,21 @@ async def run_stdio_refresh(state: StdioRefreshState) -> None:
             return
 
         state.database_ready = True
-        state.database_label = "preview"
+        unlimited = state.days == 0
+        state.database_label = "authoritative" if unlimited else "preview"
         state.last_built_days = preview_days
         state.last_refreshed_at = datetime.now(UTC)
         state.loading_state = LoadingState(
-            LoadingPhase.PREVIEW_READY,
+            LoadingPhase.READY if unlimited else LoadingPhase.PREVIEW_READY,
             state.refresh_target,
             stage=LoadingStage.SEARCH,
-            candidate_count=candidates.total,
-            completed_candidates=candidates.total,
+            candidate_count=0 if unlimited else candidates.total,
+            completed_candidates=0 if unlimited else candidates.total,
         )
 
     state.refresh_pending = state.days > 0 or warm_snapshot
-    if state.refresh_pending:
+    if state.refresh_pending or state.interval_seconds > 0:
         trigger = state.refresh_trigger or asyncio.Event()
-        state.refresh_trigger = trigger
         app = SimpleNamespace(state=state)
         await refresh_loop(
             cast("FastAPI", app),
@@ -627,7 +637,7 @@ async def run_stdio_refresh(state: StdioRefreshState) -> None:
             state.interval_seconds,
             trigger=trigger,
             codex_glob=state.codex_glob,
-            initial=True,
+            initial=state.refresh_pending,
             one_shot=state.interval_seconds <= 0,
         )
 

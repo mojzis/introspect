@@ -13,7 +13,7 @@ reads is listed below; `tests/test_docs_drift.py` fails if `src/` grows an
 | `INTROSPECT_CODEX_GLOB` | `~/.codex/sessions/**/*.jsonl` | web app, stdio MCP | Glob for Codex CLI rollout logs. A missing directory or non-matching glob is a silent no-op. |
 | `INTROSPECT_DAYS` | resolved from `INTROSPECT_REFRESH_WINDOW` | web app, stdio MCP | Days of history to load (`0` = no limit). `serve` / `devserve` set it from `-d`; it takes precedence over the window picker on startup. A positive custom value remains selectable as `<N> days (CLI)`. |
 | `INTROSPECT_REFRESH_WINDOW` | `30` | web app, stdio MCP | Window-picker token: `1`, `7`, `30`, or `month` (calendar-month-to-date). The refresh controls also accept a numeric target (`0` = all data, positive values = custom days). An unrecognized value logs a warning and falls back to the default. |
-| `INTROSPECT_REFRESH_INTERVAL_SECONDS` | `600` | web app, stdio MCP | Background refresh poll interval; `0` runs the startup authoritative build once and disables subsequent polling. |
+| `INTROSPECT_REFRESH_INTERVAL_SECONDS` | `600` | web app, stdio MCP | Background refresh poll interval; `0` runs the startup authoritative build once and disables subsequent polling and manual refresh. |
 | `INTROSPECT_RESOLVE_PROJECTS` | `1` | web app, stdio MCP | When `0`, skip git worktree resolution for project names. Set by `serve --no-resolve-projects`. |
 | `INTROSPECT_HOST` | unset | set by `serve`, read by the web app | The address the server bound to. Gates the [SQL API](usage/sql-api.md) and the loopback `Host` allowlist — see below. |
 | `INTROSPECT_SQL_API` | unset (on, loopback only) | web app | Set to `off` to force-disable the SQL API even on loopback. |

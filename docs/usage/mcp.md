@@ -23,6 +23,11 @@ published to receive an explicitly marked partial result. A warm compatible
 database is immediately available as a `warm snapshot`, while the same
 background lifecycle builds the selected target. Results stop carrying the
 partial-data marker when the authoritative snapshot reaches `ready`.
+With `INTROSPECT_DAYS=0`, cold startup builds all history and publishes it as
+ready directly; there is no one-day preview. Periodic refresh remains enabled
+unless `INTROSPECT_REFRESH_INTERVAL_SECONDS=0`. That setting finishes the
+startup build once, then leaves both automatic and manual refresh disabled;
+`refresh_data` reports this and does not change the requested window.
 
 Run by hand in a terminal it prints one line to stderr confirming it is up and
 waiting for a client, and Ctrl-C stops it with a matching line and exit code

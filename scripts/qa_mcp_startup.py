@@ -19,6 +19,8 @@ from pathlib import Path
 from mcp import ClientSession, StdioServerParameters
 from mcp.client.stdio import stdio_client
 
+STARTUP_BUDGET_MS = 5000
+
 
 def _message(session_id: str, uuid: str, parent: str | None, timestamp: str, role: str):
     content = (
@@ -48,26 +50,30 @@ def _message(session_id: str, uuid: str, parent: str | None, timestamp: str, rol
     }
 
 
-def _write_fixture(root: Path) -> str:
+def _write_fixture(root: Path, *, turns: int = 1) -> str:
     now = datetime.now(UTC).replace(microsecond=0)
     records: list[dict] = []
     for session_id, timestamp in (
         ("synthetic-recent", now),
         ("synthetic-older", now - timedelta(days=5)),
     ):
-        user_id = f"{session_id}-u"
-        records.extend(
-            [
-                _message(session_id, user_id, None, timestamp.isoformat(), "user"),
-                _message(
-                    session_id,
-                    f"{session_id}-a",
-                    user_id,
-                    (timestamp + timedelta(seconds=1)).isoformat(),
-                    "assistant",
-                ),
-            ]
-        )
+        for turn in range(turns):
+            user_id = f"{session_id}-u-{turn}"
+            parent = f"{session_id}-a-{turn - 1}" if turn else None
+            records.extend(
+                [
+                    _message(
+                        session_id, user_id, parent, timestamp.isoformat(), "user"
+                    ),
+                    _message(
+                        session_id,
+                        f"{session_id}-a-{turn}",
+                        user_id,
+                        (timestamp + timedelta(seconds=1)).isoformat(),
+                        "assistant",
+                    ),
+                ]
+            )
     log_path = root / "claude" / "projects" / "synthetic" / "sessions.jsonl"
     log_path.parent.mkdir(parents=True)
     with log_path.open("w") as stream:
@@ -81,7 +87,9 @@ def _result_text(result) -> str:
     return str(getattr(result.content[0], "text", ""))
 
 
-async def _run_once(root: Path, jsonl_glob: str) -> dict[str, object]:
+async def _run_once(
+    root: Path, jsonl_glob: str, *, days: int = 30
+) -> dict[str, object]:
     db_path = root / "introspect.duckdb"
     env = os.environ.copy()
     env.update(
@@ -89,7 +97,7 @@ async def _run_once(root: Path, jsonl_glob: str) -> dict[str, object]:
             "INTROSPECT_DB_PATH": str(db_path),
             "INTROSPECT_JSONL_GLOB": jsonl_glob,
             "INTROSPECT_CODEX_GLOB": str(root / "codex" / "**" / "*.jsonl"),
-            "INTROSPECT_DAYS": "30",
+            "INTROSPECT_DAYS": str(days),
             "INTROSPECT_REFRESH_INTERVAL_SECONDS": "0",
             "INTROSPECT_VERSION_CHECK": "off",
         }
@@ -118,19 +126,20 @@ async def _run_once(root: Path, jsonl_glob: str) -> dict[str, object]:
                 deadline = time.perf_counter() + 30
                 final_text = first_text
                 while (
-                    "synthetic-older" not in final_text
-                    and time.perf_counter() < deadline
-                ):
+                    "synthetic-older" not in final_text or "Partial data" in final_text
+                ) and time.perf_counter() < deadline:
                     await asyncio.sleep(0.05)
                     result = await session.call_tool("recent_sessions", {"n": 20})
                     final_text = _result_text(result)
                     observed_loading |= "Data loading" in final_text
                     observed_partial |= "Partial data" in final_text
-                status = await session.call_tool("refresh_data", {})
+                status = await session.call_tool("refresh_data", {"window": "7"})
                 status_text = _result_text(status)
                 return {
                     "initialize_ms": initialize_ms,
                     "tools_list_ms": list_ms,
+                    "prompt_handshake": initialize_ms < STARTUP_BUDGET_MS,
+                    "prompt_discovery": list_ms < STARTUP_BUDGET_MS,
                     "tool_count": len(listed.tools),
                     "first_call_loading": loading,
                     "first_call_partial": partial,
@@ -139,6 +148,9 @@ async def _run_once(root: Path, jsonl_glob: str) -> dict[str, object]:
                     "final_contains_recent": "synthetic-recent" in final_text,
                     "final_contains_older": "synthetic-older" in final_text,
                     "final_phase_ready": "phase=ready" in status_text,
+                    "final_authoritative": "Partial data" not in final_text,
+                    "refresh_disabled": "manual refresh unavailable" in status_text,
+                    "target_unchanged": f"target={days} ({days} days)" in status_text,
                 }
 
 
@@ -186,17 +198,25 @@ async def _run_failed_startup(root: Path, jsonl_glob: str) -> dict[str, object]:
                 }
 
 
-def _require_lifecycle(results: dict[str, object], *, warm: bool) -> None:
+def _require_lifecycle(
+    results: dict[str, object], *, warm: bool, unlimited: bool = False
+) -> None:
     """Fail the consumer route when a claimed lifecycle state was not seen."""
     label = "warm" if warm else "cold"
     required = {
         "tools_list": bool(results["tool_count"]),
-        "partial": results["observed_partial"],
         "recent result": results["final_contains_recent"],
         "authoritative result": results["final_contains_older"],
         "ready status": results["final_phase_ready"],
+        "unmarked authoritative data": results["final_authoritative"],
+        "disabled refresh": results["refresh_disabled"],
+        "unchanged target": results["target_unchanged"],
+        "prompt handshake": results["prompt_handshake"],
+        "prompt discovery": results["prompt_discovery"],
     }
-    if not warm:
+    if not unlimited:
+        required["partial"] = results["observed_partial"]
+    if not warm and not unlimited:
         required["cold loading or partial state"] = (
             results["observed_loading"] or results["observed_partial"]
         )
@@ -230,12 +250,31 @@ async def main() -> None:
         cold = await _run_once(root, jsonl_glob)
         warm = await _run_once(root, jsonl_glob)
         failure = await _run_failed_startup(root, jsonl_glob)
-        report = {"cold": cold, "failure": failure, "warm": warm}
+        unlimited_root = root / "unlimited"
+        unlimited_root.mkdir()
+        unlimited = await _run_once(unlimited_root, jsonl_glob, days=0)
+        bulk_root = root / "bulk"
+        bulk_glob = _write_fixture(bulk_root, turns=2500)
+        bulk = await _run_once(bulk_root, bulk_glob)
+        report = {
+            "cold": cold,
+            "failure": failure,
+            "warm": warm,
+            "unlimited": unlimited,
+            "bulk_10000_messages": bulk,
+        }
         sys.stdout.write(json.dumps(report, sort_keys=True) + "\n")
         _require_lifecycle(cold, warm=False)
         _require_lifecycle(warm, warm=True)
         _require_failed_startup(failure)
+        _require_lifecycle(unlimited, warm=False, unlimited=True)
+        _require_lifecycle(bulk, warm=False)
 
 
 if __name__ == "__main__":
-    asyncio.run(main())
+
+    async def bounded_main():
+        async with asyncio.timeout(120):
+            await main()
+
+    asyncio.run(bounded_main())

@@ -6,6 +6,8 @@ import asyncio
 import types
 from pathlib import Path
 
+import pytest
+
 from introspect import refresh
 from introspect.mcp import refresh_bridge
 from introspect.mcp.server import create_mcp_server
@@ -44,20 +46,23 @@ def test_data_tool_reports_loading_before_preview():
     assert "candidates=1/2" in result
 
 
-def test_stdio_refresh_publishes_preview_then_authority(monkeypatch, tmp_path: Path):
+@pytest.mark.parametrize(("days", "expected_builds"), [(0, [0]), (30, [1, 30])])
+def test_stdio_refresh_publishes_preview_then_authority(
+    monkeypatch, tmp_path: Path, days: int, expected_builds: list[int]
+):
     """The standalone task uses the existing preview and sidecar loop phases."""
     state = refresh.StdioRefreshState(
         db_path=tmp_path / "introspect.duckdb",
         jsonl_glob=str(tmp_path / "**" / "*.jsonl"),
         codex_glob=str(tmp_path / "codex" / "**" / "*.jsonl"),
-        days=30,
+        days=days,
         resolve_projects=False,
         interval_seconds=0,
-        refresh_target=refresh.target_for_window("30"),
-        refresh_window="30",
+        refresh_target=refresh.target_for_window(str(days)),
+        refresh_window=str(days),
         refresh_trigger=asyncio.Event(),
         loading_state=refresh.LoadingState(
-            refresh.LoadingPhase.DISCOVERING, refresh.target_for_window("30")
+            refresh.LoadingPhase.DISCOVERING, refresh.target_for_window(str(days))
         ),
     )
     calls: list[int] = []
@@ -77,9 +82,19 @@ def test_stdio_refresh_publishes_preview_then_authority(monkeypatch, tmp_path: P
 
     asyncio.run(run_stdio_refresh(state))
 
-    assert calls == [1, 30]
+    assert calls == expected_builds
     assert state.database_ready is True
     assert state.loading_state.phase is LoadingPhase.READY
+
+    assert state.database_label == "authoritative", "startup published full history"
+    assert state.refresh_trigger is None, "one-shot startup has no manual consumer"
+    refresh_bridge.set_state(state)
+    try:
+        response = asyncio.run(refresh_data(window="7"))
+    finally:
+        refresh_bridge.set_state(None)
+    assert "manual refresh unavailable" in response
+    assert state.refresh_target.days == days, "disabled refresh cannot change target"
 
 
 def test_stdio_preview_failure_is_terminal_and_preserves_error(
@@ -118,7 +133,53 @@ def test_stdio_preview_failure_is_terminal_and_preserves_error(
 
     assert "Data unavailable" in result
     assert "synthetic preview failure" in result
-    assert "restart" in result
+    assert "restart" in result, "failed startup must explain recovery"
     assert "Data unavailable" in refresh_result
     assert "no database snapshot" in refresh_result.lower()
-    assert "synthetic preview failure" in refresh_result
+    assert "synthetic preview failure" in refresh_result, "refresh retains error"
+
+
+@pytest.mark.parametrize("days", [0, 30])
+def test_stdio_refresh_keeps_periodic_consumer_alive(monkeypatch, tmp_path, days):
+    target = refresh.target_for_window(str(days))
+    state = refresh.StdioRefreshState(
+        db_path=tmp_path / "introspect.duckdb",
+        jsonl_glob=str(tmp_path / "*.jsonl"),
+        codex_glob=str(tmp_path / "codex" / "*.jsonl"),
+        days=days,
+        resolve_projects=False,
+        interval_seconds=600,
+        refresh_target=target,
+        refresh_window=target.window,
+        refresh_trigger=None,
+    )
+    monkeypatch.setattr(refresh, "_rebuild_sidecar", lambda *args, **kwargs: None)
+    published = asyncio.Event()
+
+    def publish(*args):
+        loop.call_soon_threadsafe(published.set)
+
+    monkeypatch.setattr(refresh, "_swap_in", publish)
+
+    async def exercise():
+        nonlocal loop
+        loop = asyncio.get_running_loop()
+        task = asyncio.create_task(run_stdio_refresh(state))
+        try:
+            await asyncio.wait_for(published.wait(), timeout=5)
+            assert not task.done()
+            refresh_bridge.set_state(state)
+            try:
+                response = await refresh_data(window="7")
+            finally:
+                refresh_bridge.set_state(None)
+            assert "Refresh complete" in response
+            assert state.last_built_days == 7
+        finally:
+            task.cancel()
+            with pytest.raises(asyncio.CancelledError):
+                await task
+        assert state.refresh_trigger is None
+
+    loop: asyncio.AbstractEventLoop
+    asyncio.run(exercise())
