@@ -71,8 +71,8 @@ Tips:
   mirrors the web Cost Overview page and accepts an optional `since` filter.
 - Raw JSONL fields live in raw_data / raw_messages; use json_extract() for
   nested values.
-- On standalone stdio startup, data loading begins after this handshake. A
-  first data call may report `Data loading`; retry after the preview is ready.
+- On standalone stdio startup, data loads in the background. A first data
+  call may report `Data loading`; retry after the preview or snapshot is ready.
   Preview and warm-snapshot results are marked partial until `phase=ready`.
 - Data refreshes every ~10 minutes; call `refresh_data` to pick up a session
   that just ended.

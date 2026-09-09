@@ -102,7 +102,9 @@ ordered, but it does mean an ad-hoc query of your own — through
 
 ## Refresh behaviour
 
-On startup the web server materializes the JSONL logs into DuckDB tables. When
+On startup the web and standalone stdio MCP servers materialize the JSONL logs
+into DuckDB tables. The stdio transport answers initialization and tool discovery
+while loading runs in the background. When
 `INTROSPECT_REFRESH_INTERVAL_SECONDS > 0`, a background task polls the JSONL
 file mtimes and rebuilds into a sidecar database, then atomically swaps it over
 the live one. The manual "Refresh now" button and the `refresh_data` MCP tool
@@ -114,7 +116,10 @@ it serves the prior database immediately as a **warm snapshot**. The refresh
 indicator labels these states, and reports a failed authoritative rebuild
 while keeping the available preview or snapshot usable. The later
 authoritative build is promoted atomically when it succeeds. With
-`INTROSPECT_DAYS=0`, all data is loaded as the preview.
+`INTROSPECT_DAYS=0`, cold startup loads all data and publishes an authoritative
+`ready` database directly, without a partial preview. Setting
+`INTROSPECT_REFRESH_INTERVAL_SECONDS=0` still completes the startup build but
+disables subsequent polling and manual refresh in both servers.
 
 The **window picker** scopes materialization to `1`, `7`, or `30` days, or the
 current calendar month. Changing it forces a rebuild on the next tick. A

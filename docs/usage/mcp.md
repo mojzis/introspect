@@ -17,10 +17,12 @@ introspy mcp
 
 Starts an MCP server over stdio, for registering in a client's MCP config.
 
-The protocol becomes connectable before data loading starts. On a cold start,
-the first data call may say `Data loading`; retry after the one-day preview is
+Data loading runs in the background so initialization and tool discovery do
+not wait for it. On a cold start, the first data call may say `Data loading`;
+retry after the one-day preview is
 published to receive an explicitly marked partial result. A warm compatible
-database is immediately available as a `warm snapshot`, while the same
+database becomes available as a `warm snapshot` after its compatibility check;
+data calls may report loading until then. The same
 background lifecycle builds the selected target. Results stop carrying the
 partial-data marker when the authoritative snapshot reaches `ready`.
 With `INTROSPECT_DAYS=0`, cold startup builds all history and publishes it as
@@ -28,6 +30,12 @@ ready directly; there is no one-day preview. Periodic refresh remains enabled
 unless `INTROSPECT_REFRESH_INTERVAL_SECONDS=0`. That setting finishes the
 startup build once, then leaves both automatic and manual refresh disabled;
 `refresh_data` reports this and does not change the requested window.
+
+If startup fails before any database is available, data tools and `refresh_data`
+report `Data unavailable`, the failure cause, and `phase=failed`. Correct the
+configuration and restart the standalone server; repeatedly retrying the tool
+does not restart loading. If an authoritative rebuild fails after a preview or
+warm snapshot is available, that snapshot remains readable and marked partial.
 
 Run by hand in a terminal it prints one line to stderr confirming it is up and
 waiting for a client, and Ctrl-C stops it with a matching line and exit code

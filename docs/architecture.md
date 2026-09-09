@@ -168,9 +168,10 @@ so the MCP session manager runs concurrently with request handling.
 
 `mcp/refresh_bridge.py` is a module-level holder that lets stateless MCP tool
 functions reach the live `app.state` for `refresh_data`. It also carries the
-standalone stdio state. FastMCP's lifespan starts `run_stdio_refresh()` only
-after the transport is connectable: a cold process publishes a bounded
-preview, a compatible existing database is a warm snapshot, and the existing
+standalone stdio state. FastMCP's lifespan starts `run_stdio_refresh()` in
+the background alongside protocol handling: a cold process publishes a bounded
+preview for a bounded target (all-history cold startup publishes `ready`
+directly), a compatible existing database is a warm snapshot, and the existing
 sidecar `refresh_loop()` then builds and atomically promotes the authoritative
 target. Data tools refuse to fall back to lazy JSONL views in standalone mode;
 before a preview they return a loading contract, and while a preview/snapshot
@@ -192,10 +193,12 @@ DuckDB reads JSONL files and exposes them through a fixed schema. Two creation
 paths share the same SELECT bodies (`_create_relation` dispatches between TABLE
 and VIEW):
 
-- **Materialized tables** (`materialize_views()`): the web UI startup and
-  `introspy materialize` build base tables with indexes. The on-disk DB is
-  reused by all CLI commands and MCP tools through `ensure_materialized()` /
-  `get_read_connection()`.
+- **Materialized tables** (`materialize_views()`): web UI and standalone MCP
+  startup, plus `introspy materialize`, build base tables with indexes. CLI
+  commands reuse the on-disk DB through `ensure_materialized()` /
+  `get_read_connection()`. MCP data tools read the lifecycle-owned database
+  through `connect_read_hardened()` and wait for its first snapshot instead of
+  falling back to lazy views.
 - **Lazy views** (`_create_views()`): used only when callers reach for a
   connection without materializing first. Created over the JSONL glob with
   `read_json_auto`. The `project_map` table is created empty in this mode so
