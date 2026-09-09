@@ -167,11 +167,16 @@ HTTP mount is built inside the lifespan and replaces a placeholder `FastAPI()`
 so the MCP session manager runs concurrently with request handling.
 
 `mcp/refresh_bridge.py` is a module-level holder that lets stateless MCP tool
-functions reach the live `app.state` for `refresh_data`. It enforces
-single-app registration to surface accidental multi-app setups. `refresh_data`
-accepts the same standard or numeric target as the web picker and returns the
-shared lifecycle fields alongside its complete, unchanged, still-running, or
-failed outcome.
+functions reach the live `app.state` for `refresh_data`. It also carries the
+standalone stdio state. FastMCP's lifespan starts `run_stdio_refresh()` only
+after the transport is connectable: a cold process publishes a bounded
+preview, a compatible existing database is a warm snapshot, and the existing
+sidecar `refresh_loop()` then builds and atomically promotes the authoritative
+target. Data tools refuse to fall back to lazy JSONL views in standalone mode;
+before a preview they return a loading contract, and while a preview/snapshot
+is live they mark results as partial. `refresh_data` accepts the same standard
+or numeric target as the web picker and returns the shared lifecycle fields
+alongside its complete, unchanged, still-running, or failed outcome.
 
 See [MCP server](usage/mcp.md) for the tool and prompt catalogue.
 

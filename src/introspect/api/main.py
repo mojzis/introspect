@@ -215,6 +215,11 @@ async def lifespan(app: FastAPI):  # noqa: PLR0915
         finally:
             conn.close()
 
+    # MCP data tools use this marker to distinguish the standalone cold-start
+    # gate from the embedded web server, which has already published preview
+    # data (or a warm snapshot) before the lifespan yields.
+    app.state.database_ready = True
+
     _configure_sql_api(app)
 
     # A startup preview is deliberately candidate-bounded, so every positive
