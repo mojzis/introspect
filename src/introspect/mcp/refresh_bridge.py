@@ -21,6 +21,40 @@ _DOUBLE_REGISTRATION_MSG = (
 )
 
 
+class DataNotReadyError(RuntimeError):
+    """Raised when a standalone MCP read precedes its preview publication."""
+
+    def __init__(self, state: RefreshState):
+        loading = getattr(state, "loading_state", None)
+        phase = getattr(getattr(loading, "phase", None), "value", "unknown")
+        target = getattr(loading, "target", None) or getattr(
+            state, "refresh_target", None
+        )
+        window = getattr(target, "window", "unknown")
+        days = getattr(target, "days", "unknown")
+        candidate_count = getattr(loading, "candidate_count", 0)
+        completed = getattr(loading, "completed_candidates", 0)
+        progress = (
+            f"; candidates={completed}/{candidate_count}" if candidate_count else ""
+        )
+        error = getattr(loading, "error", None)
+        if phase == "failed":
+            detail = f" Error: {error}" if error else ""
+            super().__init__(
+                "Data unavailable: startup data loading failed."
+                f"{detail} No database snapshot is available; restart the "
+                "standalone MCP server after correcting the configuration. "
+                f"(phase={phase}; target={window} ({days} days){progress})"
+            )
+            return
+        super().__init__(
+            "Data loading: no preview is ready yet "
+            f"(phase={phase}; target={window} ({days} days){progress}). "
+            "Retry this tool shortly; results will be available as soon as "
+            "the preview or warm snapshot is published."
+        )
+
+
 class _BridgeHolder:
     """Mutable holder for the registered state.
 

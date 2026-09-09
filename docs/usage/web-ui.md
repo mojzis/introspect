@@ -305,6 +305,11 @@ polls its status fragment; the existing database remains browseable until the
 new sidecar is complete. After a successful swap, the current page reloads
 automatically so its panels use the refreshed data.
 
+On cold startup with `INTROSPECT_DAYS=0`, the first published database already
+contains all history and the indicator reports `ready`, not a partial preview.
+With `INTROSPECT_REFRESH_INTERVAL_SECONDS=0`, startup still finishes loading
+the selected target; subsequent automatic and manual refresh are disabled.
+
 The indicator is an accessible live status region. It announces preview or warm
 snapshot availability, discovery and loading stages (including truthful file
 counts when available), successful promotion, and failures. A failure leaves

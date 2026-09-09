@@ -727,7 +727,7 @@ dev = [
     { name = "deptry" },
     { name = "gerenuk", specifier = ">=0.1.0" },
     { name = "httpx2" },
-    { name = "madoqua", specifier = ">=0.2.2" },
+    { name = "madoqua", specifier = ">=0.2.3" },
     { name = "poethepoet" },
     { name = "pycoati", specifier = ">=0.2.7" },
     { name = "pytest" },
@@ -788,13 +788,13 @@ wheels = [
 
 [[package]]
 name = "madoqua"
-version = "0.2.2"
+version = "0.2.3"
 source = { registry = "https://pypi.org/simple" }
-sdist = { url = "https://files.pythonhosted.org/packages/9d/47/b638680853d3a3fd05678acb31c125b2ee73c083998f45118fd201f01623/madoqua-0.2.2.tar.gz", hash = "sha256:799f70ae2eebaf8e3d8e296a1bc6af96459aa5ad6d6f683d2d0e85d2ef186d92", size = 886386, upload-time = "2026-09-06T10:16:31.566Z" }
+sdist = { url = "https://files.pythonhosted.org/packages/b1/d8/5757103ee84f26fb0675ca2d5888cfe213df2c100c993dc57639418a7697/madoqua-0.2.3.tar.gz", hash = "sha256:2ac61df9a8311554952fcd9f9c3430f0047c92f7b07fb97b32f49e2076aec431", size = 891728, upload-time = "2026-09-08T01:03:20.701Z" }
 wheels = [
-    { url = "https://files.pythonhosted.org/packages/5c/c1/558f9dff51b20e30297dfe144564313ca5eec797372e91af46e19883f0fd/madoqua-0.2.2-py3-none-macosx_11_0_arm64.whl", hash = "sha256:465a237666d16fa3365b92cfa58750e5bb94f8a95f7c6a3c022ffd342c6ff0e6", size = 756092, upload-time = "2026-09-06T10:16:26.915Z" },
-    { url = "https://files.pythonhosted.org/packages/c4/e0/edffd6b495454d77ece7a0bf522f7028f0ec6db60a4554cdd2c96c1890f3/madoqua-0.2.2-py3-none-manylinux_2_28_x86_64.whl", hash = "sha256:f56ee6598683e276dcf5a00fccec2960cd166a8c4aa1dda61c82c6ef5c2de31f", size = 867899, upload-time = "2026-09-06T10:16:28.644Z" },
-    { url = "https://files.pythonhosted.org/packages/f5/ab/16170ffe43b4b0a088cf29507fe8102533a68afa620fa8d696c3f4c2dddd/madoqua-0.2.2-py3-none-win_amd64.whl", hash = "sha256:8cde9b4a776a39c6b92d72379c9d72f0de77e4019967a5ed7c275e1793b39725", size = 775267, upload-time = "2026-09-06T10:16:30.077Z" },
+    { url = "https://files.pythonhosted.org/packages/35/1e/437826ae822943643a85e51a1f9a328b3cb729a1b319ded8e03c1272581f/madoqua-0.2.3-py3-none-macosx_11_0_arm64.whl", hash = "sha256:932a94ef1504e7f58543515e059f92759fca8f4be302eb688be39f646a3406f1", size = 756465, upload-time = "2026-09-08T01:03:15.761Z" },
+    { url = "https://files.pythonhosted.org/packages/38/0b/e26c19b0a7ee243727995de8b73bb8cb058ca503ece7fd5e9226c6c3b4aa/madoqua-0.2.3-py3-none-manylinux_2_28_x86_64.whl", hash = "sha256:cd3ffaadee3d17e9de7c93fde5d0599ea72c9ea3953527927ace82eae5cde93d", size = 869508, upload-time = "2026-09-08T01:03:17.352Z" },
+    { url = "https://files.pythonhosted.org/packages/16/90/b005b17bd997811ed7ecc4c49a3abb19b1ffabb918515e3128d514769e51/madoqua-0.2.3-py3-none-win_amd64.whl", hash = "sha256:7c5c09df07253fce0f97f0b4cce27d18e436a24da9e326e33025581914eac2a8", size = 776184, upload-time = "2026-09-08T01:03:18.76Z" },
 ]
 
 [[package]]

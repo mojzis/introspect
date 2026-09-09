@@ -5,6 +5,8 @@ from __future__ import annotations
 import logging
 from dataclasses import dataclass, fields, replace
 from datetime import datetime
+from functools import wraps
+from pathlib import Path
 from typing import cast, get_args
 
 import duckdb
@@ -83,13 +85,53 @@ _PARETO_CUTOFF = 0.80
 REFRESH_TIMEOUT = 30.0
 
 
+def _data_tool(fn):
+    """Convert startup data unavailability into an honest tool result."""
+
+    @wraps(fn)
+    def wrapped(*args, **kwargs):
+        try:
+            result = fn(*args, **kwargs)
+        except refresh_bridge.DataNotReadyError as exc:
+            return str(exc)
+        state = refresh_bridge.get_state()
+        loading = getattr(state, "loading_state", None)
+        phase = getattr(getattr(loading, "phase", None), "value", None)
+        if state is not None and phase != "ready":
+            contract = _refresh_contract(state, loading)
+            return (
+                "[Partial data: this result comes from the current preview or "
+                f"warm snapshot; {contract}. Retry after phase=ready for the "
+                "complete history.]\n\n"
+                f"{result}"
+            )
+        return result
+
+    return wrapped
+
+
 def _get_read_connection() -> duckdb.DuckDBPyConnection:
     """``get_read_connection`` with the Codex default glob applied.
 
     Mirrors ``cli._db``'s ``DEFAULT_CODEX_GLOB`` passthrough so the
     lazy-view fallback surfaces Codex sessions too, not just Claude ones.
     """
+    state = refresh_bridge.get_state()
+    if state is not None:
+        if not getattr(state, "database_ready", False):
+            raise refresh_bridge.DataNotReadyError(state)
+        return connect_read_hardened(state.db_path)
     return get_read_connection(codex_glob=DEFAULT_CODEX_GLOB)
+
+
+def _materialized_db_path() -> Path:
+    """Return the active DB path, rejecting pre-preview standalone reads."""
+    state = refresh_bridge.get_state()
+    if state is not None:
+        if not getattr(state, "database_ready", False):
+            raise refresh_bridge.DataNotReadyError(state)
+        return state.db_path
+    return DEFAULT_DB_PATH
 
 
 def _validate_since(since: str) -> str | None:
@@ -108,6 +150,7 @@ def _validate_since(since: str) -> str | None:
     return None
 
 
+@_data_tool
 def search_conversations(  # noqa: PLR0913
     query: str,
     limit: int = 10,
@@ -360,6 +403,7 @@ def _session_cost_lines(conn: duckdb.DuckDBPyConnection, session_id: str) -> lis
     return _render_cost_lines(_fetch_model_spend(conn, session_id))
 
 
+@_data_tool
 def get_session(session_id: str) -> str:
     """Get full session content by session ID.
 
@@ -417,6 +461,7 @@ def get_session(session_id: str) -> str:
         conn.close()
 
 
+@_data_tool
 def recent_sessions(n: int = 10) -> str:
     """List the most recent N sessions with metadata."""
     conn = _get_read_connection()
@@ -486,7 +531,7 @@ def _format_rows(
     return f"{header}\n{sep}\n{body}\n({len(rows)} rows){tail}"
 
 
-def _run_sql_error(exc: Exception) -> str:
+def _run_sql_error(exc: Exception, db_path: Path) -> str:
     """Render a `run_sql` execution failure as tool output.
 
     Out-of-memory gets its own wording naming the configured budget: the
@@ -497,11 +542,13 @@ def _run_sql_error(exc: Exception) -> str:
         return f"Error: {exc}"
     if isinstance(exc, duckdb.OutOfMemoryException):
         return (
-            f"Error: query exceeded the {configured_memory_limit()} memory limit: {exc}"
+            "Error: query exceeded the "
+            f"{configured_memory_limit(db_path)} memory limit: {exc}"
         )
     return f"SQL error ({type(exc).__name__}): {exc}"
 
 
+@_data_tool
 def run_sql(sql: str, limit: int = 100) -> str:
     """Execute a read-only SELECT query against the introspect DB.
 
@@ -528,13 +575,14 @@ def run_sql(sql: str, limit: int = 100) -> str:
     # Fresh hardened read-only connection — do NOT route through
     # get_read_connection(), which silently falls back to a writable
     # connection over lazy JSONL views when the materialized DB is missing.
-    if not DEFAULT_DB_PATH.exists():
+    db_path = _materialized_db_path()
+    if not db_path.exists():
         return (
-            f"Error: materialized DB not found at {DEFAULT_DB_PATH}. "
-            "Start `introspect serve` once to materialize views."
+            f"Error: materialized DB not found at {db_path}. "
+            "Wait for the startup preview to materialize views."
         )
     try:
-        conn = connect_read_hardened(DEFAULT_DB_PATH)
+        conn = connect_read_hardened(db_path)
     except duckdb.Error as exc:
         return f"Error opening DB ({type(exc).__name__}): {exc}"
 
@@ -545,7 +593,7 @@ def run_sql(sql: str, limit: int = 100) -> str:
             replace(MCP_BUDGET, row_cap=clamp_row_limit(limit, _SQL_ROW_CAP)),
         )
     except (SqlTimeoutError, duckdb.Error) as exc:
-        return _run_sql_error(exc)
+        return _run_sql_error(exc, db_path)
     finally:
         conn.close()
 
@@ -555,6 +603,7 @@ def run_sql(sql: str, limit: int = 100) -> str:
     return _format_rows(result.columns, result.rows, footnote)
 
 
+@_data_tool
 def describe_schema() -> str:
     """List views/tables available to `run_sql` with their columns.
 
@@ -712,6 +761,18 @@ async def refresh_data(window: str | None = None) -> str:  # noqa: PLR0911
             "Start `introspect serve` to enable refresh."
         )
 
+    loading = getattr(state, "loading_state", None)
+    phase = getattr(getattr(loading, "phase", None), "value", None)
+    if phase == "failed" and not getattr(state, "database_ready", True):
+        error = getattr(loading, "error", None)
+        detail = f" Error: {error}" if error else ""
+        contract = _refresh_contract(state, loading)
+        return (
+            "Data unavailable: startup data loading failed."
+            f"{detail} No database snapshot is available; restart the "
+            f"standalone MCP server after correcting the configuration. [{contract}]"
+        )
+
     if window is not None and not is_valid_refresh_target(window):
         return (
             f"Invalid refresh target {window!r}; choose 1, 7, 30, month, "
@@ -783,6 +844,7 @@ def run_query_template(
     return conn.execute(template.sql, params).fetchall()
 
 
+@_data_tool
 def tool_failure_rate(limit: int = 20, since: str = "", min_calls: int = 5) -> str:
     """Rank tools by failure rate — which tools fail most, by rate and count?
 
@@ -844,6 +906,7 @@ _TTL_COST_5M = 5
 _TTL_COST_1H = 6
 
 
+@_data_tool
 def cache_ttl_choice(limit: int = 20, since: str = "", sidechain: bool = False) -> str:
     """Which prompt-cache TTL is cheaper per project — 5m or 1h?
 
@@ -922,6 +985,7 @@ def cache_ttl_choice(limit: int = 20, since: str = "", sidechain: bool = False) 
     return "\n".join(lines)
 
 
+@_data_tool
 def tool_failures(command_prefix: str = "", limit: int = 20) -> str:
     """List failed tool calls, optionally filtered by tool name prefix."""
     conn = _get_read_connection()
@@ -994,6 +1058,7 @@ def _parse_ts_epoch(ts_val: object) -> float | None:
             return None
 
 
+@_data_tool
 def expensive_sessions(limit: int = 15, since: str = "") -> str:  # noqa: PLR0912, PLR0915
     """Return the most expensive sessions ranked by cost, with Pareto analysis.
 

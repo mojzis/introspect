@@ -57,7 +57,7 @@ dev = [
     "pyyaml>=6.0",
     "gerenuk>=0.1.0",
     "zorilla>=0.1.4",
-    "madoqua>=0.2.2",
+    "madoqua>=0.2.3",
     "pycoati>=0.2.7",
 ]
 docs = [

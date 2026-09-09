@@ -1,9 +1,16 @@
 """MCP server for introspect."""
 
+import asyncio
+import contextlib
+from contextlib import asynccontextmanager
+from typing import cast
+
 from mcp.server.fastmcp import FastMCP
 from mcp.server.transport_security import TransportSecuritySettings
 
 from introspect.mcp._register import register_prompts, register_tools
+from introspect.mcp.refresh_bridge import get_state, set_state
+from introspect.refresh import RefreshState, make_stdio_refresh_state, run_stdio_refresh
 from introspect.sql_query import is_loopback_host
 
 # The streamable-HTTP endpoint is mounted at /mcp on the same loopback-bound
@@ -64,6 +71,9 @@ Tips:
   mirrors the web Cost Overview page and accepts an optional `since` filter.
 - Raw JSONL fields live in raw_data / raw_messages; use json_extract() for
   nested values.
+- On standalone stdio startup, data loads in the background. A first data
+  call may report `Data loading`; retry after the preview or snapshot is ready.
+  Preview and warm-snapshot results are marked partial until `phase=ready`.
 - Data refreshes every ~10 minutes; call `refresh_data` to pick up a session
   that just ended.
 
@@ -72,6 +82,31 @@ Example — top sessions by cost:
          left(first_prompt, 60) AS prompt
   FROM session_stats ORDER BY cost_usd DESC LIMIT 10
 """
+
+
+@asynccontextmanager
+async def _lifespan(_server: FastMCP):
+    """Start standalone progressive loading after MCP transport setup."""
+    # The embedded HTTP server already owns the shared lifecycle and bridge.
+    # FastMCP still runs this lifespan for its mounted session manager.
+    if get_state() is not None:
+        yield
+        return
+
+    state = make_stdio_refresh_state()
+    set_state(cast(RefreshState, state))
+    refresh_task = asyncio.create_task(run_stdio_refresh(state))
+    try:
+        yield
+    finally:
+        refresh_task.cancel()
+        try:
+            with contextlib.suppress(asyncio.CancelledError):
+                await refresh_task
+        finally:
+            set_state(None)
+            with contextlib.suppress(FileNotFoundError):
+                state.db_path.with_name(state.db_path.name + ".next").unlink()
 
 
 def create_mcp_server(bind_host: str = "") -> FastMCP:
@@ -91,6 +126,7 @@ def create_mcp_server(bind_host: str = "") -> FastMCP:
         "introspect",
         instructions=INSTRUCTIONS,
         transport_security=security,
+        lifespan=_lifespan,
     )
     # Serve the streamable HTTP endpoint at the sub-app root so that mounting
     # it at `/mcp` in FastAPI yields a final path of `/mcp`, not `/mcp/mcp`.

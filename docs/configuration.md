@@ -8,13 +8,13 @@ reads is listed below; `tests/test_docs_drift.py` fails if `src/` grows an
 
 | Variable | Default | Read by | Description |
 |---|---|---|---|
-| `INTROSPECT_DB_PATH` | `~/.introspect/introspect.duckdb` | CLI, web app, update check | Database file location. |
-| `INTROSPECT_JSONL_GLOB` | `~/.claude/projects/**/*.jsonl` | web app | Glob for Claude Code conversation logs. |
-| `INTROSPECT_CODEX_GLOB` | `~/.codex/sessions/**/*.jsonl` | web app | Glob for Codex CLI rollout logs. A missing directory or non-matching glob is a silent no-op. |
-| `INTROSPECT_DAYS` | resolved from `INTROSPECT_REFRESH_WINDOW` | web app | Days of history to load (`0` = no limit). `serve` / `devserve` set it from `-d`; it takes precedence over the window picker on startup. A positive custom value remains selectable as `<N> days (CLI)`. |
-| `INTROSPECT_REFRESH_WINDOW` | `30` | web app | Window-picker token: `1`, `7`, `30`, or `month` (calendar-month-to-date). The refresh controls also accept a numeric target (`0` = all data, positive values = custom days). An unrecognized value logs a warning and falls back to the default. |
-| `INTROSPECT_REFRESH_INTERVAL_SECONDS` | `600` | web app | Background refresh poll interval; `0` disables auto-refresh. |
-| `INTROSPECT_RESOLVE_PROJECTS` | `1` | web app | When `0`, skip git worktree resolution for project names. Set by `serve --no-resolve-projects`. |
+| `INTROSPECT_DB_PATH` | `~/.introspect/introspect.duckdb` | CLI, web app, stdio MCP, update check | Database file location. |
+| `INTROSPECT_JSONL_GLOB` | `~/.claude/projects/**/*.jsonl` | web app, stdio MCP | Glob for Claude Code conversation logs. |
+| `INTROSPECT_CODEX_GLOB` | `~/.codex/sessions/**/*.jsonl` | web app, stdio MCP | Glob for Codex CLI rollout logs. A missing directory or non-matching glob is a silent no-op. |
+| `INTROSPECT_DAYS` | resolved from `INTROSPECT_REFRESH_WINDOW` | web app, stdio MCP | Days of history to load (`0` = no limit). `serve` / `devserve` set it from `-d`; it takes precedence over the window picker on startup. A positive custom value remains selectable as `<N> days (CLI)`. |
+| `INTROSPECT_REFRESH_WINDOW` | `30` | web app, stdio MCP | Window-picker token: `1`, `7`, `30`, or `month` (calendar-month-to-date). The refresh controls also accept a numeric target (`0` = all data, positive values = custom days). An unrecognized value logs a warning and falls back to the default. |
+| `INTROSPECT_REFRESH_INTERVAL_SECONDS` | `600` | web app, stdio MCP | Background refresh poll interval; `0` runs the startup authoritative build once and disables subsequent polling and manual refresh. |
+| `INTROSPECT_RESOLVE_PROJECTS` | `1` | web app, stdio MCP | When `0`, skip git worktree resolution for project names. Set by `serve --no-resolve-projects`. |
 | `INTROSPECT_HOST` | unset | set by `serve`, read by the web app | The address the server bound to. Gates the [SQL API](usage/sql-api.md) and the loopback `Host` allowlist — see below. |
 | `INTROSPECT_SQL_API` | unset (on, loopback only) | web app | Set to `off` to force-disable the SQL API even on loopback. |
 | `INTROSPECT_DB_MEMORY_LIMIT` | ~25% of available RAM, capped at 2 GB | every read connection | DuckDB `memory_limit` for the hardened read connection (e.g. `1GB`). See [Security](security.md#resource-bounds). |
@@ -102,7 +102,9 @@ ordered, but it does mean an ad-hoc query of your own — through
 
 ## Refresh behaviour
 
-On startup the web server materializes the JSONL logs into DuckDB tables. When
+On startup the web and standalone stdio MCP servers materialize the JSONL logs
+into DuckDB tables. The stdio transport answers initialization and tool discovery
+while loading runs in the background. When
 `INTROSPECT_REFRESH_INTERVAL_SECONDS > 0`, a background task polls the JSONL
 file mtimes and rebuilds into a sidecar database, then atomically swaps it over
 the live one. The manual "Refresh now" button and the `refresh_data` MCP tool
@@ -114,7 +116,10 @@ it serves the prior database immediately as a **warm snapshot**. The refresh
 indicator labels these states, and reports a failed authoritative rebuild
 while keeping the available preview or snapshot usable. The later
 authoritative build is promoted atomically when it succeeds. With
-`INTROSPECT_DAYS=0`, all data is loaded as the preview.
+`INTROSPECT_DAYS=0`, cold startup loads all data and publishes an authoritative
+`ready` database directly, without a partial preview. Setting
+`INTROSPECT_REFRESH_INTERVAL_SECONDS=0` still completes the startup build but
+disables subsequent polling and manual refresh in both servers.
 
 The **window picker** scopes materialization to `1`, `7`, or `30` days, or the
 current calendar month. Changing it forces a rebuild on the next tick. A

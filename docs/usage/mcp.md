@@ -17,6 +17,26 @@ introspy mcp
 
 Starts an MCP server over stdio, for registering in a client's MCP config.
 
+Data loading runs in the background so initialization and tool discovery do
+not wait for it. On a cold start, the first data call may say `Data loading`;
+retry after the one-day preview is
+published to receive an explicitly marked partial result. A warm compatible
+database becomes available as a `warm snapshot` after its compatibility check;
+data calls may report loading until then. The same
+background lifecycle builds the selected target. Results stop carrying the
+partial-data marker when the authoritative snapshot reaches `ready`.
+With `INTROSPECT_DAYS=0`, cold startup builds all history and publishes it as
+ready directly; there is no one-day preview. Periodic refresh remains enabled
+unless `INTROSPECT_REFRESH_INTERVAL_SECONDS=0`. That setting finishes the
+startup build once, then leaves both automatic and manual refresh disabled;
+`refresh_data` reports this and does not change the requested window.
+
+If startup fails before any database is available, data tools and `refresh_data`
+report `Data unavailable`, the failure cause, and `phase=failed`. Correct the
+configuration and restart the standalone server; repeatedly retrying the tool
+does not restart loading. If an authoritative rebuild fails after a preview or
+warm snapshot is available, that snapshot remains readable and marked partial.
+
 Run by hand in a terminal it prints one line to stderr confirming it is up and
 waiting for a client, and Ctrl-C stops it with a matching line and exit code
 130. Both lines are suppressed when stderr is not a terminal — the exit code is
@@ -45,7 +65,7 @@ Nine hand-built tools, plus the ones generated per deterministic
 | `run_sql` | `sql`, `limit` | Execute one read-only `SELECT` query. Capped at 500 rows / 64 KB / 20 s. |
 | `describe_schema` | — | List relations available to `run_sql` with their columns. Call it before writing SQL. |
 | `list_query_templates` | `kind` | Render the curated SQL cookbook — see [below](#query-templates). |
-| `refresh_data` | `window` (optional) | Wake the refresh loop and wait for the rebuild. `window` accepts `1`, `7`, `30`, `month`, `0` (all data), or a positive custom day count. The result includes the shared phase, target, database (preview/snapshot/authoritative), stage, and candidate-count contract. Only available when running embedded in `introspy serve`; the stdio server returns "unavailable". |
+| `refresh_data` | `window` (optional) | Wake the refresh loop and wait for the rebuild. `window` accepts `1`, `7`, `30`, `month`, `0` (all data), or a positive custom day count. The result includes the shared phase, target, database (preview/snapshot/authoritative), stage, and candidate-count contract. Available in both embedded HTTP and standalone stdio servers. |
 
 `run_sql` accepts exactly one `SELECT` statement (`WITH` and DuckDB's
 FROM-first form count as one). Writes, `ATTACH`, `INSTALL`, `LOAD`, `PRAGMA`,

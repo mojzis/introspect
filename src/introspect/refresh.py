@@ -9,15 +9,22 @@ import logging
 import os
 import re
 from collections.abc import Callable, Iterable, Iterator
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from datetime import UTC, date, datetime, timedelta
 from enum import Enum, StrEnum
 from pathlib import Path
-from typing import TYPE_CHECKING, Protocol
+from types import SimpleNamespace
+from typing import TYPE_CHECKING, Protocol, cast
 
 import duckdb
 
-from introspect.db import materialize_views
+from introspect.db import (
+    DEFAULT_CODEX_GLOB,
+    DEFAULT_DB_PATH,
+    DEFAULT_JSONL_GLOB,
+    has_compatible_materialized_db,
+    materialize_views,
+)
 from introspect.search import build_search_corpus
 
 if TYPE_CHECKING:
@@ -155,6 +162,38 @@ def target_for_window(
 def is_valid_refresh_target(value: str) -> bool:
     """Return whether ``value`` is a picker token or a numeric day target."""
     return value in VALID_WINDOWS or _CUSTOM_WINDOW_RE.fullmatch(value) is not None
+
+
+def make_stdio_refresh_state() -> StdioRefreshState:
+    """Create the shared refresh contract for a standalone MCP process."""
+    db_path = Path(os.environ.get("INTROSPECT_DB_PATH", str(DEFAULT_DB_PATH)))
+    jsonl_glob = os.environ.get("INTROSPECT_JSONL_GLOB", DEFAULT_JSONL_GLOB)
+    codex_glob = os.environ.get("INTROSPECT_CODEX_GLOB", DEFAULT_CODEX_GLOB)
+    refresh_window = os.environ.get("INTROSPECT_REFRESH_WINDOW", DEFAULT_WINDOW)
+    if refresh_window not in VALID_WINDOWS:
+        log.warning(
+            "Invalid INTROSPECT_REFRESH_WINDOW=%r; falling back to %s",
+            refresh_window,
+            DEFAULT_WINDOW,
+        )
+        refresh_window = DEFAULT_WINDOW
+    days_env = os.environ.get("INTROSPECT_DAYS")
+    days = int(days_env) if days_env is not None else window_to_days(refresh_window)
+    target = target_for_window(refresh_window, days=days)
+    return StdioRefreshState(
+        db_path=db_path,
+        jsonl_glob=jsonl_glob,
+        codex_glob=codex_glob,
+        days=days,
+        resolve_projects=os.environ.get("INTROSPECT_RESOLVE_PROJECTS", "1") != "0",
+        interval_seconds=float(
+            os.environ.get("INTROSPECT_REFRESH_INTERVAL_SECONDS", "600")
+        ),
+        refresh_target=target,
+        refresh_window=target.window,
+        refresh_trigger=asyncio.Event(),
+        loading_state=LoadingState(LoadingPhase.DISCOVERING, target),
+    )
 
 
 def set_refresh_target(
@@ -332,6 +371,35 @@ class RefreshState(Protocol):
     refresh_target: RefreshTarget
     refresh_pending: bool
     loading_state: LoadingState
+    db_path: Path
+
+
+@dataclass
+class StdioRefreshState:
+    """Mutable lifecycle state owned by a standalone stdio MCP server."""
+
+    db_path: Path
+    jsonl_glob: str
+    codex_glob: str
+    days: int
+    resolve_projects: bool
+    interval_seconds: float
+    refresh_target: RefreshTarget
+    refresh_window: str
+    refresh_trigger: asyncio.Event | None
+    refresh_in_progress: bool = False
+    refresh_started_at: datetime | None = None
+    last_refreshed_at: datetime | None = None
+    last_built_days: int = 0
+    refresh_pending: bool = False
+    loading_state: LoadingState = field(
+        default_factory=lambda: LoadingState(
+            LoadingPhase.DISCOVERING, RefreshTarget(DEFAULT_WINDOW, 30)
+        )
+    )
+    database_ready: bool = False
+    database_snapshot: bool = False
+    database_label: str = "preview"
 
 
 class RefreshOutcome(Enum):
@@ -461,6 +529,133 @@ def _rebuild_sidecar(  # noqa: PLR0913
         build_search_corpus(conn)
     finally:
         conn.close()
+
+
+async def _await_sidecar_writer(task: asyncio.Task[None]) -> None:
+    """Drain non-cancellable filesystem work before lifecycle cleanup runs."""
+    try:
+        await asyncio.shield(task)
+    except asyncio.CancelledError:
+        with contextlib.suppress(BaseException):
+            await task
+        raise
+
+
+async def run_stdio_refresh(state: StdioRefreshState) -> None:
+    """Publish a preview, then reuse the normal refresh loop for authority.
+
+    This task starts only after FastMCP has entered its lifespan, allowing the
+    initialize and tools/list requests to complete without waiting for JSONL
+    discovery or materialization.  Reads remain unavailable until the preview
+    or a compatible warm snapshot has been published.
+    """
+    # Only a persistent consumer can accept manual refresh requests. The
+    # one-shot startup build keeps its event private, including while loading.
+    state.refresh_trigger = asyncio.Event() if state.interval_seconds > 0 else None
+    try:
+        await _load_stdio_data(state)
+    except asyncio.CancelledError:
+        raise
+    except Exception as exc:
+        state.refresh_pending = True
+        _set_loading(
+            cast(RefreshState, state),
+            LoadingPhase.FAILED,
+            state.refresh_target,
+            error=f"startup data loading failed: {exc}",
+        )
+        log.warning("stdio startup data loading failed", exc_info=True)
+    finally:
+        state.refresh_trigger = None
+
+
+async def _load_stdio_data(state: StdioRefreshState) -> None:
+    sidecar = state.db_path.with_name(state.db_path.name + ".next")
+    warm_snapshot = await asyncio.to_thread(
+        has_compatible_materialized_db, state.db_path
+    )
+    await asyncio.to_thread(state.db_path.parent.mkdir, parents=True, exist_ok=True)
+    if warm_snapshot:
+        state.database_ready = True
+        state.database_snapshot = True
+        state.database_label = "warm snapshot"
+        state.last_refreshed_at = datetime.now(UTC)
+        state.loading_state = LoadingState(
+            LoadingPhase.PREVIEW_READY,
+            state.refresh_target,
+            stage=LoadingStage.SEARCH,
+        )
+    else:
+        preview_days = 0 if state.days == 0 else 1
+        candidates = await asyncio.to_thread(
+            discover_cold_start_candidates,
+            state.jsonl_glob,
+            state.codex_glob,
+            days=max(1, preview_days),
+        )
+        state.loading_state = LoadingState(
+            LoadingPhase.PREVIEWING,
+            state.refresh_target,
+            stage=LoadingStage.PROVIDER,
+            candidate_count=candidates.total,
+        )
+
+        def progress(completed: int, total: int) -> None:
+            state.loading_state = LoadingState(
+                LoadingPhase.PREVIEWING,
+                state.refresh_target,
+                stage=LoadingStage.PROVIDER,
+                candidate_count=total,
+                completed_candidates=completed,
+            )
+
+        build_task = asyncio.create_task(
+            asyncio.to_thread(
+                _rebuild_sidecar,
+                sidecar,
+                state.jsonl_glob,
+                preview_days,
+                state.resolve_projects,
+                state.codex_glob,
+                jsonl_candidates=list(candidates.claude) if state.days else None,
+                codex_candidates=list(candidates.codex) if state.days else None,
+                progress=progress,
+            )
+        )
+        await _await_sidecar_writer(build_task)
+        await _await_sidecar_writer(
+            asyncio.create_task(asyncio.to_thread(_swap_in, state.db_path, sidecar))
+        )
+
+        state.database_ready = True
+        unlimited = state.days == 0
+        state.database_label = "authoritative" if unlimited else "preview"
+        state.last_built_days = preview_days
+        state.last_refreshed_at = datetime.now(UTC)
+        state.loading_state = LoadingState(
+            LoadingPhase.READY if unlimited else LoadingPhase.PREVIEW_READY,
+            state.refresh_target,
+            stage=LoadingStage.SEARCH,
+            candidate_count=0 if unlimited else candidates.total,
+            completed_candidates=0 if unlimited else candidates.total,
+        )
+
+    state.refresh_pending = state.days > 0 or warm_snapshot
+    if state.refresh_pending or state.interval_seconds > 0:
+        trigger = state.refresh_trigger or asyncio.Event()
+        app = SimpleNamespace(state=state)
+        await refresh_loop(
+            cast("FastAPI", app),
+            state.db_path,
+            state.jsonl_glob,
+            state.days,
+            state.resolve_projects,
+            state.interval_seconds,
+            trigger=trigger,
+            codex_glob=state.codex_glob,
+            initial=state.refresh_pending,
+            one_shot=state.interval_seconds <= 0,
+        )
 
 
 def _swap_in(db_path: Path, sidecar: Path) -> None:
@@ -624,15 +819,7 @@ async def _build_once(  # noqa: PLR0913
         )
     )
     try:
-        try:
-            await asyncio.shield(build_task)
-        except asyncio.CancelledError:
-            # Cancellation must not leave a worker writing the sidecar after
-            # shutdown has removed it. Wait for the non-cancellable thread,
-            # then let cancellation proceed.
-            with contextlib.suppress(BaseException):
-                await build_task
-            raise
+        await _await_sidecar_writer(build_task)
 
         # A picker change while the sidecar was being built makes it stale.
         # Never publish a result for an obsolete generation.
@@ -645,7 +832,9 @@ async def _build_once(  # noqa: PLR0913
             return False
 
         report_stage(LoadingStage.SWAP)
-        await asyncio.to_thread(_swap_in, db_path, sidecar)
+        await _await_sidecar_writer(
+            asyncio.create_task(asyncio.to_thread(_swap_in, db_path, sidecar))
+        )
         state.database_snapshot = False
         state.database_label = "authoritative"
         # Record the post-swap window first so a freak exception on the
@@ -692,7 +881,7 @@ async def refresh_loop(  # noqa: PLR0913
     Codex sessions trigger a rebuild too.
     """
     sidecar = db_path.with_name(db_path.name + ".next")
-    last_mtime = newest_mtime(jsonl_glob, codex_glob)
+    last_mtime = await asyncio.to_thread(newest_mtime, jsonl_glob, codex_glob)
     first_run = initial
     try:
         while True:
@@ -705,7 +894,7 @@ async def refresh_loop(  # noqa: PLR0913
                     with contextlib.suppress(TimeoutError):
                         await asyncio.wait_for(trigger.wait(), timeout=interval_seconds)
                     trigger.clear()
-                current = newest_mtime(jsonl_glob, codex_glob)
+                current = await asyncio.to_thread(newest_mtime, jsonl_glob, codex_glob)
                 target = _current_target(app.state, days)
                 current_days = target.days
                 # Skip when nothing changed AND the window matches the last build.

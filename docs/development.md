@@ -125,6 +125,9 @@ project instructions as Claude Code rather than needing its own `AGENTS.md`.
 
 ## Worktrees
 
+Linked worktrees require Madoqua 0.2.3 or newer so the commit hook resolves
+Git's shared metadata directory correctly. `uv sync` installs the locked version.
+
 ```bash
 # Create ~/worktrees/introspect-<branch> from a fresh origin/main
 # (fetches, branches, copies settings, runs uv sync)

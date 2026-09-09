@@ -135,16 +135,19 @@ def _startup_preview(  # noqa: PLR0913
         completed_candidates=candidates.total,
     )
     build_search_corpus(conn)
+    unlimited = days == 0
+    phase = LoadingPhase.READY if unlimited else LoadingPhase.PREVIEW_READY
+    app.state.database_label = "authoritative" if unlimited else "preview"
     app.state.loading_state = LoadingState(
-        LoadingPhase.PREVIEW_READY,
+        phase,
         target,
         stage=LoadingStage.SEARCH,
-        candidate_count=candidates.total,
-        completed_candidates=candidates.total,
+        candidate_count=0 if unlimited else candidates.total,
+        completed_candidates=0 if unlimited else candidates.total,
     )
     app.state.last_built_days = preview_days
     app.state.last_refreshed_at = datetime.now(UTC)
-    log.info("startup phase=%s", LoadingPhase.PREVIEW_READY.value)
+    log.info("startup phase=%s", phase.value)
 
 
 @asynccontextmanager
@@ -214,6 +217,11 @@ async def lifespan(app: FastAPI):  # noqa: PLR0915
             raise
         finally:
             conn.close()
+
+    # MCP data tools use this marker to distinguish the standalone cold-start
+    # gate from the embedded web server, which has already published preview
+    # data (or a warm snapshot) before the lifespan yields.
+    app.state.database_ready = True
 
     _configure_sql_api(app)
 
