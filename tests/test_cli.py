@@ -103,9 +103,9 @@ def test_cache_ttl_recommends_5m_when_there_are_no_gaps(monkeypatch):
     """No pauses → 1h's 2x write surcharge is pure loss, and it says so."""
     sid = "77777777-7777-7777-7777-777777777777"
     lines = ttl_turn(sid, 1, TTL_T0, read=0, create=50_000)
-    for n in range(  # zorilla: ignore[ZR001] -- bounded startup retry
+    for n in range(  # zorilla: ignore[ZR001] -- bounded cache-turn fixture
         2, 6
-    ):  # zorilla: ignore[ZR001] -- bounded retry sequence exercises each startup probe
+    ):  # zorilla: ignore[ZR001] -- bounded cache-turn fixture
         lines += ttl_turn(
             sid,
             n,

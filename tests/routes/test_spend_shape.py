@@ -277,7 +277,7 @@ def test_spend_shape_sparkline_geometry():
     # Points in session A should be time-ordered (left to right: x increasing)
     # and y must be non-increasing (SVG y grows downward as cumulative grows).
     points = spark_a["points"]
-    assert points, "Session A should expose multiple sparkline points"
+    assert len(points.split()) >= 2, "Session A should expose multiple sparkline points"
     pairs = [(float(p.split(",")[0]), float(p.split(",")[1])) for p in points.split()]
     xs = [p[0] for p in pairs]
     ys = [p[1] for p in pairs]

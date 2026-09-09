@@ -813,7 +813,10 @@ def test_refresh_data_completes():
             finish.set()
             return await refresh_task
         finally:
-            await loop_task
+            finish.set()
+            loop_task.cancel()
+            refresh_task.cancel()
+            await asyncio.gather(loop_task, refresh_task, return_exceptions=True)
 
     result = asyncio.run(go())
 
@@ -861,7 +864,10 @@ def test_refresh_data_accepts_custom_target_and_reports_contract():
             finish.set()
             return await refresh_task
         finally:
-            await loop_task
+            finish.set()
+            loop_task.cancel()
+            refresh_task.cancel()
+            await asyncio.gather(loop_task, refresh_task, return_exceptions=True)
 
     result = asyncio.run(go())
 
@@ -918,7 +924,9 @@ def test_refresh_data_still_running(monkeypatch: pytest.MonkeyPatch):
             return await refresh_task
         finally:
             finish.set()
-            await loop_task
+            loop_task.cancel()
+            refresh_task.cancel()
+            await asyncio.gather(loop_task, refresh_task, return_exceptions=True)
 
     result = asyncio.run(go())
 
@@ -981,9 +989,9 @@ def test_cache_ttl_choice_recommends_5m_when_nothing_pauses():
     """No gaps → 1h's 2x write surcharge buys nothing, and it says so."""
     sid = "aaaaaaaa-0000-0000-0000-00000000ttl1".replace("ttl1", "0001")
     lines = ttl_turn(sid, 1, TTL_T0, read=0, create=40_000)
-    for n in range(  # zorilla: ignore[ZR001] -- bounded MCP failure sweep
+    for n in range(  # zorilla: ignore[ZR001] -- bounded cache-turn fixture
         2, 5
-    ):  # zorilla: ignore[ZR001] -- bounded MCP failure sweep
+    ):  # zorilla: ignore[ZR001] -- bounded cache-turn fixture
         lines += ttl_turn(
             sid,
             n,
@@ -1004,9 +1012,9 @@ def test_cache_ttl_choice_recommends_1h_when_pauses_dominate():
     """20-minute pauses over a large prefix are what a 1h TTL is for."""
     sid = "bbbbbbbb-0000-0000-0000-000000000002"
     lines = ttl_turn(sid, 1, TTL_T0, read=0, create=200_000)
-    for n in range(  # zorilla: ignore[ZR001] -- bounded MCP failure sweep
+    for n in range(  # zorilla: ignore[ZR001] -- bounded cache-turn fixture
         2, 6
-    ):  # zorilla: ignore[ZR001] -- bounded MCP failure sweep
+    ):  # zorilla: ignore[ZR001] -- bounded cache-turn fixture
         lines += ttl_turn(
             sid,
             n,
