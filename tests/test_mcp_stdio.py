@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import threading
 import types
 from pathlib import Path
 
@@ -10,7 +11,7 @@ import pytest
 
 from introspect import refresh
 from introspect.mcp import refresh_bridge
-from introspect.mcp.server import create_mcp_server
+from introspect.mcp.server import _lifespan, create_mcp_server
 from introspect.mcp.tools import recent_sessions, refresh_data
 from introspect.refresh import LoadingPhase, run_stdio_refresh
 
@@ -182,4 +183,104 @@ def test_stdio_refresh_keeps_periodic_consumer_alive(monkeypatch, tmp_path, days
         assert state.refresh_trigger is None
 
     loop: asyncio.AbstractEventLoop
+    asyncio.run(exercise())
+
+
+@pytest.fixture
+def stdio_state(tmp_path):
+    target = refresh.target_for_window("30")
+    return refresh.StdioRefreshState(
+        db_path=tmp_path / "introspect.duckdb",
+        jsonl_glob=str(tmp_path / "claude" / "*.jsonl"),
+        codex_glob=str(tmp_path / "codex" / "*.jsonl"),
+        days=30,
+        resolve_projects=False,
+        interval_seconds=0,
+        refresh_target=target,
+        refresh_window=target.window,
+        refresh_trigger=None,
+    )
+
+
+@pytest.mark.parametrize(
+    "operation",
+    [
+        "has_compatible_materialized_db",
+        "discover_cold_start_candidates",
+        "newest_mtime",
+    ],
+)
+def test_filesystem_work_does_not_block_protocol(monkeypatch, stdio_state, operation):
+    original = getattr(refresh, operation)
+    release = threading.Event()
+
+    async def exercise():
+        entered = asyncio.Event()
+        loop = asyncio.get_running_loop()
+
+        def blocked(*args, **kwargs):
+            loop.call_soon_threadsafe(entered.set)
+            assert release.wait(5), "event loop failed to release filesystem worker"
+            return original(*args, **kwargs)
+
+        monkeypatch.setattr(refresh, operation, blocked)
+        task = asyncio.create_task(run_stdio_refresh(stdio_state))
+        try:
+            await asyncio.wait_for(entered.wait(), timeout=6)
+            assert not task.done(), "protocol must run while filesystem work is blocked"
+            tools = await asyncio.wait_for(create_mcp_server().list_tools(), timeout=1)
+            assert "recent_sessions" in {tool.name for tool in tools}
+        finally:
+            release.set()
+            await task
+        assert stdio_state.loading_state.phase is LoadingPhase.READY
+
+    asyncio.run(exercise())
+
+
+def test_preparation_failure_is_terminal(stdio_state):
+    stdio_state.db_path.parent.joinpath("blocked").write_text("synthetic")
+    stdio_state.db_path = stdio_state.db_path.parent / "blocked" / "data.duckdb"
+    asyncio.run(run_stdio_refresh(stdio_state))
+    refresh_bridge.set_state(stdio_state)
+    try:
+        response = recent_sessions()
+    finally:
+        refresh_bridge.set_state(None)
+    assert stdio_state.loading_state.phase is LoadingPhase.FAILED
+    assert "Data unavailable" in response
+    assert "startup data loading failed" in response
+    assert "blocked" in response
+
+
+def test_shutdown_drains_preview_before_removing_sidecar(monkeypatch, stdio_state):
+    release = threading.Event()
+    sidecar = stdio_state.db_path.with_name(stdio_state.db_path.name + ".next")
+    monkeypatch.setattr(
+        "introspect.mcp.server.make_stdio_refresh_state", lambda: stdio_state
+    )
+
+    async def exercise():
+        entered = asyncio.Event()
+        loop = asyncio.get_running_loop()
+
+        def build(*args, **kwargs):
+            loop.call_soon_threadsafe(entered.set)
+            assert release.wait(5), "test did not release preview worker"
+            sidecar.write_text("synthetic sidecar")
+
+        monkeypatch.setattr(refresh, "_rebuild_sidecar", build)
+        lifecycle = _lifespan(create_mcp_server())
+        await lifecycle.__aenter__()
+        await asyncio.wait_for(entered.wait(), timeout=5)
+        shutdown = asyncio.create_task(lifecycle.__aexit__(None, None, None))
+        try:
+            with pytest.raises(TimeoutError):
+                await asyncio.wait_for(asyncio.shield(shutdown), timeout=0.05)
+        finally:
+            release.set()
+            await shutdown
+        assert not sidecar.exists()
+        assert refresh_bridge.get_state() is None
+
     asyncio.run(exercise())

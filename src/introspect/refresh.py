@@ -531,6 +531,16 @@ def _rebuild_sidecar(  # noqa: PLR0913
         conn.close()
 
 
+async def _await_sidecar_writer(task: asyncio.Task[None]) -> None:
+    """Drain non-cancellable filesystem work before lifecycle cleanup runs."""
+    try:
+        await asyncio.shield(task)
+    except asyncio.CancelledError:
+        with contextlib.suppress(BaseException):
+            await task
+        raise
+
+
 async def run_stdio_refresh(state: StdioRefreshState) -> None:
     """Publish a preview, then reuse the normal refresh loop for authority.
 
@@ -544,14 +554,27 @@ async def run_stdio_refresh(state: StdioRefreshState) -> None:
     state.refresh_trigger = asyncio.Event() if state.interval_seconds > 0 else None
     try:
         await _load_stdio_data(state)
+    except asyncio.CancelledError:
+        raise
+    except Exception as exc:
+        state.refresh_pending = True
+        _set_loading(
+            cast(RefreshState, state),
+            LoadingPhase.FAILED,
+            state.refresh_target,
+            error=f"startup data loading failed: {exc}",
+        )
+        log.warning("stdio startup data loading failed", exc_info=True)
     finally:
         state.refresh_trigger = None
 
 
 async def _load_stdio_data(state: StdioRefreshState) -> None:
     sidecar = state.db_path.with_name(state.db_path.name + ".next")
-    warm_snapshot = has_compatible_materialized_db(state.db_path)
-    state.db_path.parent.mkdir(parents=True, exist_ok=True)
+    warm_snapshot = await asyncio.to_thread(
+        has_compatible_materialized_db, state.db_path
+    )
+    await asyncio.to_thread(state.db_path.parent.mkdir, parents=True, exist_ok=True)
     if warm_snapshot:
         state.database_ready = True
         state.database_snapshot = True
@@ -564,7 +587,8 @@ async def _load_stdio_data(state: StdioRefreshState) -> None:
         )
     else:
         preview_days = 0 if state.days == 0 else 1
-        candidates = discover_cold_start_candidates(
+        candidates = await asyncio.to_thread(
+            discover_cold_start_candidates,
             state.jsonl_glob,
             state.codex_glob,
             days=max(1, preview_days),
@@ -585,8 +609,8 @@ async def _load_stdio_data(state: StdioRefreshState) -> None:
                 completed_candidates=completed,
             )
 
-        try:
-            await asyncio.to_thread(
+        build_task = asyncio.create_task(
+            asyncio.to_thread(
                 _rebuild_sidecar,
                 sidecar,
                 state.jsonl_glob,
@@ -597,19 +621,11 @@ async def _load_stdio_data(state: StdioRefreshState) -> None:
                 codex_candidates=list(candidates.codex) if state.days else None,
                 progress=progress,
             )
-            await asyncio.to_thread(_swap_in, state.db_path, sidecar)
-        except asyncio.CancelledError:
-            raise
-        except Exception as exc:
-            state.refresh_pending = True
-            _set_loading(
-                cast(RefreshState, state),
-                LoadingPhase.FAILED,
-                state.refresh_target,
-                error=f"startup preview failed: {exc}",
-            )
-            log.warning("stdio startup preview failed", exc_info=True)
-            return
+        )
+        await _await_sidecar_writer(build_task)
+        await _await_sidecar_writer(
+            asyncio.create_task(asyncio.to_thread(_swap_in, state.db_path, sidecar))
+        )
 
         state.database_ready = True
         unlimited = state.days == 0
@@ -803,15 +819,7 @@ async def _build_once(  # noqa: PLR0913
         )
     )
     try:
-        try:
-            await asyncio.shield(build_task)
-        except asyncio.CancelledError:
-            # Cancellation must not leave a worker writing the sidecar after
-            # shutdown has removed it. Wait for the non-cancellable thread,
-            # then let cancellation proceed.
-            with contextlib.suppress(BaseException):
-                await build_task
-            raise
+        await _await_sidecar_writer(build_task)
 
         # A picker change while the sidecar was being built makes it stale.
         # Never publish a result for an obsolete generation.
@@ -824,7 +832,9 @@ async def _build_once(  # noqa: PLR0913
             return False
 
         report_stage(LoadingStage.SWAP)
-        await asyncio.to_thread(_swap_in, db_path, sidecar)
+        await _await_sidecar_writer(
+            asyncio.create_task(asyncio.to_thread(_swap_in, db_path, sidecar))
+        )
         state.database_snapshot = False
         state.database_label = "authoritative"
         # Record the post-swap window first so a freak exception on the
@@ -871,7 +881,7 @@ async def refresh_loop(  # noqa: PLR0913
     Codex sessions trigger a rebuild too.
     """
     sidecar = db_path.with_name(db_path.name + ".next")
-    last_mtime = newest_mtime(jsonl_glob, codex_glob)
+    last_mtime = await asyncio.to_thread(newest_mtime, jsonl_glob, codex_glob)
     first_run = initial
     try:
         while True:
@@ -884,7 +894,7 @@ async def refresh_loop(  # noqa: PLR0913
                     with contextlib.suppress(TimeoutError):
                         await asyncio.wait_for(trigger.wait(), timeout=interval_seconds)
                     trigger.clear()
-                current = newest_mtime(jsonl_glob, codex_glob)
+                current = await asyncio.to_thread(newest_mtime, jsonl_glob, codex_glob)
                 target = _current_target(app.state, days)
                 current_days = target.days
                 # Skip when nothing changed AND the window matches the last build.

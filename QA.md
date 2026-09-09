@@ -7,7 +7,7 @@ uv run python scripts/qa_mcp_startup.py
 ```
 
 The script spawns real `introspy mcp` stdio processes for cold startup, warm
-startup, terminal startup failure, unlimited history (`INTROSPECT_DAYS=0`),
+startup, terminal startup and directory-preparation failures, unlimited history (`INTROSPECT_DAYS=0`),
 and a larger synthetic transcript containing 10,000 messages. It performs
 `initialize`, `tools/list`, `recent_sessions`, and `refresh_data` calls, then
 prints measured timings and observed results as JSON. Handshake and discovery

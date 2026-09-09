@@ -100,11 +100,13 @@ async def _lifespan(_server: FastMCP):
         yield
     finally:
         refresh_task.cancel()
-        with contextlib.suppress(asyncio.CancelledError):
-            await refresh_task
-        with contextlib.suppress(FileNotFoundError):
-            state.db_path.with_name(state.db_path.name + ".next").unlink()
-        set_state(None)
+        try:
+            with contextlib.suppress(asyncio.CancelledError):
+                await refresh_task
+        finally:
+            set_state(None)
+            with contextlib.suppress(FileNotFoundError):
+                state.db_path.with_name(state.db_path.name + ".next").unlink()
 
 
 def create_mcp_server(bind_host: str = "") -> FastMCP:

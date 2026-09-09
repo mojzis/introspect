@@ -154,16 +154,14 @@ async def _run_once(
                 }
 
 
-async def _run_failed_startup(root: Path, jsonl_glob: str) -> dict[str, object]:
+async def _run_failed_startup(db_path: Path, jsonl_glob: str) -> dict[str, object]:
     """Exercise the terminal cold-start failure contract over real stdio."""
-    db_path = root / "failed.duckdb"
-    db_path.mkdir()
     env = os.environ.copy()
     env.update(
         {
             "INTROSPECT_DB_PATH": str(db_path),
             "INTROSPECT_JSONL_GLOB": jsonl_glob,
-            "INTROSPECT_CODEX_GLOB": str(root / "codex" / "**" / "*.jsonl"),
+            "INTROSPECT_CODEX_GLOB": str(db_path.parent / "codex" / "**" / "*.jsonl"),
             "INTROSPECT_DAYS": "30",
             "INTROSPECT_REFRESH_INTERVAL_SECONDS": "0",
             "INTROSPECT_VERSION_CHECK": "off",
@@ -192,9 +190,10 @@ async def _run_failed_startup(root: Path, jsonl_glob: str) -> dict[str, object]:
                 return {
                     "tool_count": len(listed.tools),
                     "data_unavailable": "Data unavailable" in data_text,
-                    "data_error_detail": "startup preview failed" in data_text,
+                    "data_error_detail": "startup data loading failed" in data_text,
                     "refresh_unavailable": "Data unavailable" in refresh_text,
-                    "refresh_error_detail": "startup preview failed" in refresh_text,
+                    "refresh_error_detail": "startup data loading failed"
+                    in refresh_text,
                 }
 
 
@@ -249,7 +248,14 @@ async def main() -> None:
         jsonl_glob = _write_fixture(root)
         cold = await _run_once(root, jsonl_glob)
         warm = await _run_once(root, jsonl_glob)
-        failure = await _run_failed_startup(root, jsonl_glob)
+        failed_db = root / "failed.duckdb"
+        failed_db.mkdir()
+        failure = await _run_failed_startup(failed_db, jsonl_glob)
+        blocked_parent = root / "blocked-parent"
+        blocked_parent.write_text("synthetic non-directory")
+        early_failure = await _run_failed_startup(
+            blocked_parent / "introspect.duckdb", jsonl_glob
+        )
         unlimited_root = root / "unlimited"
         unlimited_root.mkdir()
         unlimited = await _run_once(unlimited_root, jsonl_glob, days=0)
@@ -259,6 +265,7 @@ async def main() -> None:
         report = {
             "cold": cold,
             "failure": failure,
+            "early_failure": early_failure,
             "warm": warm,
             "unlimited": unlimited,
             "bulk_10000_messages": bulk,
@@ -267,6 +274,7 @@ async def main() -> None:
         _require_lifecycle(cold, warm=False)
         _require_lifecycle(warm, warm=True)
         _require_failed_startup(failure)
+        _require_failed_startup(early_failure)
         _require_lifecycle(unlimited, warm=False, unlimited=True)
         _require_lifecycle(bulk, warm=False)
 
