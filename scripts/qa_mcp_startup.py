@@ -142,6 +142,50 @@ async def _run_once(root: Path, jsonl_glob: str) -> dict[str, object]:
                 }
 
 
+async def _run_failed_startup(root: Path, jsonl_glob: str) -> dict[str, object]:
+    """Exercise the terminal cold-start failure contract over real stdio."""
+    db_path = root / "failed.duckdb"
+    db_path.mkdir()
+    env = os.environ.copy()
+    env.update(
+        {
+            "INTROSPECT_DB_PATH": str(db_path),
+            "INTROSPECT_JSONL_GLOB": jsonl_glob,
+            "INTROSPECT_CODEX_GLOB": str(root / "codex" / "**" / "*.jsonl"),
+            "INTROSPECT_DAYS": "30",
+            "INTROSPECT_REFRESH_INTERVAL_SECONDS": "0",
+            "INTROSPECT_VERSION_CHECK": "off",
+        }
+    )
+    params = StdioServerParameters(
+        command=sys.executable,
+        args=["-m", "introspect.cli", "mcp"],
+        env=env,
+    )
+    with Path(os.devnull).open("w") as errlog:
+        async with stdio_client(params, errlog=errlog) as (read_stream, write_stream):
+            async with ClientSession(read_stream, write_stream) as session:
+                await session.initialize()
+                listed = await session.list_tools()
+                deadline = time.perf_counter() + 10
+                data_text = ""
+                while "Data unavailable" not in data_text:
+                    result = await session.call_tool("recent_sessions", {"n": 20})
+                    data_text = _result_text(result)
+                    if time.perf_counter() >= deadline:
+                        break
+                    await asyncio.sleep(0.05)
+                refresh_result = await session.call_tool("refresh_data", {})
+                refresh_text = _result_text(refresh_result)
+                return {
+                    "tool_count": len(listed.tools),
+                    "data_unavailable": "Data unavailable" in data_text,
+                    "data_error_detail": "startup preview failed" in data_text,
+                    "refresh_unavailable": "Data unavailable" in refresh_text,
+                    "refresh_error_detail": "startup preview failed" in refresh_text,
+                }
+
+
 def _require_lifecycle(results: dict[str, object], *, warm: bool) -> None:
     """Fail the consumer route when a claimed lifecycle state was not seen."""
     label = "warm" if warm else "cold"
@@ -163,16 +207,34 @@ def _require_lifecycle(results: dict[str, object], *, warm: bool) -> None:
         )
 
 
+def _require_failed_startup(results: dict[str, object]) -> None:
+    """Fail the consumer route when terminal failure is hidden or retryable."""
+    required = {
+        "tools_list": bool(results["tool_count"]),
+        "data unavailable": results["data_unavailable"],
+        "data error detail": results["data_error_detail"],
+        "refresh unavailable": results["refresh_unavailable"],
+        "refresh error detail": results["refresh_error_detail"],
+    }
+    missing = [name for name, present in required.items() if not present]
+    if missing:
+        raise RuntimeError(  # noqa: TRY003
+            f"failed-startup contract missing: {', '.join(missing)}"
+        )
+
+
 async def main() -> None:
     with tempfile.TemporaryDirectory(prefix="introspect-mcp-qa-") as directory:
         root = Path(directory)
         jsonl_glob = _write_fixture(root)
         cold = await _run_once(root, jsonl_glob)
         warm = await _run_once(root, jsonl_glob)
-        report = {"cold": cold, "warm": warm}
+        failure = await _run_failed_startup(root, jsonl_glob)
+        report = {"cold": cold, "failure": failure, "warm": warm}
         sys.stdout.write(json.dumps(report, sort_keys=True) + "\n")
         _require_lifecycle(cold, warm=False)
         _require_lifecycle(warm, warm=True)
+        _require_failed_startup(failure)
 
 
 if __name__ == "__main__":
