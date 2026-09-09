@@ -9,7 +9,7 @@ from pathlib import Path
 from introspect import refresh
 from introspect.mcp import refresh_bridge
 from introspect.mcp.server import create_mcp_server
-from introspect.mcp.tools import recent_sessions
+from introspect.mcp.tools import recent_sessions, refresh_data
 from introspect.refresh import LoadingPhase, run_stdio_refresh
 
 
@@ -80,3 +80,45 @@ def test_stdio_refresh_publishes_preview_then_authority(monkeypatch, tmp_path: P
     assert calls == [1, 30]
     assert state.database_ready is True
     assert state.loading_state.phase is LoadingPhase.READY
+
+
+def test_stdio_preview_failure_is_terminal_and_preserves_error(
+    monkeypatch, tmp_path: Path
+):
+    state = refresh.StdioRefreshState(
+        db_path=tmp_path / "introspect.duckdb",
+        jsonl_glob=str(tmp_path / "**" / "*.jsonl"),
+        codex_glob=str(tmp_path / "codex" / "**" / "*.jsonl"),
+        days=30,
+        resolve_projects=False,
+        interval_seconds=0,
+        refresh_target=refresh.target_for_window("30"),
+        refresh_window="30",
+        refresh_trigger=asyncio.Event(),
+    )
+    monkeypatch.setattr(refresh, "has_compatible_materialized_db", lambda _: False)
+    monkeypatch.setattr(
+        refresh,
+        "discover_cold_start_candidates",
+        lambda *args, **kwargs: refresh.CandidateFiles(("preview.jsonl",), ()),
+    )
+
+    def fail(*args, **kwargs):
+        raise RuntimeError("synthetic preview failure")  # noqa: TRY003
+
+    monkeypatch.setattr(refresh, "_rebuild_sidecar", fail)
+    asyncio.run(refresh.run_stdio_refresh(state))
+
+    refresh_bridge.set_state(state)
+    try:
+        result = recent_sessions()
+        refresh_result = asyncio.run(refresh_data())
+    finally:
+        refresh_bridge.set_state(None)
+
+    assert "Data unavailable" in result
+    assert "synthetic preview failure" in result
+    assert "restart" in result
+    assert "Data unavailable" in refresh_result
+    assert "no database snapshot" in refresh_result.lower()
+    assert "synthetic preview failure" in refresh_result

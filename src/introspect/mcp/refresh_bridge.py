@@ -37,6 +37,16 @@ class DataNotReadyError(RuntimeError):
         progress = (
             f"; candidates={completed}/{candidate_count}" if candidate_count else ""
         )
+        error = getattr(loading, "error", None)
+        if phase == "failed":
+            detail = f" Error: {error}" if error else ""
+            super().__init__(
+                "Data unavailable: startup data loading failed."
+                f"{detail} No database snapshot is available; restart the "
+                "standalone MCP server after correcting the configuration. "
+                f"(phase={phase}; target={window} ({days} days){progress})"
+            )
+            return
         super().__init__(
             "Data loading: no preview is ready yet "
             f"(phase={phase}; target={window} ({days} days){progress}). "

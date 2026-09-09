@@ -761,6 +761,18 @@ async def refresh_data(window: str | None = None) -> str:  # noqa: PLR0911
             "Start `introspect serve` to enable refresh."
         )
 
+    loading = getattr(state, "loading_state", None)
+    phase = getattr(getattr(loading, "phase", None), "value", None)
+    if phase == "failed" and not getattr(state, "database_ready", True):
+        error = getattr(loading, "error", None)
+        detail = f" Error: {error}" if error else ""
+        contract = _refresh_contract(state, loading)
+        return (
+            "Data unavailable: startup data loading failed."
+            f"{detail} No database snapshot is available; restart the "
+            f"standalone MCP server after correcting the configuration. [{contract}]"
+        )
+
     if window is not None and not is_valid_refresh_target(window):
         return (
             f"Invalid refresh target {window!r}; choose 1, 7, 30, month, "

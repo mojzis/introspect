@@ -113,6 +113,8 @@ async def _run_once(root: Path, jsonl_glob: str) -> dict[str, object]:
                 first_text = _result_text(first)
                 partial = "Partial data" in first_text
                 loading = "Data loading" in first_text
+                observed_loading = loading
+                observed_partial = partial
                 deadline = time.perf_counter() + 30
                 final_text = first_text
                 while (
@@ -122,15 +124,43 @@ async def _run_once(root: Path, jsonl_glob: str) -> dict[str, object]:
                     await asyncio.sleep(0.05)
                     result = await session.call_tool("recent_sessions", {"n": 20})
                     final_text = _result_text(result)
+                    observed_loading |= "Data loading" in final_text
+                    observed_partial |= "Partial data" in final_text
+                status = await session.call_tool("refresh_data", {})
+                status_text = _result_text(status)
                 return {
                     "initialize_ms": initialize_ms,
                     "tools_list_ms": list_ms,
                     "tool_count": len(listed.tools),
                     "first_call_loading": loading,
                     "first_call_partial": partial,
+                    "observed_loading": observed_loading,
+                    "observed_partial": observed_partial,
                     "final_contains_recent": "synthetic-recent" in final_text,
                     "final_contains_older": "synthetic-older" in final_text,
+                    "final_phase_ready": "phase=ready" in status_text,
                 }
+
+
+def _require_lifecycle(results: dict[str, object], *, warm: bool) -> None:
+    """Fail the consumer route when a claimed lifecycle state was not seen."""
+    label = "warm" if warm else "cold"
+    required = {
+        "tools_list": bool(results["tool_count"]),
+        "partial": results["observed_partial"],
+        "recent result": results["final_contains_recent"],
+        "authoritative result": results["final_contains_older"],
+        "ready status": results["final_phase_ready"],
+    }
+    if not warm:
+        required["cold loading or partial state"] = (
+            results["observed_loading"] or results["observed_partial"]
+        )
+    missing = [name for name, present in required.items() if not present]
+    if missing:
+        raise RuntimeError(  # noqa: TRY003
+            f"{label} lifecycle missing: {', '.join(missing)}"
+        )
 
 
 async def main() -> None:
@@ -139,9 +169,10 @@ async def main() -> None:
         jsonl_glob = _write_fixture(root)
         cold = await _run_once(root, jsonl_glob)
         warm = await _run_once(root, jsonl_glob)
-        sys.stdout.write(
-            json.dumps({"cold": cold, "warm": warm}, sort_keys=True) + "\n"
-        )
+        report = {"cold": cold, "warm": warm}
+        sys.stdout.write(json.dumps(report, sort_keys=True) + "\n")
+        _require_lifecycle(cold, warm=False)
+        _require_lifecycle(warm, warm=True)
 
 
 if __name__ == "__main__":
