@@ -46,10 +46,10 @@ human_review = false
 [scenario.codex]
 # A Codex-first example. Select it with `--scenario codex`, or uncomment
 # `default_scenario = "codex"` above once Codex is available to every operator.
-planner   = { harness = "codex", model = "gpt-5.6-terra", effort = "medium" }
+planner   = { harness = "codex", model = "gpt-5.6-sol", effort = "medium" }
 dev       = { harness = "codex", model = "gpt-5.6-luna",  effort = "high" }
 check     = { harness = "codex", model = "gpt-5.6-terra", effort = "medium" }
-review    = { harness = "codex", model = "gpt-5.6-terra", effort = "high" }
+review    = { harness = "codex", model = "gpt-5.6-sol", effort = "medium" }
 learnings = { harness = "codex", model = "gpt-5.6-terra", effort = "medium" }
 decider   = { harness = "codex", model = "gpt-5.6-terra", effort = "medium" }
 
