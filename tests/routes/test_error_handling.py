@@ -102,7 +102,9 @@ def test_htmx_error_is_a_retargeted_fragment(client, url, expected_status):
     """The real status code, an HTML fragment, and headers aiming it at #errors."""
     response = client.get(url, headers=HTMX)
 
-    assert response.status_code == expected_status
+    assert (  # zorilla: ignore[ZR004] -- error response contract
+        response.status_code == expected_status
+    )  # zorilla: ignore[ZR004] -- error response contract
     assert not _is_full_document(response.text)
     assert response.headers["HX-Retarget"] == ERROR_TARGET
     assert response.headers["HX-Reswap"] == ERROR_SWAP
@@ -221,7 +223,7 @@ def test_traceback_is_shown_only_in_debug_mode(env, traceback_visible, why):
     pre = BeautifulSoup(response.text, "html.parser").select_one(
         ".error-toast-trace pre"
     )
-    if traceback_visible:
+    if traceback_visible:  # zorilla: ignore[ZR001] -- debug visibility branch
         assert pre is not None, why
         assert "RuntimeError" in pre.get_text()
         assert CRASH_MESSAGE in response.text

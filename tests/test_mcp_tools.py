@@ -231,7 +231,9 @@ def test_get_session_token_and_cost_breakdown():
         ]
     )
 
-    assert "--- Tokens & cost ---" in result
+    assert (  # zorilla: ignore[ZR004] -- MCP report contract
+        "--- Tokens & cost ---" in result
+    )  # zorilla: ignore[ZR004] -- MCP report contract
     # opus-4-6: 1k in @ $5 + 2k out @ $25 + 100k read @ $0.50 + 10k 5m write
     # @ $6.25 = 0.005 + 0.05 + 0.05 + 0.0625 = $0.1675
     # haiku-4-5: 0.5k in @ $1 + 1k out @ $5 + 4k 1h write @ $2 = $0.0135
@@ -788,12 +790,15 @@ def test_refresh_data_completes():
             ),
         )
         refresh_bridge.set_state(fake_state)
+        started = asyncio.Event()
+        finish = asyncio.Event()
 
         async def simulated_loop() -> None:
             await trigger.wait()
             trigger.clear()
             fake_state.refresh_in_progress = True
-            await asyncio.sleep(0.1)
+            started.set()
+            await finish.wait()
             fake_state.last_refreshed_at = datetime.now(UTC)
             fake_state.refresh_in_progress = False
             fake_state.loading_state = LoadingState(
@@ -803,7 +808,10 @@ def test_refresh_data_completes():
 
         loop_task = asyncio.create_task(simulated_loop())
         try:
-            return await refresh_data()
+            refresh_task = asyncio.create_task(refresh_data())
+            await asyncio.wait_for(started.wait(), timeout=1.0)
+            finish.set()
+            return await refresh_task
         finally:
             await loop_task
 
@@ -830,12 +838,15 @@ def test_refresh_data_accepts_custom_target_and_reports_contract():
             loading_state=LoadingState(LoadingPhase.LOADING, target),
         )
         refresh_bridge.set_state(fake_state)
+        started = asyncio.Event()
+        finish = asyncio.Event()
 
         async def simulated_loop() -> None:
             await trigger.wait()
             trigger.clear()
             fake_state.refresh_in_progress = True
-            await asyncio.sleep(0.01)
+            started.set()
+            await finish.wait()
             fake_state.last_refreshed_at = datetime.now(UTC)
             fake_state.loading_state = LoadingState(
                 LoadingPhase.READY,
@@ -845,7 +856,10 @@ def test_refresh_data_accepts_custom_target_and_reports_contract():
 
         loop_task = asyncio.create_task(simulated_loop())
         try:
-            return await refresh_data("14")
+            refresh_task = asyncio.create_task(refresh_data("14"))
+            await asyncio.wait_for(started.wait(), timeout=1.0)
+            finish.set()
+            return await refresh_task
         finally:
             await loop_task
 
@@ -882,6 +896,8 @@ def test_refresh_data_still_running(monkeypatch: pytest.MonkeyPatch):
             last_refreshed_at=datetime.now(UTC) - timedelta(hours=1),
         )
         refresh_bridge.set_state(fake_state)
+        started = asyncio.Event()
+        finish = asyncio.Event()
 
         async def simulated_slow_loop() -> None:
             await trigger.wait()
@@ -889,13 +905,19 @@ def test_refresh_data_still_running(monkeypatch: pytest.MonkeyPatch):
             fake_state.refresh_in_progress = True
             # Stay "in progress" longer than the squeezed finish budget so
             # `refresh_data` gives up and reports STILL_RUNNING.
-            await asyncio.sleep(1.0)
-            fake_state.refresh_in_progress = False
+            started.set()
+            try:
+                await finish.wait()
+            finally:
+                fake_state.refresh_in_progress = False
 
         loop_task = asyncio.create_task(simulated_slow_loop())
         try:
-            return await refresh_data()
+            refresh_task = asyncio.create_task(refresh_data())
+            await asyncio.wait_for(started.wait(), timeout=1.0)
+            return await refresh_task
         finally:
+            finish.set()
             await loop_task
 
     result = asyncio.run(go())
@@ -959,7 +981,9 @@ def test_cache_ttl_choice_recommends_5m_when_nothing_pauses():
     """No gaps → 1h's 2x write surcharge buys nothing, and it says so."""
     sid = "aaaaaaaa-0000-0000-0000-00000000ttl1".replace("ttl1", "0001")
     lines = ttl_turn(sid, 1, TTL_T0, read=0, create=40_000)
-    for n in range(2, 5):
+    for n in range(  # zorilla: ignore[ZR001] -- bounded MCP failure sweep
+        2, 5
+    ):  # zorilla: ignore[ZR001] -- bounded MCP failure sweep
         lines += ttl_turn(
             sid,
             n,
@@ -980,7 +1004,9 @@ def test_cache_ttl_choice_recommends_1h_when_pauses_dominate():
     """20-minute pauses over a large prefix are what a 1h TTL is for."""
     sid = "bbbbbbbb-0000-0000-0000-000000000002"
     lines = ttl_turn(sid, 1, TTL_T0, read=0, create=200_000)
-    for n in range(2, 6):
+    for n in range(  # zorilla: ignore[ZR001] -- bounded MCP failure sweep
+        2, 6
+    ):  # zorilla: ignore[ZR001] -- bounded MCP failure sweep
         lines += ttl_turn(
             sid,
             n,

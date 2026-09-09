@@ -106,7 +106,9 @@ def big_client(tmp_path_factory):
 def test_messages_tab_pages_server_side(big_client):
     """Only one page of blocks is rendered, with a pager and a total."""
     response = big_client.get(f"/sessions/{_BIG_SID}?tab=messages&page_size=250")
-    assert response.status_code == 200
+    assert (  # zorilla: ignore[ZR004] -- message-window contract
+        response.status_code == 200
+    )  # zorilla: ignore[ZR004] -- message-window contract
     text = response.text
     assert f"Messages ({_BLOCKS:,})" in text
     assert "showing 1\u2013250" in text  # en-dash range
@@ -121,7 +123,9 @@ def test_messages_tab_pages_server_side(big_client):
 def test_messages_tab_second_page_holds_the_tail(big_client):
     """?page=2 renders the blocks page 1 cut off, and offers Prev + Next."""
     response = big_client.get(f"/sessions/{_BIG_SID}?tab=messages&page=2&page_size=250")
-    assert response.status_code == 200
+    assert (  # zorilla: ignore[ZR004] -- message-window contract
+        response.status_code == 200
+    )  # zorilla: ignore[ZR004] -- message-window contract
     text = response.text
     assert "Page 2 of 3" in text
     assert ">Prev<" in text

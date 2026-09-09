@@ -145,7 +145,9 @@ def test_pre_0_147_sidecars(tmp_path):
     rows = transcode_rollout(path)
 
     assert rows, "expected at least one row"
-    assert all(set(r) >= {"provider", "harness", "message"} for r in rows)
+    assert all(  # zorilla: ignore[ZR004] -- provider envelope contract
+        set(r) >= {"provider", "harness", "message"} for r in rows
+    )  # zorilla: ignore[ZR004] -- provider envelope contract
     assert all(r["provider"] == "openai" and r["harness"] == "codex" for r in rows)
 
     bash_calls = _tool_uses(rows, "Bash")

@@ -179,7 +179,9 @@ def test_no_gap_session_is_cheaper_under_5m():
     """1h pays 2x on every incremental write; with no gaps that is pure loss."""
     sid = "22222222-2222-2222-2222-222222222222"
     lines = ttl_turn(sid, 1, TTL_T0, read=0, create=10_000)
-    for n in range(2, 8):
+    for n in range(  # zorilla: ignore[ZR001] -- bounded cache-gap sweep
+        2, 8
+    ):  # zorilla: ignore[ZR001] -- bounded cache-gap sweep
         lines += ttl_turn(
             sid,
             n,
@@ -273,7 +275,9 @@ def test_tool_result_triggered_break_is_detected():
 def test_uniform_ttl_session_simulates_to_its_observed_bill(ttl):
     sid = f"44444444-4444-4444-4444-4444444444{'55' if ttl == '5m' else '11'}"
     lines = ttl_turn(sid, 1, TTL_T0, read=0, create=10_000, ttl=ttl)
-    for n in range(2, 6):
+    for n in range(  # zorilla: ignore[ZR001] -- bounded cache-gap sweep
+        2, 6
+    ):  # zorilla: ignore[ZR001] -- bounded cache-gap sweep
         lines += ttl_turn(
             sid,
             n,
@@ -352,7 +356,9 @@ def test_session_cache_ttl_rollup_matches_the_python_verdict(mixed_gaps):
         " FROM session_cache_ttl WHERE NOT is_sidechain"
     ).fetchone()
     verdict = global_ttl_comparison(conn)
-    assert row[0] == verdict.n_requests
+    assert (  # zorilla: ignore[ZR004] -- cache-TTL rollup contract
+        row[0] == verdict.n_requests
+    )  # zorilla: ignore[ZR004] -- cache-TTL rollup contract
     assert row[1] == verdict.n_gaps_recoverable
     assert row[2] == verdict.n_gaps_unrecoverable
     assert row[3] == verdict.n_structural

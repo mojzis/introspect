@@ -126,6 +126,9 @@ allowed_prefixes = [
     "http://127.0.0.1", "https://evil.example",
 ]
 
+[tool.zorilla.rules.ZR004]
+max_asserts = 6
+
 [tool.vulture]
 paths = ["src"]
 min_confidence = 80

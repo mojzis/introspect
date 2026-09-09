@@ -93,17 +93,37 @@ and gerenuk diffs the *working tree* against `origin/main` (not `HEAD`, not the
 index), so unstaged edits count and a branch that touched `pyproject.toml`
 runs the full suite on every commit until it is pushed.
 
-Known baseline the hook will enforce on the next commit touching these files:
-`zorilla check .` still reports 163 findings (ZR004 assertion-roulette 78,
-ZR001 conditional-test-logic 41, ZR002 sleep-in-test 18, ZR005 25, ZR003 1)
-across 31 test files — fix the smells in a file before or while editing it.
-The residual ZR005 hits are `"/"` in `tests/e2e/test_crawl.py` /
-`tests/e2e/test_flows.py`, the fake `/a.py`-style paths in
-`tests/routes/test_trajectory.py`, `/a` `/b` `/c` in `tests/test_projects.py`,
-and `/clear` in `tests/routes/test_cost_overview.py`; every other synthetic
-route/path family is allowed via `[tool.zorilla.rules.ZR005] allowed_prefixes`.
-Never disable a rule. biston finds no clone pairs at the configured 0.75
-threshold; `ty check` is clean repo-wide.
+Zorilla disposition (verified 2026-09-09): the pre-change scan reported 163
+findings across 49 scanned test files (ZR004 78, ZR001 41, ZR002 18, ZR005
+25, ZR003 1). The repaired scan reports 0 findings across the same 49 files;
+`uv run zorilla stats .` reports 49 clean files and zero for ZR001–ZR008.
+`ZR004.max_asserts = 6` is the only threshold tuning. Remaining deliberate
+cases use narrow same-line, code-specific reasons for coherent response and
+schema contracts, cleanup/polling, security corpus branching, and verified
+synthetic literals. Fake filesystem rows use `/repo/`; real root routes and
+the `/clear` command remain explicit test inputs. No rule or file is disabled,
+and no broad `/` prefix or blanket ignore is allowed.
+
+The tracked hook is exercised by `uv run madoqua install` and delegates staged
+Python files to ruff, ty, biston, Zorilla, and Gerenuk. `uv run poe check`
+runs repo-wide Zorilla before the tests; `check-all` does not include Zorilla,
+so a green `check-all` or CI job must not be read as Zorilla coverage. Zorilla
+is also available directly with `uv run zorilla check .` and
+`uv run zorilla stats .`.
+
+The test repairs cover deterministic multi-point sparkline output, a cache-write
+fixture with a required contributor anchor, observed no-stop cleanup, a query
+execution-entry signal plus SQL timeout and UI latency bounds, and refresh
+mtime/rebuild/MCP completion events with bounded waits. Focused pytest and
+controlled negative probes use disposable synthetic fixtures only; they do not
+exercise real logs, a home database, cloud services, or private data. Functional
+QA for standalone MCP startup remains the disposable script in `QA.md`:
+`uv run python scripts/qa_mcp_startup.py` (five-second discovery, two-minute
+overall bound). That QA covers the app startup path; the focused tests and
+negative probes establish the repaired evidence contracts.
+
+biston finds no clone pairs at the configured 0.75 threshold; `ty check` is
+clean repo-wide.
 
 ### On demand
 

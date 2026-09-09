@@ -348,13 +348,16 @@ def test_session_context_loads():
         ).fetchall()
         by_kind = {r[0]: (r[1], r[2]) for r in rows}
 
-        assert set(by_kind) == {
-            "claude_md",
-            "file_ref",
-            "skill_listing",
-            "mcp",
-            "hook",
-        }
+        assert (  # zorilla: ignore[ZR004] -- relation schema contract
+            set(by_kind)
+            == {  # zorilla: ignore[ZR004] -- relation schema contract
+                "claude_md",
+                "file_ref",
+                "skill_listing",
+                "mcp",
+                "hook",
+            }
+        )
         # Noise subtype dropped entirely.
         assert "other" not in by_kind
         # name resolves per subtype; char_len from content length.
@@ -461,7 +464,11 @@ def test_materialize_views_drops_existing_views():
         conn = duckdb.connect(str(db_path))
 
         # Simulate a previous lazy-view session leaving views behind
-        for name in ("session_titles", "raw_messages", "raw_data"):
+        for name in (  # zorilla: ignore[ZR001] -- read-only schema sweep
+            "session_titles",
+            "raw_messages",
+            "raw_data",
+        ):  # zorilla: ignore[ZR001] -- read-only schema sweep
             conn.execute(f"CREATE VIEW {name} AS SELECT 1 AS x")
 
         # This must not raise CatalogException
@@ -588,7 +595,7 @@ def test_connect_writable_detects_real_cross_process_lock():
             assert exc_info.value.db_path == db_path
         finally:
             holder.terminate()
-            try:
+            try:  # zorilla: ignore[ZR001] -- connection cleanup branch
                 holder.wait(timeout=5)
             except subprocess.TimeoutExpired:
                 holder.kill()

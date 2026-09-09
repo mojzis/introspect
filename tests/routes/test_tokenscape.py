@@ -44,9 +44,12 @@ def test_tokenscape_classify_block():
     from introspect.api.handlers.tokenscape import _classify_block  # noqa: PLC0415
 
     edited = {"/tmp/edited.py"}
-    assert _classify_block("human_prompt", None, None, "fix the bug", edited) == (
-        "prompt",
-        "prompt",
+    assert (  # zorilla: ignore[ZR004] -- token classification matrix
+        _classify_block("human_prompt", None, None, "fix the bug", edited)
+        == (  # zorilla: ignore[ZR004] -- token classification matrix
+            "prompt",
+            "prompt",
+        )
     )
     assert _classify_block(
         "human_prompt",
