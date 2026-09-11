@@ -17,6 +17,9 @@ from introspect import refresh
 from introspect.db import materialize_views
 from introspect.refresh import (
     LoadingPhase,
+    LoadingStage,
+    RefreshState,
+    RefreshTarget,
     discover_cold_start_candidates,
     newest_mtime,
     refresh_loop,
@@ -77,6 +80,46 @@ def _fake_app() -> types.SimpleNamespace:
             last_built_days=0,
         )
     )
+
+
+def _instrument_refresh_lifecycle(
+    monkeypatch: pytest.MonkeyPatch,
+) -> tuple[threading.Event, threading.Event]:
+    mtime_checked = threading.Event()
+    refresh_ready = threading.Event()
+    original_mtime = refresh.newest_mtime
+    original_set_loading = refresh._set_loading
+
+    def observe_mtime(jsonl_glob: str, codex_glob: str | None = None) -> float:
+        result = original_mtime(jsonl_glob, codex_glob)
+        mtime_checked.set()
+        return result
+
+    def observe_set_loading(
+        state: RefreshState,
+        phase: LoadingPhase,
+        target: RefreshTarget,
+        *,
+        stage: LoadingStage | None = None,
+        candidate_count: int = 0,
+        completed_candidates: int = 0,
+        error: str | None = None,
+    ) -> None:
+        original_set_loading(
+            state,
+            phase,
+            target,
+            stage=stage,
+            candidate_count=candidate_count,
+            completed_candidates=completed_candidates,
+            error=error,
+        )
+        if state.loading_state.phase is LoadingPhase.READY:
+            refresh_ready.set()
+
+    monkeypatch.setattr(refresh, "newest_mtime", observe_mtime)
+    monkeypatch.setattr(refresh, "_set_loading", observe_set_loading)
+    return mtime_checked, refresh_ready
 
 
 def test_newest_mtime_empty_glob(tmp_path: Path) -> None:
@@ -270,24 +313,7 @@ def test_refresh_rebuilds_and_swaps_on_change(
     _build_initial_db(db_path, jsonl_glob)
 
     app = _fake_app()
-    mtime_checked = threading.Event()
-    refresh_ready = threading.Event()
-    original_mtime = refresh.newest_mtime
-    original_set_loading = refresh._set_loading
-
-    def observe_mtime(*args, **kwargs):
-        result = original_mtime(*args, **kwargs)
-        mtime_checked.set()
-        return result
-
-    def observe_set_loading(*args, **kwargs):
-        result = original_set_loading(*args, **kwargs)
-        if args[0].loading_state.phase is LoadingPhase.READY:
-            refresh_ready.set()
-        return result
-
-    monkeypatch.setattr(refresh, "newest_mtime", observe_mtime)
-    monkeypatch.setattr(refresh, "_set_loading", observe_set_loading)
+    mtime_checked, refresh_ready = _instrument_refresh_lifecycle(monkeypatch)
 
     async def run() -> None:
         task = asyncio.create_task(
@@ -426,24 +452,7 @@ def test_refresh_wakes_on_trigger(
 
     app = _fake_app()
     trigger = asyncio.Event()
-    mtime_checked = threading.Event()
-    refresh_ready = threading.Event()
-    original_mtime = refresh.newest_mtime
-    original_set_loading = refresh._set_loading
-
-    def observe_mtime(*args, **kwargs):
-        result = original_mtime(*args, **kwargs)
-        mtime_checked.set()
-        return result
-
-    def observe_set_loading(*args, **kwargs):
-        result = original_set_loading(*args, **kwargs)
-        if args[0].loading_state.phase is LoadingPhase.READY:
-            refresh_ready.set()
-        return result
-
-    monkeypatch.setattr(refresh, "newest_mtime", observe_mtime)
-    monkeypatch.setattr(refresh, "_set_loading", observe_set_loading)
+    mtime_checked, refresh_ready = _instrument_refresh_lifecycle(monkeypatch)
 
     async def run() -> None:
         task = asyncio.create_task(
@@ -502,24 +511,7 @@ def test_last_refreshed_at_updates_after_swap(
     app = _fake_app()
     before = datetime.now(UTC)
     app.state.last_refreshed_at = before
-    mtime_checked = threading.Event()
-    refresh_ready = threading.Event()
-    original_mtime = refresh.newest_mtime
-    original_set_loading = refresh._set_loading
-
-    def observe_mtime(*args, **kwargs):
-        result = original_mtime(*args, **kwargs)
-        mtime_checked.set()
-        return result
-
-    def observe_set_loading(*args, **kwargs):
-        result = original_set_loading(*args, **kwargs)
-        if args[0].loading_state.phase is LoadingPhase.READY:
-            refresh_ready.set()
-        return result
-
-    monkeypatch.setattr(refresh, "newest_mtime", observe_mtime)
-    monkeypatch.setattr(refresh, "_set_loading", observe_set_loading)
+    mtime_checked, refresh_ready = _instrument_refresh_lifecycle(monkeypatch)
 
     async def run() -> None:
         task = asyncio.create_task(
