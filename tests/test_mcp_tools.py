@@ -811,7 +811,7 @@ def test_refresh_data_completes():
             refresh_task = asyncio.create_task(refresh_data())
             await asyncio.wait_for(started.wait(), timeout=1.0)
             finish.set()
-            return await refresh_task
+            return await asyncio.wait_for(refresh_task, timeout=1.0)
         finally:
             finish.set()
             loop_task.cancel()
@@ -862,7 +862,7 @@ def test_refresh_data_accepts_custom_target_and_reports_contract():
             refresh_task = asyncio.create_task(refresh_data("14"))
             await asyncio.wait_for(started.wait(), timeout=1.0)
             finish.set()
-            return await refresh_task
+            return await asyncio.wait_for(refresh_task, timeout=1.0)
         finally:
             finish.set()
             loop_task.cancel()
@@ -921,7 +921,7 @@ def test_refresh_data_still_running(monkeypatch: pytest.MonkeyPatch):
         try:
             refresh_task = asyncio.create_task(refresh_data())
             await asyncio.wait_for(started.wait(), timeout=1.0)
-            return await refresh_task
+            return await asyncio.wait_for(refresh_task, timeout=1.0)
         finally:
             finish.set()
             loop_task.cancel()

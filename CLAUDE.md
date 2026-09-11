@@ -91,7 +91,8 @@ Differences from the hook this replaced: `ty check` is now staged-files only
 (run `uv run ty check` for the repo-wide view — it is part of `poe check`),
 and gerenuk diffs the *working tree* against `origin/main` (not `HEAD`, not the
 index), so unstaged edits count and a branch that touched `pyproject.toml`
-runs the full suite on every commit until it is pushed.
+runs the full suite on every later commit that stages Python until it is
+pushed.
 
 Zorilla disposition (verified 2026-09-09): the pre-change scan reported 163
 findings across 49 scanned test files (ZR004 78, ZR001 41, ZR002 18, ZR005
@@ -169,7 +170,7 @@ uv, ruff (lint/format), ty (type check), madoqua (commit hook), tyf (code search
 ## Notes
 
 - ty is in beta — may produce false positives. Prefer `# ty: ignore[rule]` over blanket suppression.
-- Pre-commit hook auto-fixes and restages files, then gates on ruff, `ty`, `biston`, and the tests the diff impacts. See "Toolbox" above.
+- Pre-commit hook auto-fixes and restages files, then gates on ruff, `ty`, `biston`, Zorilla, and the tests the diff impacts. See "Toolbox" above.
 - All user-facing features must have tests. When adding new routes, template variables, query parameters, or UI functionality, add corresponding tests in `tests/routes/`.
 - **IMPORTANT**: After completing any task, you MUST run the `/python-review` skill to review all changes. Apply all 🔴 Must Fix and 🟡 Should Fix findings before marking work as complete.
 - **IMPORTANT**: Then run the `/docs-review` skill to check the diff against `docs/`, `README.md`, and `CLAUDE.md`. Apply all 🔴 Must Fix findings before marking work as complete.

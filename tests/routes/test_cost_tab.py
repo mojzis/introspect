@@ -321,7 +321,12 @@ def test_session_cost_top_contributor_links_to_message():
             assert "No bloat data" not in text, (
                 "fixture must produce a cache-write bucket"
             )
-            assert f'href="/sessions/{sid}?tab=messages&focus=' in text
+            link = re.search(
+                rf'href="/sessions/{re.escape(sid)}\?tab=messages&focus='
+                r'(?P<uuid>[^"#&]+)#msg-(?P=uuid)"',
+                text,
+            )
+            assert link is not None, "contributor link must focus and anchor one UUID"
 
 
 def test_session_cost_chart_serializes_uuid_columns():

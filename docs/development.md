@@ -35,12 +35,15 @@ Six CLI tools ship as dev dependencies. Each documents itself — run
 | `gerenuk` | in the hook | Which symbols the diff changed; feeds test selection |
 | `biston` | in the hook | Structural clone detection |
 | `zorilla` | in the hook + on demand | pytest test-smell lint |
+| `madoqua` | on every Python commit + on demand | Orchestrates staged-file fixes and parallel checks |
+| `pycoati` | on demand | Periodic suspicion-ranked test-suite audit |
 
 Refresh them all to their latest versions:
 
 ```bash
-uv sync --upgrade-package gerenuk --upgrade-package biston \
-  --upgrade-package zorilla --upgrade-package ty-find
+uv lock --refresh --upgrade-package madoqua --upgrade-package gerenuk \
+  --upgrade-package biston --upgrade-package zorilla \
+  --upgrade-package pycoati --upgrade-package ty-find && uv sync
 ```
 
 ## Zorilla policy and test-smell enforcement
@@ -98,9 +101,9 @@ uv run biston scan --tests-only .   # tests sit outside the configured scan set
 
 # Which tests does the current diff impact?
 # Exits 10 when the diff is too broad to narrow — that means "run everything".
-# Diffs against origin/main by default; GERENUK_BASE picks another base ref.
+# Diffs against origin/main by default; --base picks another base ref.
 uv run poe impacted-tests
-GERENUK_BASE=HEAD uv run poe impacted-tests   # just the uncommitted changes
+uv run gerenuk impacted-tests --base HEAD   # just the uncommitted changes
 uv run gerenuk audit <file.py>...   # unreferenced and test-only symbols
 
 # Test quality — direct commands remain useful for focused triage.
@@ -112,27 +115,29 @@ uv run zorilla explain ZR004
 ## Commit hook
 
 `uv run madoqua install` configures Git to use the tracked `hooks/pre-commit`
-entrypoint. It is the only hook, and it runs four stages, each reporting its
-own duration:
+entrypoint. It is the only hook. With staged `.py` or `.pyi` files, Madoqua
+runs two phases, with each step reporting its own duration:
 
 1. `ruff check --fix` + `ruff format` on staged Python, re-staged.
 2. `ruff check`, `ty check`, `biston scan --focus-args`, and `zorilla check`
-   on staged files, in parallel.
-3. `gerenuk run` executes impacted tests; a non-Python change runs the full
-   suite.
+   on staged files, plus `gerenuk run`, in parallel. Gerenuk scopes itself
+   from the whole working-tree diff; when that diff includes a non-Python
+   file, it runs the full suite.
 
-Stages 1-3 act on the staged files. Stage 4 diffs and runs the working tree,
-so a partially staged commit (`git add -p`) is tested as it stands on disk
-rather than as it will land — stash the remainder first if that matters.
+With no staged Python file, Madoqua does not run or log anything. The fixers
+and the first four checks receive only the staged Python paths. Gerenuk gets no
+file list and diffs the entire working tree, so a partially staged commit
+(`git add -p`) is tested as it stands on disk rather than as it will land —
+stash the remainder first if that matters.
 
-The hook sets `GERENUK_BASE=HEAD`, so stage 4 selects for the commit being
-made, not the whole branch: earlier commits were gated when they were made,
-and against `origin/main` a branch that once touched `pyproject.toml` would
-fall back to the full suite on every later commit. Run by hand,
-`poe impacted-tests` keeps gerenuk's own default base (`origin/main`), so it
-reports the tests the whole branch impacts.
+Gerenuk uses its default base (`origin/main`, falling back to `main` or
+`master`), not `HEAD`, in the hook and when run by hand. That means a branch
+that touched `pyproject.toml` falls back to the full suite on every later
+commit that stages Python until the branch is pushed. `poe impacted-tests`
+likewise reports the tests the whole branch impacts; pass `--base HEAD`
+directly to Gerenuk when you intentionally want only uncommitted changes.
 
-Stage 4 is conservative by construction: a change to `conftest.py`,
+Gerenuk is conservative by construction: a change to `conftest.py`,
 `pyproject.toml` or `uv.lock`, a symbol that maps to no test, or any tool
 error makes the selector exit non-zero, and the hook then runs the full
 suite. It never turns an inconclusive answer into a skipped test.

@@ -1065,21 +1065,34 @@ def test_event_loop_stays_responsive_during_a_slow_query(api_client, monkeypatch
         "SELECT count(*) FROM r"
     )
     latencies: list[float] = []
-    query_started = threading.Event()
+    query_entered = threading.Event()
+    query_release = threading.Event()
+    query_completed = threading.Event()
+    probe_observations: list[tuple[int, bool]] = []
 
     execute = query_handler.execute_bounded
 
-    def mark_query_started(*args, **kwargs):
-        query_started.set()
-        return execute(*args, **kwargs)
+    def block_query_execution(*args, **kwargs):
+        query_entered.set()
+        assert query_release.wait(timeout=1.0), (
+            "GET / did not complete while query execution was blocked"
+        )
+        try:
+            return execute(*args, **kwargs)
+        finally:
+            query_completed.set()
 
-    monkeypatch.setattr(query_handler, "execute_bounded", mark_query_started)
+    monkeypatch.setattr(query_handler, "execute_bounded", block_query_execution)
 
     def hammer() -> None:
-        assert query_started.wait(timeout=1.0), "slow query never entered execution"
+        assert query_entered.wait(timeout=1.0), "slow query never entered execution"
         started = time.monotonic()
-        api_client.get("/")
-        latencies.append(time.monotonic() - started)
+        try:
+            probe = api_client.get("/")
+            latencies.append(time.monotonic() - started)
+            probe_observations.append((probe.status_code, query_completed.is_set()))
+        finally:
+            query_release.set()
 
     prober = threading.Thread(target=hammer)
     prober.start()
@@ -1090,9 +1103,14 @@ def test_event_loop_stays_responsive_during_a_slow_query(api_client, monkeypatch
             headers={CLIENT_HEADER: "1"},
         )
     finally:
-        prober.join()
+        query_release.set()
+        prober.join(timeout=5.0)
 
     assert response.status_code == 400, "slow SQL must remain bounded by its timeout"
+    assert not prober.is_alive(), "GET / probe did not finish"
+    assert probe_observations == [(200, False)], (
+        "GET / must complete before the blocked query is released"
+    )
     assert latencies and latencies[0] < 3.0, (
         f"GET / took {latencies[0]:.2f}s while a query ran — the event loop is blocked."
     )
