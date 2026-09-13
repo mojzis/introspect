@@ -1,7 +1,7 @@
 # Pycoati 0.2.9 audit
 
 Audit date: 2026-09-13. Base: `2dc8480786a260384f1fed18903e52b06f716322`.
-Tested implementation revision: `469cf5b6bfe41b94f580efb00152f3921696f4f0`.
+Tested implementation revision: `befc22c`.
 
 ## Reproducibility
 
@@ -17,9 +17,10 @@ uv run --locked pycoati --version  # pycoati 0.2.9
 The final locked audits were run from the repository root:
 
 ```text
-RUST_LOG=debug uv run --locked pycoati . --no-accept --output /private/tmp/introspect-pycoati-debug-coverage.json
-uv run --locked pycoati . --output /private/tmp/introspect-pycoati-final-default-2.json
-uv run --locked pycoati . --include-accepted --output /private/tmp/introspect-pycoati-final-include-2.json
+uv run --locked pycoati --version
+uv run --locked pycoati . --no-accept --output /tmp/introspect-pycoati-raw.json
+uv run --locked pycoati . --output /tmp/introspect-pycoati-actionable.json
+uv run --locked pycoati . --include-accepted --output /tmp/introspect-pycoati-full.json
 uv run --locked python scripts/qa_pycoati_acceptance.py
 ```
 
@@ -28,7 +29,7 @@ collected tests, and 92.184% line coverage. The raw, default, and
 `--include-accepted` records retained the same measured counts, files, test
 records, scores, and coverage. Acceptance metadata and the expected shortlist
 membership were the only policy differences; runtime and slow-test ordering
-naturally varied (96.41s raw, 87.06s default, 103.93s include-accepted).
+naturally varied (78.93s raw, 82.15s default, 81.97s include-accepted).
 
 | Mode | Accepted | Stale | Shortlist | Result |
 |---|---:|---:|---:|---|
@@ -39,10 +40,11 @@ naturally varied (96.41s raw, 87.06s default, 103.93s include-accepted).
 The synthetic consumer printed `status: "pass"`. It verified checked
 subprocess recognition (count 1 for `check_call`, `check_output`, `run` with
 `check=True`, and `check_returncode`; count 0 for unchecked and
-`check=False` runs), propagated a failing child into pytest, and exercised one
-each of `unknown_test`, `signal_not_active`, and `content_changed`. A distinct
-mock-only signal remained actionable. The consumer uses only temporary
-synthetic projects and self-cleans them.
+`check=False` runs, a replaced subprocess name, and checked calls swallowed by
+`try`/`except` or `contextlib.suppress`), propagated a failing child into
+pytest, and exercised one each of `unknown_test`, `signal_not_active`, and
+`content_changed`. A distinct mock-only signal remained actionable. The
+consumer uses only temporary synthetic projects and self-cleans them.
 
 ## Reviewed baseline
 
