@@ -47,11 +47,4 @@ test = "tests/test_docs_drift.py::test_every_route_is_documented"
 signals = ["zero_asserts"]
 reason = "The helper calls pytest.fail for missing route documentation, so its assertion is intentionally indirect."
 reviewed = "2026-09-13"
-fingerprint = "f8986ef6f43c30d8"
-
-[[accept]]
-test = "tests/test_cli.py::test_finish_connected_session_leaves_existing_server_alone"
-signals = ["zero_asserts"]
-reason = "The no-op contract is that an existing connected server is left untouched when no spawned process exists."
-reviewed = "2026-09-13"
-fingerprint = "12d0efb3a0e1bcc4"
+fingerprint = "53cc5dff3c02a585"
