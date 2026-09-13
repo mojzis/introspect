@@ -1,7 +1,7 @@
 # Pycoati 0.2.9 audit
 
-Audit date: 2026-09-13. Base: `2dc8480786a260384f1fed18903e52b06f716322`.
-Tested implementation revision: `30376ac`.
+Audit date: 2026-09-14. Base: `559573f324fbb308a1d7eabd7c81e84e81da938b`.
+Tested implementation revision: `7a048ac4ccb95006d7d6666fdb4df89ccdca2123`.
 
 ## Reproducibility
 
@@ -25,17 +25,17 @@ uv run --locked python scripts/qa_pycoati_acceptance.py
 ```
 
 Each audit reported `tool.ran_pytest: true`, `tool.ran_coverage: true`, 1,132
-collected tests, and 92.184% line coverage. The raw, default, and
+collected tests, and 92.167% line coverage. The raw, default, and
 `--include-accepted` records retained the same measured counts, files, test
 records, scores, and coverage. Acceptance metadata and the expected shortlist
 membership were the only policy differences; runtime and slow-test ordering
-naturally varied (77.92s raw, 76.50s default, 78.74s include-accepted).
+naturally varied (100.91s raw, 86.89s default, 77.91s include-accepted).
 
 | Mode | Accepted | Stale | Shortlist | Result |
 |---|---:|---:|---:|---|
 | `--no-accept` | 0 | 0 | 20 raw findings | authoritative raw inventory |
-| default | 8 | 0 | 20 actionable findings | accepted tests filtered |
-| `--include-accepted` | 8 | 0 | 20 full findings | accepted tests restored |
+| default | 7 | 0 | 20 actionable findings | accepted tests filtered |
+| `--include-accepted` | 7 | 0 | 20 full findings | accepted tests restored |
 
 The synthetic consumer printed `status: "pass"`. It verified checked
 subprocess recognition (count 1 for `check_call`, `check_output`, `run` with
@@ -48,7 +48,7 @@ consumer uses only temporary synthetic projects and self-cleans them.
 
 ## Reviewed baseline
 
-The eight accepted findings are all `zero_asserts`, with exact nodeids,
+The seven accepted findings are all `zero_asserts`, with exact nodeids,
 current fingerprints, review date `2026-09-13`, and project-specific reasons
 in `.pycoati-accept.toml`:
 
@@ -61,12 +61,13 @@ in `.pycoati-accept.toml`:
 | `test_every_mcp_prompt_is_documented` | Missing documentation reaches `pytest.fail` through the shared helper. |
 | `test_every_query_template_is_documented` | Missing documentation reaches `pytest.fail` through the shared helper. |
 | `test_every_route_is_documented` | Missing documentation reaches `pytest.fail` through the shared helper. |
-| `test_finish_connected_session_leaves_existing_server_alone` | The intentional no-op contract is leaving an existing server untouched when no spawned process exists. |
 
 No tests were changed: the reviewed signals are intentional verification
-patterns, not confirmed gaps. The raw actionable inventory still includes
+patterns, not confirmed gaps. The integrated `main` revision added an explicit
+assertion to `test_finish_connected_session_leaves_existing_server_alone`, so
+that test no longer needs an acceptance entry. The raw actionable inventory still includes
 `tests/e2e/test_sql_hardening.py::test_fts_install_is_attempted_at_most_once_per_process`
-(`mock_overuse`, 3 stubs, 1 assertion, setup ratio 35.0) and the remaining
+(`mock_overuse`, 3 stubs, 1 assertion, setup ratio 37.0) and the remaining
 ranked candidates. It remains visible and actionable; it was not accepted to
 shorten the report.
 
@@ -74,11 +75,12 @@ shorten the report.
 
 The implementation and QA-evidence commits passed the repository hook checks:
 ruff, ty, biston, zorilla, and gerenuk. Repository tests passed with 1,131
-passed and 1 skipped in 21.56s, with 92% source coverage. The prepared
+passed and 1 skipped, with 92% source coverage. The prepared
 application smoke passed:
 
 ```text
 uv run poe test
+uv run poe check
 uv run python scripts/qa_mcp_startup.py
 uv run mkdocs build --strict
 ```

@@ -44,8 +44,8 @@ The version command must report `pycoati 0.2.9`. The three repository scans
 must report `tool.ran_pytest: true` and `tool.ran_coverage: true`; compare
 `suite.test_count`, `suite.line_coverage_pct`, all raw test/file records, and
 scores across them. Natural runtime and `slowest_tests` ordering can vary.
-`--no-accept` and `--include-accepted` retain the accepted test in the
-shortlist; the default scan filters it while retaining the same raw counts and
+`--no-accept` and `--include-accepted` retain the accepted tests in the
+shortlist; the default scan filters them while retaining the same raw counts and
 scores. Inspect stderr for pytest/coverage and stale-acceptance warnings.
 
 The synthetic consumer must print one JSON object with `status: "pass"`,
