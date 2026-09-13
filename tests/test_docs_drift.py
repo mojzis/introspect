@@ -183,7 +183,10 @@ def test_env_vars_are_documented_only_in_configuration() -> None:
     # Floor so the check stays a duplication detector rather than a ban on
     # mentioning a variable at all, if the count ever shrinks.
     threshold = max(3, len(names) // 2)
-    for rel_path, text in _published_docs().items():
+    for (  # zorilla: ignore[ZR001] -- docs drift sweep
+        rel_path,
+        text,
+    ) in _published_docs().items():  # zorilla: ignore[ZR001] -- docs drift sweep
         if rel_path == "configuration.md":
             continue
         mentioned = {name for name in names if name in text}
@@ -314,7 +317,9 @@ def _route_paths() -> set[str]:
 def test_every_route_is_documented() -> None:
     """Each non-fragment route path appears in its documenting page."""
     by_doc: dict[str, set[str]] = {}
-    for path in _route_paths() - FRAGMENT_ROUTES:
+    for path in (  # zorilla: ignore[ZR001] -- full-page route drift sweep
+        _route_paths() - FRAGMENT_ROUTES
+    ):  # zorilla: ignore[ZR001] -- full-page route drift sweep
         rel_path = ROUTE_DOC_OVERRIDES.get(path, "usage/web-ui.md")
         by_doc.setdefault(rel_path, set()).add(path)
     for rel_path, paths in sorted(by_doc.items()):

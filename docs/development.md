@@ -18,7 +18,7 @@ uv run poe check
 # Run tests only
 uv run poe test
 
-# Run all checks including dead-code and unused-deps
+# Run all checks including dead-code and unused-deps (does not run Zorilla)
 uv run poe check-all
 ```
 
@@ -26,24 +26,64 @@ Tests run in parallel via `pytest-xdist`.
 
 ## Toolbox
 
-Five CLI tools ship as dev dependencies. Each documents itself — run
-`uv run <tool> --help` first rather than guessing at flags.
+Six CLI tools ship as dev dependencies. Each documents itself — run
+`uv run <tool> guide` first rather than guessing at flags.
 
 | Tool | Runs | Purpose |
 |---|---|---|
 | `tyf` (`ty-find`) | on demand + in the hook | Type-aware code search by symbol name |
 | `gerenuk` | in the hook | Which symbols the diff changed; feeds test selection |
 | `biston` | in the hook | Structural clone detection |
-| `zorilla` | on demand only | pytest test-smell lint |
+| `zorilla` | in the hook + on demand | pytest test-smell lint |
+| `madoqua` | on every Python commit + on demand | Orchestrates staged-file fixes and parallel checks |
 | `pycoati` | periodic audit only | Ranked test-verification audit; never a hook or CI gate |
 
 Refresh them all to their latest versions:
 
 ```bash
-uv sync --upgrade-package gerenuk --upgrade-package biston \
-  --upgrade-package zorilla --upgrade-package ty-find \
-  --upgrade-package pycoati
+uv lock --refresh --upgrade-package madoqua --upgrade-package gerenuk \
+  --upgrade-package biston --upgrade-package zorilla \
+  --upgrade-package pycoati --upgrade-package ty-find && uv sync
 ```
+
+## Zorilla policy and test-smell enforcement
+
+The pre-change baseline was 163 findings across 49 scanned test files:
+ZR004 assertion roulette 78, ZR001 conditional test logic 41, ZR002 sleeps
+18, ZR005 mystery guests 25, and ZR003 no assertion 1. After the evidence and
+synchronization repairs, the verified result is 0 findings across 49 scanned
+files (`uv run zorilla stats .`; every ZR001–ZR008 count is zero).
+
+The repository-wide policy sets `ZR004.max_asserts = 6`. All other tuning is
+case-specific: coherent response/schema contracts, cleanup and bounded
+polling, security corpus branches, and verified synthetic literals use
+narrow same-line `# zorilla: ignore[CODE] -- reason` comments. Synthetic
+filesystem paths use `/repo/`; root routes and `/clear` remain explicit
+behavioral inputs. Rules and files stay enabled; broad prefixes, blanket
+ignores, assertion deletion, and artificial helper abstractions are not
+allowed.
+
+Run the direct checks when changing tests:
+
+```bash
+uv run zorilla check tests/path/to_test.py
+uv run zorilla check .
+uv run zorilla stats .
+```
+
+`uv run poe check` runs repo-wide Zorilla before tests. The tracked
+`hooks/pre-commit` entrypoint runs Madoqua on staged Python files after
+`uv run madoqua install`; its checks include ruff, ty, biston, Zorilla, and
+Gerenuk. `uv run poe check-all` omits Zorilla, so neither a green `check-all`
+nor a green CI job should be treated as proof that Zorilla ran.
+
+The repaired evidence tests use deterministic, disposable fixtures and
+bounded signals. They deliberately avoid real conversation logs, the shared
+home database, cloud services, and private data. Standalone MCP startup QA is
+the separate disposable command `uv run python scripts/qa_mcp_startup.py`:
+five-second successful discovery and a two-minute total bound. That is an app
+startup regression route; focused tests and controlled negative probes cover
+the test-evidence contracts described above.
 
 ```bash
 # Type-aware code search (LSP-quality, by symbol name).
@@ -61,12 +101,12 @@ uv run biston scan --tests-only .   # tests sit outside the configured scan set
 
 # Which tests does the current diff impact?
 # Exits 10 when the diff is too broad to narrow — that means "run everything".
-# Diffs against origin/main by default; GERENUK_BASE picks another base ref.
+# Diffs against origin/main by default; --base picks another base ref.
 uv run poe impacted-tests
-GERENUK_BASE=HEAD uv run poe impacted-tests   # just the uncommitted changes
+uv run gerenuk impacted-tests --base HEAD   # just the uncommitted changes
 uv run gerenuk audit <file.py>...   # unreferenced and test-only symbols
 
-# Test quality — on demand, when the suite has grown. Not in the hook or CI.
+# Test quality — direct commands remain useful for focused triage.
 uv run poe test-smells              # = zorilla check tests
 uv run zorilla stats tests
 uv run zorilla explain ZR004
@@ -89,29 +129,30 @@ hooks and CI.
 
 ## Commit hook
 
-`uv run poe setup` installs `scripts/pre-commit.sh` as `.git/hooks/pre-commit`.
-It is the only hook, and it runs four stages, each reporting its own duration:
+`uv run madoqua install` configures Git to use the tracked `hooks/pre-commit`
+entrypoint. It is the only hook. With staged `.py` or `.pyi` files, Madoqua
+runs two phases, with each step reporting its own duration:
 
-1. `ruff format` + `ruff check --fix` on staged Python, re-staged.
-2. `ruff check --no-fix` and `ty check`.
-3. `biston scan --files-from -` — clone pairs involving a staged file. The
-   whole tree stays in the comparison, so a staged file cloning an untouched
-   one is still caught.
-4. `gerenuk changed-symbols` → `tyf refs --tests` → `pytest` on just the
-   impacted test files, via `scripts/impacted_tests.py`.
+1. `ruff check --fix` + `ruff format` on staged Python, re-staged.
+2. `ruff check`, `ty check`, `biston scan --focus-args`, and `zorilla check`
+   on staged files, plus `gerenuk run`, in parallel. Gerenuk scopes itself
+   from the whole working-tree diff; when that diff includes a non-Python
+   file, it runs the full suite.
 
-Stages 1-3 act on the staged files. Stage 4 diffs and runs the working tree,
-so a partially staged commit (`git add -p`) is tested as it stands on disk
-rather than as it will land — stash the remainder first if that matters.
+With no staged Python file, Madoqua does not run or log anything. The fixers
+and the first four checks receive only the staged Python paths. Gerenuk gets no
+file list and diffs the entire working tree, so a partially staged commit
+(`git add -p`) is tested as it stands on disk rather than as it will land —
+stash the remainder first if that matters.
 
-The hook sets `GERENUK_BASE=HEAD`, so stage 4 selects for the commit being
-made, not the whole branch: earlier commits were gated when they were made,
-and against `origin/main` a branch that once touched `pyproject.toml` would
-fall back to the full suite on every later commit. Run by hand,
-`poe impacted-tests` keeps gerenuk's own default base (`origin/main`), so it
-reports the tests the whole branch impacts.
+Gerenuk uses its default base (`origin/main`, falling back to `main` or
+`master`), not `HEAD`, in the hook and when run by hand. That means a branch
+that touched `pyproject.toml` falls back to the full suite on every later
+commit that stages Python until the branch is pushed. `poe impacted-tests`
+likewise reports the tests the whole branch impacts; pass `--base HEAD`
+directly to Gerenuk when you intentionally want only uncommitted changes.
 
-Stage 4 is conservative by construction: a change to `conftest.py`,
+Gerenuk is conservative by construction: a change to `conftest.py`,
 `pyproject.toml` or `uv.lock`, a symbol that maps to no test, or any tool
 error makes the selector exit non-zero, and the hook then runs the full
 suite. It never turns an inconclusive answer into a skipped test.

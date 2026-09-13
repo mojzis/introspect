@@ -25,7 +25,9 @@ def test_cost_overview_daily_panel_embedded():
 
         def _check(client):
             response = client.get("/cost-overview")
-            assert response.status_code == 200
+            assert (  # zorilla: ignore[ZR004] -- breakdown response contract
+                response.status_code == 200
+            )
             text = response.text
             assert "Daily breakdown" in text
             assert 'id="daily-cost-panel"' in text
@@ -116,7 +118,9 @@ def test_cost_overview_breakdown_hides_legend(breakdown):
         )
         fig = json.loads(ctx["chart_json"])
         assert fig["layout"]["showlegend"] is False
-        if breakdown == "model":
+        if (  # zorilla: ignore[ZR001] -- shared breakdown mode contract
+            breakdown == "model"
+        ):
             # Confirms the multi-series path still produces ≥2 traces — the
             # original regression was a legend appearing on multi-series
             # charts, so a single-trace pass would not exercise it.

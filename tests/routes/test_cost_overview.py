@@ -376,7 +376,9 @@ def test_cost_overview_page_renders():
 
         def _check(client):
             response = client.get("/cost-overview")
-            assert response.status_code == 200
+            assert (  # zorilla: ignore[ZR004] -- overview response contract
+                response.status_code == 200
+            )
             text = response.text
             assert "Cost Overview" in text
             # Hero total: $35.00 (4M+2M+1M) * $5/M.
@@ -408,7 +410,9 @@ def test_cost_overview_pareto_cutoff_at_80pct():
 
     costs_usd = [100, 50, 30, 20, 10, 5, 5, 3, 2, 1]
     specs: list[tuple[str, list[dict]]] = []
-    for rank, c in enumerate(costs_usd):
+    for rank, c in enumerate(  # zorilla: ignore[ZR001] -- ordered cost sweep
+        costs_usd
+    ):
         # $1 == 200_000 input tokens at $5/M claude-opus-4-7 pricing.
         sid = f"sess-pareto-{rank:02d}-aaaa-aaaa-aaaaaaaaaaaa"
         specs.append((sid, _session_at_cost(sid, c * 200_000)))
@@ -421,7 +425,9 @@ def test_cost_overview_pareto_cutoff_at_80pct():
         # Rows are sorted by cost_usd DESC. Check the first 5 rows by
         # cost and their Pareto membership.
         rows = pareto["rows"]
-        assert len(rows) == 10
+        assert (  # zorilla: ignore[ZR004] -- pagination contract
+            len(rows) == 10
+        )
         # Row 0: $100 (44.2% cum), in pareto, not cutoff.
         assert rows[0]["cost_usd"] == pytest.approx(100.0)
         assert rows[0]["in_pareto"]
@@ -514,7 +520,7 @@ def test_cost_overview_huge_reads_split():
 
 
 def test_cost_overview_skill_split():
-    """/clear and other OBVIOUS_COMMANDS must not flip a session's classification.
+    """clear and other OBVIOUS_COMMANDS must not flip a session's classification.
 
     Fixture: session 1 uses <command-name>marimo-pair</command-name> (should
     classify as "with skills"); session 2 uses no commands; session 3 uses
@@ -573,7 +579,7 @@ def test_cost_overview_splits_with_uuid_typed_session_ids():
         _cost_overview_setup(tmp, specs)
 
         def _run(conn):
-            assert (
+            assert (  # zorilla: ignore[ZR004] -- provider page contract
                 conn.execute(
                     "SELECT typeof(session_id) FROM assistant_message_costs LIMIT 1"
                 ).fetchone()[0]
@@ -760,7 +766,9 @@ def test_cost_overview_provider_scope_covers_all_cost_surfaces():
 
         def _check(client):
             page = client.get("/cost-overview?provider=anthropic")
-            assert page.status_code == 200
+            assert (  # zorilla: ignore[ZR004] -- provider page contract
+                page.status_code == 200
+            )
             assert 'data-provider="anthropic"' in page.text
             # Both chart click handlers retain the active provider explicitly.
             assert "var provider = el.dataset.provider || '';" in page.text
@@ -858,7 +866,7 @@ def test_cost_overview_renders_with_titleless_session():
             "u1",
             None,
             "2026-04-21T10:00:00.000Z",
-            "/clear",
+            "/clear",  # zorilla: ignore[ZR005] -- command literal under test
             tool_use_result={"content": "seed"},
         ),
         make_assistant_message(

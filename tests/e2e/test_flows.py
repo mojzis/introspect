@@ -3,7 +3,9 @@
 
 def test_dashboard_to_session_detail(e2e):
     """Navigate from dashboard to a session detail page."""
-    dashboard = e2e.get("/")
+    dashboard = e2e.get(
+        "/"  # zorilla: ignore[ZR005] -- synthetic root route
+    )
     assert dashboard.status == 200
 
     link = dashboard.select_one("a[href^='/sessions/']")

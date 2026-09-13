@@ -62,7 +62,9 @@ def test_session_detail_marks_cache_loss_event():
         tmp = Path(tmp_str)
         with _cache_loss_client(tmp, gap_minutes=6) as client:
             response = client.get(f"/sessions/{_CACHE_LOSS_SID}?tab=messages")
-            assert response.status_code == 200
+            assert (  # zorilla: ignore[ZR004] -- session response contract
+                response.status_code == 200
+            )
             text = response.text
             assert 'class="cache-loss-divider"' in text
             assert "6 min gap" in text
@@ -183,7 +185,9 @@ def test_session_detail_returns_200():
     """Session detail page loads without error."""
     with tempfile.TemporaryDirectory() as tmp, _patched_client(Path(tmp)) as client:
         response = client.get("/sessions/01234567-abcd-abcd-abcd-0123456789ab")
-        assert response.status_code == 200
+        assert (  # zorilla: ignore[ZR004] -- message-kind page contract
+            response.status_code == 200
+        )
 
 
 def test_session_detail_tolerates_a_database_missing_cache_requests():
@@ -244,7 +248,9 @@ def test_session_detail_classifies_message_kinds():
     """Session detail page classifies messages into distinct visual kinds."""
     with tempfile.TemporaryDirectory() as tmp, _patched_client(Path(tmp)) as client:
         response = client.get(f"/sessions/{SID}")
-        assert response.status_code == 200
+        assert (  # zorilla: ignore[ZR004] -- message-kind page contract
+            response.status_code == 200
+        )
         # Human prompt is visually distinct from tool results.
         assert "kind-human_prompt" in response.text
         assert "Hello, help me with tests" in response.text
@@ -276,7 +282,9 @@ def test_session_detail_distinguishes_subagent_prompt_from_human():
     """Sidechain user messages render as 'prompt to subagent', not 'you'."""
     with tempfile.TemporaryDirectory() as tmp, _patched_client(Path(tmp)) as client:
         response = client.get(f"/sessions/{SID}")
-        assert response.status_code == 200
+        assert (  # zorilla: ignore[ZR004] -- prompt ordering contract
+            response.status_code == 200
+        )
         text = response.text
         # The subagent prompt appears with its own kind class, NOT human_prompt.
         assert "kind-subagent_prompt" in text
@@ -394,7 +402,9 @@ def test_session_detail_assistant_token_badge():
         tmp = Path(tmp_str)
         with _tweak_client(tmp) as client:
             response = client.get(f"/sessions/{_TWEAK_SID}?tab=messages")
-            assert response.status_code == 200
+            assert (  # zorilla: ignore[ZR004] -- token badge contract
+                response.status_code == 200
+            )
             text = response.text
             assert "token-badge" in text
             # Compact form: omit zero components, use arrow + ⚡/✎ glyphs.

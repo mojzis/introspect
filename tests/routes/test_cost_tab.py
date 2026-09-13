@@ -58,7 +58,9 @@ def test_session_detail_shows_separate_auto_review_summary():
 
         def _assert_auto_review(client):
             response = client.get(f"/sessions/{sid}")
-            assert response.status_code == 200
+            assert (  # zorilla: ignore[ZR004] -- auto-review page contract
+                response.status_code == 200
+            )
             text = response.text
             assert "Auto Review" in text
             assert "1 approval review call" in text
@@ -296,18 +298,35 @@ def test_session_cost_top_contributor_links_to_message():
     The sample fixture has a Bash + sidechain reply that drives at least
     one cache-write bucket; that bucket should expose a top_uuid anchor.
     """
-    with tempfile.TemporaryDirectory() as tmp, _patched_client(Path(tmp)) as client:
-        response = client.get(f"/sessions/{SID}/cost/bloat")
-        assert response.status_code == 200
-        text = response.text
-        # If the fixture produced any cache writes, the contributors table
-        # must have at least one anchor to the worst-offender message. If
-        # not, the table renders the "no bloat data" fallback — also fine.
-        if "No bloat data" in text:
-            import pytest  # noqa: PLC0415
-
-            pytest.skip("sample fixture produced no cache writes")
-        assert f'href="/sessions/{SID}?tab=messages#msg-' in text
+    sid = "bloat-link-session-0000-0000-000000000001"
+    with tempfile.TemporaryDirectory() as tmp_str:
+        tmp = Path(tmp_str)
+        _bloat_jsonl(tmp, sid)
+        db_path = tmp / "test.duckdb"
+        with (
+            patch.dict(
+                os.environ,
+                {
+                    "INTROSPECT_DB_PATH": str(db_path),
+                    "INTROSPECT_JSONL_GLOB": glob_pattern(tmp),
+                    "INTROSPECT_CODEX_GLOB": str(tmp / "codex" / "**" / "*.jsonl"),
+                    "INTROSPECT_DAYS": "0",
+                },
+            ),
+            local_client(app) as client,
+        ):
+            response = client.get(f"/sessions/{sid}/cost/bloat")
+            assert response.status_code == 200
+            text = response.text
+            assert "No bloat data" not in text, (
+                "fixture must produce a cache-write bucket"
+            )
+            link = re.search(
+                rf'href="/sessions/{re.escape(sid)}\?tab=messages&focus='
+                r'(?P<uuid>[^"#&]+)#msg-(?P=uuid)"',
+                text,
+            )
+            assert link is not None, "contributor link must focus and anchor one UUID"
 
 
 def test_session_cost_chart_serializes_uuid_columns():

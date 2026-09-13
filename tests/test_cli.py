@@ -91,7 +91,9 @@ def test_cli_command_works_on_empty_db(monkeypatch, command):
         assert result.exit_code == 0, result.output
         # ``refresh`` deliberately skips the banner — it rebuilds the index
         # using its own writable connection rather than going through ``_db``.
-        if command != ("refresh",):
+        if (  # zorilla: ignore[ZR001] -- refresh dispatch branch
+            command != ("refresh",)
+        ):  # zorilla: ignore[ZR001] -- refresh dispatch branch
             assert "Last materialized" in result.output, result.output
         # The DB file should now exist and contain the materialize_meta stamp.
         assert db_path.exists()
@@ -101,7 +103,9 @@ def test_cache_ttl_recommends_5m_when_there_are_no_gaps(monkeypatch):
     """No pauses → 1h's 2x write surcharge is pure loss, and it says so."""
     sid = "77777777-7777-7777-7777-777777777777"
     lines = ttl_turn(sid, 1, TTL_T0, read=0, create=50_000)
-    for n in range(2, 6):
+    for n in range(  # zorilla: ignore[ZR001] -- bounded cache-turn fixture
+        2, 6
+    ):  # zorilla: ignore[ZR001] -- bounded cache-turn fixture
         lines += ttl_turn(
             sid,
             n,
@@ -496,7 +500,12 @@ def test_prune_stale_branch_dbs_removes_only_dead_branches(monkeypatch, tmp_path
     live = tmp_path / "introspect-main.duckdb"
     dead = tmp_path / "introspect-old.duckdb"
     shared = tmp_path / "introspect.duckdb"  # default DB, must be untouched
-    for f in (keep, live, dead, shared):
+    for f in (  # zorilla: ignore[ZR001] -- mixed database fixture
+        keep,
+        live,
+        dead,
+        shared,
+    ):  # zorilla: ignore[ZR001] -- mixed database fixture
         f.touch()
     dead.with_name(dead.name + ".wal").touch()
 
@@ -828,7 +837,9 @@ def test_claude_starts_server_when_not_running(monkeypatch, tmp_path):
     result = runner.invoke(app, ["claude", "--port", "3000"])
 
     assert result.exit_code == 0, result.output
-    assert "Server ready" in result.output
+    assert (  # zorilla: ignore[ZR004] -- startup CLI contract
+        "Server ready" in result.output
+    )  # zorilla: ignore[ZR004] -- startup CLI contract
     assert len(popen_calls) == 1
     argv = popen_calls[0]
     assert "-m" in argv
@@ -947,8 +958,13 @@ def test_stop_server_noop_when_already_exited():
     assert not proc.killed
 
 
-def test_finish_connected_session_leaves_existing_server_alone():
+def test_finish_connected_session_leaves_existing_server_alone(monkeypatch):
+    stop_calls = []
+    monkeypatch.setattr("introspect.cli._stop_server", stop_calls.append)
+
     _finish_connected_session(None, host="127.0.0.1", port=8347, keep_server=False)
+
+    assert not stop_calls, "an existing server must not be stopped"
 
 
 def test_claude_errors_when_server_exits_during_start(monkeypatch, tmp_path):

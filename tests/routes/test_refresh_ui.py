@@ -27,7 +27,11 @@ def test_post_refresh_sets_trigger_and_renders_fragment():
             assert trigger.is_set()
         finally:
             # Clean up to avoid bleed into other tests that share ``app``.
-            for attr in ("refresh_trigger", "refresh_in_progress", "last_refreshed_at"):
+            for attr in (  # zorilla: ignore[ZR001] -- state cleanup contract
+                "refresh_trigger",
+                "refresh_in_progress",
+                "last_refreshed_at",
+            ):
                 if hasattr(app.state, attr):
                     delattr(app.state, attr)
 
@@ -64,7 +68,11 @@ def test_refresh_status_renders_without_setting_trigger():
             # Status endpoint must NOT poke the trigger — polling should be idle.
             assert not trigger.is_set()
         finally:
-            for attr in ("refresh_trigger", "refresh_in_progress", "last_refreshed_at"):
+            for attr in (  # zorilla: ignore[ZR001] -- state cleanup contract
+                "refresh_trigger",
+                "refresh_in_progress",
+                "last_refreshed_at",
+            ):
                 if hasattr(app.state, attr):
                     delattr(app.state, attr)
 
@@ -82,7 +90,11 @@ def test_refresh_status_polls_while_in_progress():
             assert "hx-trigger=" in response.text
             assert "refreshing" in response.text
         finally:
-            for attr in ("refresh_trigger", "refresh_in_progress", "last_refreshed_at"):
+            for attr in (  # zorilla: ignore[ZR001] -- state cleanup contract
+                "refresh_trigger",
+                "refresh_in_progress",
+                "last_refreshed_at",
+            ):
                 if hasattr(app.state, attr):
                     delattr(app.state, attr)
 
@@ -107,7 +119,7 @@ def test_refresh_status_is_an_accessible_live_region_with_progress():
             assert 'aria-busy="true"' in response.text
             assert "2/4 files" in response.text
         finally:
-            for attr in (
+            for attr in (  # zorilla: ignore[ZR001] -- state cleanup contract
                 "refresh_trigger",
                 "refresh_in_progress",
                 "last_refreshed_at",
@@ -131,7 +143,11 @@ def test_refresh_indicator_label_has_no_date():
             # No ISO-like date substring.
             assert re.search(r"\d{4}-\d{2}-\d{2}", response.text) is None
         finally:
-            for attr in ("refresh_trigger", "refresh_in_progress", "last_refreshed_at"):
+            for attr in (  # zorilla: ignore[ZR001] -- state cleanup contract
+                "refresh_trigger",
+                "refresh_in_progress",
+                "last_refreshed_at",
+            ):
                 if hasattr(app.state, attr):
                     delattr(app.state, attr)
 
@@ -154,7 +170,7 @@ def test_post_refresh_with_window_updates_app_state():
             assert '<option value="1" selected' not in response.text
             assert '<option value="month" selected' not in response.text
         finally:
-            for attr in (
+            for attr in (  # zorilla: ignore[ZR001] -- state cleanup contract
                 "refresh_trigger",
                 "refresh_in_progress",
                 "last_refreshed_at",
@@ -182,7 +198,7 @@ def test_post_refresh_accepts_custom_and_all_data_targets():
             assert app.state.refresh_target.days == 0
             assert '<option value="0" selected>All data</option>' in response.text
         finally:
-            for attr in (
+            for attr in (  # zorilla: ignore[ZR001] -- state cleanup contract
                 "refresh_trigger",
                 "refresh_in_progress",
                 "last_refreshed_at",
@@ -208,7 +224,7 @@ def test_post_refresh_invalid_window_keeps_current():
             assert app.state.refresh_window == "7"
             assert '<option value="7" selected>7 days</option>' in response.text
         finally:
-            for attr in (
+            for attr in (  # zorilla: ignore[ZR001] -- state cleanup contract
                 "refresh_trigger",
                 "refresh_in_progress",
                 "last_refreshed_at",
@@ -227,7 +243,9 @@ def test_refresh_status_includes_picker():
         app.state.refresh_window = "month"
         try:
             response = client.get("/refresh-status")
-            assert response.status_code == 200
+            assert (  # zorilla: ignore[ZR004] -- window-picker response contract
+                response.status_code == 200
+            )
             text = response.text
             assert '<select name="window"' in text
             assert ">Today<" in text
@@ -236,7 +254,7 @@ def test_refresh_status_includes_picker():
             assert ">This month<" in text
             assert '<option value="month" selected>This month</option>' in text
         finally:
-            for attr in (
+            for attr in (  # zorilla: ignore[ZR001] -- state cleanup contract
                 "refresh_trigger",
                 "refresh_in_progress",
                 "last_refreshed_at",
@@ -271,7 +289,7 @@ def test_post_refresh_returns_immediately_without_waiting():
             assert trigger.is_set()
             assert "refreshing" in response.text
         finally:
-            for attr in (
+            for attr in (  # zorilla: ignore[ZR001] -- state cleanup contract
                 "refresh_trigger",
                 "refresh_in_progress",
                 "last_refreshed_at",
@@ -304,7 +322,7 @@ def test_refresh_status_poll_delay_tightens_with_elapsed_time():
                     f"got: {response.text}"
                 )
         finally:
-            for attr in (
+            for attr in (  # zorilla: ignore[ZR001] -- state cleanup contract
                 "refresh_trigger",
                 "refresh_in_progress",
                 "last_refreshed_at",
@@ -331,7 +349,7 @@ def test_refresh_status_reloads_page_after_completion():
             # (The window picker still has hx-trigger="change", which is unrelated.)
             assert "load delay:" not in response.text
         finally:
-            for attr in (
+            for attr in (  # zorilla: ignore[ZR001] -- state cleanup contract
                 "refresh_trigger",
                 "refresh_in_progress",
                 "last_refreshed_at",
@@ -359,7 +377,7 @@ def test_refresh_status_labels_preview_database():
             assert "preview" in response.text
             assert "refreshed" in response.text
         finally:
-            for attr in (
+            for attr in (  # zorilla: ignore[ZR001] -- state cleanup contract
                 "refresh_trigger",
                 "refresh_in_progress",
                 "last_refreshed_at",
@@ -388,7 +406,7 @@ def test_refresh_status_labels_warm_snapshot():
             assert response.status_code == 200
             assert "warm snapshot" in response.text
         finally:
-            for attr in (
+            for attr in (  # zorilla: ignore[ZR001] -- state cleanup contract
                 "refresh_trigger",
                 "refresh_in_progress",
                 "last_refreshed_at",
@@ -419,7 +437,7 @@ def test_refresh_status_reports_failed_authoritative_load():
             assert "Refresh failed" in response.text
             assert "warm snapshot" in response.text
         finally:
-            for attr in (
+            for attr in (  # zorilla: ignore[ZR001] -- state cleanup contract
                 "refresh_trigger",
                 "refresh_in_progress",
                 "last_refreshed_at",

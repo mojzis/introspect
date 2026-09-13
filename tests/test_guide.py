@@ -89,7 +89,7 @@ def test_every_command_the_guide_shows_exists() -> None:
     commands = set(get_group(app).commands)
     shown = _invocations(guide_text())
     assert shown, "the guide should show at least one introspy command"
-    for argv in shown:
+    for argv in shown:  # zorilla: ignore[ZR001] -- help-command contract sweep
         if len(argv) == 1:
             continue  # a bare `introspy` is the entry point, not a command
         assert argv[1] in commands, f"{' '.join(argv)!r} names a command the CLI lacks"

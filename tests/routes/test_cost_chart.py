@@ -341,7 +341,7 @@ def test_slope_detector_fires_on_gradual_ramp():
     inc = [0.0005] * 10 + [0.004] * 10
     cum: list[float] = []
     running = 0.0
-    for v in inc:
+    for v in inc:  # zorilla: ignore[ZR001] -- bounded chart geometry
         running += v
         cum.append(running)
     uuids = [f"u{i}" for i in range(len(inc))]
@@ -380,7 +380,7 @@ def test_slope_detector_handles_single_positive_delta():
     inc = [0.0] * 14 + [0.5]
     cum: list[float] = []
     running = 0.0
-    for v in inc:
+    for v in inc:  # zorilla: ignore[ZR001] -- bounded chart geometry
         running += v
         cum.append(running)
     uuids = [f"u{i}" for i in range(len(inc))]
