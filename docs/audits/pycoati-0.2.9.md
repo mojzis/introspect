@@ -1,7 +1,7 @@
 # Pycoati 0.2.9 audit
 
 Audit date: 2026-09-13. Base: `2dc8480786a260384f1fed18903e52b06f716322`.
-Tested implementation revision: `469cf5bc5af156921ada4a19a6c7be5a0f6659b`.
+Tested implementation revision: `469cf5b6bfe41b94f580efb00152f3921696f4f0`.
 
 ## Reproducibility
 
