@@ -77,11 +77,11 @@ def test_resolve_project_map_parallel():
     """Multiple cwds are resolved in parallel."""
     with patch("introspect.projects.get_canonical_project") as mock_fn:
         mock_fn.side_effect = lambda cwd: f"/canonical{cwd}"
-        result = resolve_project_map(["/a", "/b", "/c"])
+        result = resolve_project_map(["/repo/a", "/repo/b", "/repo/c"])
         assert result == {
-            "/a": "/canonical/a",
-            "/b": "/canonical/b",
-            "/c": "/canonical/c",
+            "/repo/a": "/canonical/repo/a",
+            "/repo/b": "/canonical/repo/b",
+            "/repo/c": "/canonical/repo/c",
         }
         assert mock_fn.call_count == 3
 

@@ -315,7 +315,9 @@ def test_subagents_tab_absent_for_plain_session(tmp_path):
     """Session without subagents must not show the Subagents tab."""
     with _patched_client(tmp_path) as client:
         resp = client.get(f"/sessions/{SID}")
-        assert resp.status_code == 200
+        assert (  # zorilla: ignore[ZR004] -- subagent response contract
+            resp.status_code == 200
+        )  # zorilla: ignore[ZR004] -- subagent response contract
         assert "?tab=subagents" not in resp.text
 
 
@@ -323,7 +325,9 @@ def test_subagents_empty_state_for_plain_session(tmp_path):
     """Hitting ?tab=subagents on a plain session shows empty state."""
     with _patched_client(tmp_path) as client:
         resp = client.get(f"/sessions/{SID}?tab=subagents")
-        assert resp.status_code == 200
+        assert (
+            resp.status_code == 200
+        )  # zorilla: ignore[ZR004] -- subagent response contract
         assert "No subagents in this session" in resp.text
 
 
@@ -352,7 +356,9 @@ def test_subagents_table_renders_for_one_task_session(tmp_path):
         lambda d: _tokenscape_subagent_session_jsonl(d, _SUBAGENT_SID),
     ) as client:
         resp = client.get(f"/sessions/{_SUBAGENT_SID}?tab=subagents")
-        assert resp.status_code == 200
+        assert (  # zorilla: ignore[ZR004] -- subagent response contract
+            resp.status_code == 200
+        )  # zorilla: ignore[ZR004] -- subagent response contract
         html = resp.text
 
         # Run label and main row
@@ -435,7 +441,9 @@ def test_context_builder_per_run_metrics(tmp_path):
     db = get_connection(tmp_path / "t.duckdb", glob_pattern(tmp_path))
     ctx = build_subagent_breakdown_context(db, _UNIT_SID, "/tmp/test")
 
-    assert ctx["has_data"] is True
+    assert (  # zorilla: ignore[ZR004] -- subagent context contract
+        ctx["has_data"] is True
+    )  # zorilla: ignore[ZR004] -- subagent context contract
     assert ctx["subagent_count"] == 1
 
     rows = ctx["rows"]

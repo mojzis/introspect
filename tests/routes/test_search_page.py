@@ -83,7 +83,9 @@ def test_search_results_link_to_session():
 def test_clean_title_strips_all_xml_tags():
     """clean_title strips ALL XML tags, not just leading ones."""
     # Leading tag only
-    assert clean_title("<foo>bar") == "bar"
+    assert (  # zorilla: ignore[ZR004] -- sanitizer grammar contract
+        clean_title("<foo>bar") == "bar"
+    )  # zorilla: ignore[ZR004] -- sanitizer grammar contract
     # Wrapping tags (the original bug: command-name pattern)
     assert clean_title("<command-name>/commit</command-name>") == "/commit"
     # Nested / multiple tags

@@ -42,7 +42,9 @@ def _conn(calls: list[tuple[str, dict, str | None]]) -> duckdb.DuckDBPyConnectio
 
 
 def test_classify_tool_names():
-    assert _classify("Read", "") == "read"
+    assert (  # zorilla: ignore[ZR004] -- tool classification table
+        _classify("Read", "") == "read"
+    )
     assert _classify("Edit", "") == "edit"
     assert _classify("MultiEdit", "") == "edit"
     assert _classify("Write", "") == "write"
@@ -54,7 +56,9 @@ def test_classify_tool_names():
 
 
 def test_classify_bash_subcategories():
-    assert _classify("Bash", "uv run pytest tests/") == "test"
+    assert (  # zorilla: ignore[ZR004] -- Bash classification table
+        _classify("Bash", "uv run pytest tests/") == "test"
+    )
     assert _classify("Bash", "poe check") == "test"
     assert _classify("Bash", "grep -rn foo src/") == "search"
     assert _classify("Bash", "rg foo") == "search"
@@ -70,7 +74,9 @@ def test_classify_bash_first_match_wins():
 
 def test_is_verify_signal():
     # test runners land in the `test` category and count directly
-    assert _is_verify("test", "Bash", "uv run pytest") is True
+    assert (  # zorilla: ignore[ZR004] -- verification signal table
+        _is_verify("test", "Bash", "uv run pytest") is True
+    )
     # linters / type-checkers classify as pkg/bash but are still verify signals
     assert _is_verify("pkg", "Bash", "uv run ruff check .") is True
     assert _is_verify("pkg", "Bash", "uv run ty check") is True
@@ -95,7 +101,9 @@ def test_prefix():
 
 def test_detail_label():
     assert _detail_label("Bash", "git", {"command": "git status -s"}) == "git status"
-    assert _detail_label("Read", "read", {"file_path": "/a/b/main.py"}) == "main.py"
+    assert (
+        _detail_label("Read", "read", {"file_path": "/repo/a/b/main.py"}) == "main.py"
+    )
     assert _detail_label("mcp__github__get_me", "mcp", {}) == "github__get_me"
     # non-file, non-bash, non-mcp tool falls through to the bare name
     assert _detail_label("Task", "task", {}) == "Task"
@@ -104,7 +112,7 @@ def test_detail_label():
 def test_tooltip():
     assert _tooltip("Bash", {"command": "  ls -la  "}) == "ls -la"
     assert _tooltip("Bash", {}) == "Bash"
-    assert _tooltip("Read", {"file_path": "/a/b.py"}) == "Read: /a/b.py"
+    assert _tooltip("Read", {"file_path": "/repo/a/b.py"}) == "Read: /repo/a/b.py"
     assert _tooltip("mcp__github__get_me", {}) == "mcp__github__get_me"
     assert _tooltip("Task", {}) == "Task"
 
@@ -119,8 +127,8 @@ def test_build_normal_locate_implement_verify():
     ctx = build_trajectory_context(
         _conn(
             [
-                ("Read", {"file_path": "/a.py"}, None),
-                ("Edit", {"file_path": "/a.py"}, None),
+                ("Read", {"file_path": "/repo/a.py"}, None),
+                ("Edit", {"file_path": "/repo/a.py"}, None),
                 ("Bash", {"command": "uv run pytest"}, None),
             ]
         ),
@@ -135,9 +143,9 @@ def test_build_edits_but_no_tests_leaves_verify_band_empty():
     ctx = build_trajectory_context(
         _conn(
             [
-                ("Read", {"file_path": "/a.py"}, None),
-                ("Edit", {"file_path": "/a.py"}, None),
-                ("Read", {"file_path": "/a.py"}, None),
+                ("Read", {"file_path": "/repo/a.py"}, None),
+                ("Edit", {"file_path": "/repo/a.py"}, None),
+                ("Read", {"file_path": "/repo/a.py"}, None),
             ]
         ),
         "s",
@@ -150,9 +158,9 @@ def test_build_no_edits_puts_everything_in_locate():
     ctx = build_trajectory_context(
         _conn(
             [
-                ("Read", {"file_path": "/a.py"}, None),
+                ("Read", {"file_path": "/repo/a.py"}, None),
                 ("Bash", {"command": "grep foo"}, None),
-                ("Read", {"file_path": "/b.py"}, None),
+                ("Read", {"file_path": "/repo/b.py"}, None),
             ]
         ),
         "s",
@@ -169,7 +177,7 @@ def test_build_test_before_edit_stays_out_of_verify():
         _conn(
             [
                 ("Bash", {"command": "uv run pytest"}, None),
-                ("Edit", {"file_path": "/a.py"}, None),
+                ("Edit", {"file_path": "/repo/a.py"}, None),
             ]
         ),
         "s",
@@ -184,9 +192,9 @@ def test_build_early_test_does_not_open_verify_early():
     ctx = build_trajectory_context(
         _conn(
             [
-                ("Write", {"file_path": "/test_a.py"}, None),  # 0 write test
+                ("Write", {"file_path": "/repo/test_a.py"}, None),  # 0 write test
                 ("Bash", {"command": "uv run pytest"}, None),  # 1 red run
-                ("Edit", {"file_path": "/a.py"}, None),  # 2 implement
+                ("Edit", {"file_path": "/repo/a.py"}, None),  # 2 implement
                 ("Bash", {"command": "uv run pytest"}, None),  # 3 green run
             ]
         ),
@@ -201,7 +209,7 @@ def test_build_lint_run_after_edits_starts_verify():
     ctx = build_trajectory_context(
         _conn(
             [
-                ("Edit", {"file_path": "/a.py"}, None),
+                ("Edit", {"file_path": "/repo/a.py"}, None),
                 ("Bash", {"command": "uv run ruff check ."}, None),
             ]
         ),
@@ -214,8 +222,8 @@ def test_build_reread_metrics_and_is_error():
     ctx = build_trajectory_context(
         _conn(
             [
-                ("Read", {"file_path": "/hot.py"}, None),
-                ("Read", {"file_path": "/hot.py"}, None),
+                ("Read", {"file_path": "/repo/hot.py"}, None),
+                ("Read", {"file_path": "/repo/hot.py"}, None),
                 ("Bash", {"command": "false"}, "true"),
             ]
         ),

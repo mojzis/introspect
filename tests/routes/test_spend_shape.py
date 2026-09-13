@@ -276,17 +276,15 @@ def test_spend_shape_sparkline_geometry():
 
     # Points in session A should be time-ordered (left to right: x increasing)
     # and y must be non-increasing (SVG y grows downward as cumulative grows).
-    if spark_a["points"]:
-        pairs = [
-            (float(p.split(",")[0]), float(p.split(",")[1]))
-            for p in spark_a["points"].split()
-        ]
-        xs = [p[0] for p in pairs]
-        ys = [p[1] for p in pairs]
-        # x must be non-decreasing (time order)
-        assert all(xs[i] <= xs[i + 1] for i in range(len(xs) - 1))
-        # y must be non-increasing (cumulative cost grows downward in SVG coords)
-        assert all(ys[i] >= ys[i + 1] for i in range(len(ys) - 1))
+    points = spark_a["points"]
+    assert len(points.split()) >= 2, "Session A should expose multiple sparkline points"
+    pairs = [(float(p.split(",")[0]), float(p.split(",")[1])) for p in points.split()]
+    xs = [p[0] for p in pairs]
+    ys = [p[1] for p in pairs]
+    # x must be non-decreasing (time order)
+    assert all(xs[i] <= xs[i + 1] for i in range(len(xs) - 1))
+    # y must be non-increasing (cumulative cost grows downward in SVG coords)
+    assert all(ys[i] >= ys[i + 1] for i in range(len(ys) - 1))
 
 
 def test_spend_shape_degenerate_cases():

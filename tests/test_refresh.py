@@ -6,7 +6,7 @@ import asyncio
 import json
 import logging
 import os
-import time
+import threading
 import types
 from pathlib import Path
 
@@ -17,6 +17,9 @@ from introspect import refresh
 from introspect.db import materialize_views
 from introspect.refresh import (
     LoadingPhase,
+    LoadingStage,
+    RefreshState,
+    RefreshTarget,
     discover_cold_start_candidates,
     newest_mtime,
     refresh_loop,
@@ -79,6 +82,46 @@ def _fake_app() -> types.SimpleNamespace:
     )
 
 
+def _instrument_refresh_lifecycle(
+    monkeypatch: pytest.MonkeyPatch,
+) -> tuple[threading.Event, threading.Event]:
+    mtime_checked = threading.Event()
+    refresh_ready = threading.Event()
+    original_mtime = refresh.newest_mtime
+    original_set_loading = refresh._set_loading
+
+    def observe_mtime(jsonl_glob: str, codex_glob: str | None = None) -> float:
+        result = original_mtime(jsonl_glob, codex_glob)
+        mtime_checked.set()
+        return result
+
+    def observe_set_loading(
+        state: RefreshState,
+        phase: LoadingPhase,
+        target: RefreshTarget,
+        *,
+        stage: LoadingStage | None = None,
+        candidate_count: int = 0,
+        completed_candidates: int = 0,
+        error: str | None = None,
+    ) -> None:
+        original_set_loading(
+            state,
+            phase,
+            target,
+            stage=stage,
+            candidate_count=candidate_count,
+            completed_candidates=completed_candidates,
+            error=error,
+        )
+        if state.loading_state.phase is LoadingPhase.READY:
+            refresh_ready.set()
+
+    monkeypatch.setattr(refresh, "newest_mtime", observe_mtime)
+    monkeypatch.setattr(refresh, "_set_loading", observe_set_loading)
+    return mtime_checked, refresh_ready
+
+
 def test_newest_mtime_empty_glob(tmp_path: Path) -> None:
     pattern = str(tmp_path / "nope" / "**" / "*.jsonl")
     assert newest_mtime(pattern) == 0.0
@@ -89,7 +132,6 @@ def test_newest_mtime_tracks_updates(tmp_path: Path) -> None:
     pattern = glob_pattern(tmp_path)
     m1 = newest_mtime(pattern)
     assert m1 > 0.0
-    time.sleep(0.01)
     jsonl = tmp_path / "projects" / "test-project" / "sess-1.jsonl"
     # Bump mtime explicitly so this works on filesystems with coarse resolution.
     new_ts = m1 + 1.0
@@ -108,7 +150,6 @@ def test_newest_mtime_watches_codex_glob_too(tmp_path: Path) -> None:
     baseline = newest_mtime(jsonl_glob, codex_glob)
     assert baseline == newest_mtime(jsonl_glob)
 
-    time.sleep(0.01)
     codex_path = write_codex_rollout(tmp_path, "codex-1", [])
     new_ts = baseline + 1.0
     os.utime(codex_path, (new_ts, new_ts))
@@ -126,7 +167,12 @@ def test_cold_start_candidates_use_guard_band_and_codex_partitions(
     stale_claude = tmp_path / "claude" / "stale.jsonl"
     codex = tmp_path / "codex" / "2026" / "08" / "28" / "rollout.jsonl"
     old_codex = tmp_path / "codex" / "2026" / "08" / "01" / "rollout.jsonl"
-    for path in (claude, stale_claude, codex, old_codex):
+    for path in (  # zorilla: ignore[ZR001] -- provider partition fixture
+        claude,
+        stale_claude,
+        codex,
+        old_codex,
+    ):  # zorilla: ignore[ZR001] -- provider partition fixture
         path.parent.mkdir(parents=True, exist_ok=True)
         path.touch()
     os.utime(claude, (now.timestamp(), now.timestamp()))
@@ -154,7 +200,9 @@ def test_target_override_advances_generation_and_loading_is_terminal() -> None:
     )
     target = set_refresh_target(state, "7")
 
-    assert target.days == 7
+    assert (  # zorilla: ignore[ZR004] -- refresh target contract
+        target.days == 7
+    )  # zorilla: ignore[ZR004] -- refresh target contract
     assert target.generation == 1
     assert state.refresh_target == target
     assert state.refresh_pending is True
@@ -255,7 +303,9 @@ def test_refresh_short_circuits_when_unchanged(
     assert counter["n"] == 0
 
 
-def test_refresh_rebuilds_and_swaps_on_change(tmp_path: Path) -> None:
+def test_refresh_rebuilds_and_swaps_on_change(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
     jsonl_glob = glob_pattern(tmp_path)
     db_path = tmp_path / "db.duckdb"
 
@@ -263,6 +313,7 @@ def test_refresh_rebuilds_and_swaps_on_change(tmp_path: Path) -> None:
     _build_initial_db(db_path, jsonl_glob)
 
     app = _fake_app()
+    mtime_checked, refresh_ready = _instrument_refresh_lifecycle(monkeypatch)
 
     async def run() -> None:
         task = asyncio.create_task(
@@ -277,23 +328,24 @@ def test_refresh_rebuilds_and_swaps_on_change(tmp_path: Path) -> None:
             )
         )
         try:
-            # No change yet - loop should not rebuild.
-            await asyncio.sleep(0.2)
-            assert app.state.last_refreshed_at is None
+            # The loop must capture the old mtime before the new file appears.
+            assert await asyncio.to_thread(mtime_checked.wait, 1.0), (
+                "refresh loop did not inspect the initial mtime"
+            )
+            assert app.state.last_refreshed_at is None, (
+                "unchanged data must not rebuild"
+            )
 
             # Ensure a strictly greater mtime for the new file.
             current_latest = newest_mtime(jsonl_glob)
-            time.sleep(0.05)
             _write_session(tmp_path, "sess-second", subdir="proj-b")
             new_file = tmp_path / "projects" / "proj-b" / "sess-second.jsonl"
             bumped = current_latest + 1.0
             os.utime(new_file, (bumped, bumped))
 
-            # Wait long enough for at least one refresh cycle.
-            for _ in range(40):
-                await asyncio.sleep(0.1)
-                if app.state.last_refreshed_at is not None:
-                    break
+            assert await asyncio.to_thread(refresh_ready.wait, 5.0), (
+                "changed data was not swapped into the live database"
+            )
             assert app.state.last_refreshed_at is not None
         finally:
             task.cancel()
@@ -336,11 +388,13 @@ def test_refresh_survives_rebuild_error(
     monkeypatch.setattr(refresh, "newest_mtime", fake_newest_mtime)
 
     rebuild_calls = {"n": 0}
+    rebuild_retried = threading.Event()
 
     def fake_rebuild(*args, **kwargs):
         rebuild_calls["n"] += 1
         if rebuild_calls["n"] == 1:
             raise RuntimeError("boom")
+        rebuild_retried.set()
 
     monkeypatch.setattr(refresh, "_rebuild_sidecar", fake_rebuild)
 
@@ -363,11 +417,9 @@ def test_refresh_survives_rebuild_error(
                 )
             )
             try:
-                # Allow several ticks.
-                for _ in range(30):
-                    await asyncio.sleep(0.05)
-                    if rebuild_calls["n"] >= 2:
-                        break
+                assert await asyncio.to_thread(rebuild_retried.wait, 1.0), (
+                    "refresh loop did not retry after the rebuild error"
+                )
                 assert not task.done(), "refresh task should still be running"
                 assert rebuild_calls["n"] >= 2
             finally:
@@ -383,7 +435,9 @@ def test_refresh_survives_rebuild_error(
     )
 
 
-def test_refresh_wakes_on_trigger(tmp_path: Path) -> None:
+def test_refresh_wakes_on_trigger(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
     """Setting the trigger event should cause the loop to rebuild promptly.
 
     Interval is 10 s so a naive ``asyncio.sleep(interval)`` would never swap
@@ -398,6 +452,7 @@ def test_refresh_wakes_on_trigger(tmp_path: Path) -> None:
 
     app = _fake_app()
     trigger = asyncio.Event()
+    mtime_checked, refresh_ready = _instrument_refresh_lifecycle(monkeypatch)
 
     async def run() -> None:
         task = asyncio.create_task(
@@ -415,10 +470,11 @@ def test_refresh_wakes_on_trigger(tmp_path: Path) -> None:
             # Let the task actually start and capture ``last_mtime`` *before*
             # we bump the filesystem, otherwise the mtime short-circuit
             # swallows the wake.
-            await asyncio.sleep(0.1)
+            assert await asyncio.to_thread(mtime_checked.wait, 1.0), (
+                "refresh loop did not inspect the initial mtime"
+            )
 
             current_latest = newest_mtime(jsonl_glob)
-            time.sleep(0.05)
             _write_session(tmp_path, "sess-trig-b", subdir="proj-b")
             new_file = tmp_path / "projects" / "proj-b" / "sess-trig-b.jsonl"
             bumped = current_latest + 1.0
@@ -426,14 +482,9 @@ def test_refresh_wakes_on_trigger(tmp_path: Path) -> None:
 
             trigger.set()
 
-            # Give the loop a chance to wake, rebuild, and swap. The rebuild
-            # runs ``materialize_views`` in a thread so total time varies;
-            # poll generously and rely on interval_seconds=10 to prove the
-            # swap came from the trigger, not the timeout.
-            for _ in range(100):
-                await asyncio.sleep(0.05)
-                if app.state.last_refreshed_at is not None:
-                    break
+            assert await asyncio.to_thread(refresh_ready.wait, 5.0), (
+                "trigger did not complete a refresh swap"
+            )
             assert app.state.last_refreshed_at is not None, (
                 "trigger did not cause a refresh"
             )
@@ -445,7 +496,9 @@ def test_refresh_wakes_on_trigger(tmp_path: Path) -> None:
     asyncio.run(run())
 
 
-def test_last_refreshed_at_updates_after_swap(tmp_path: Path) -> None:
+def test_last_refreshed_at_updates_after_swap(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
     """After a successful swap, ``last_refreshed_at`` should advance."""
     from datetime import UTC, datetime  # noqa: PLC0415
 
@@ -458,6 +511,7 @@ def test_last_refreshed_at_updates_after_swap(tmp_path: Path) -> None:
     app = _fake_app()
     before = datetime.now(UTC)
     app.state.last_refreshed_at = before
+    mtime_checked, refresh_ready = _instrument_refresh_lifecycle(monkeypatch)
 
     async def run() -> None:
         task = asyncio.create_task(
@@ -473,19 +527,19 @@ def test_last_refreshed_at_updates_after_swap(tmp_path: Path) -> None:
         )
         try:
             # Let the task capture ``last_mtime`` before we bump the fs.
-            await asyncio.sleep(0.1)
+            assert await asyncio.to_thread(mtime_checked.wait, 1.0), (
+                "refresh loop did not inspect the initial mtime"
+            )
 
             current_latest = newest_mtime(jsonl_glob)
-            time.sleep(0.05)
             _write_session(tmp_path, "sess-lr-b", subdir="proj-b")
             new_file = tmp_path / "projects" / "proj-b" / "sess-lr-b.jsonl"
             bumped = current_latest + 1.0
             os.utime(new_file, (bumped, bumped))
 
-            for _ in range(40):
-                await asyncio.sleep(0.1)
-                if app.state.last_refreshed_at != before:
-                    break
+            assert await asyncio.to_thread(refresh_ready.wait, 5.0), (
+                "refresh did not complete its swap"
+            )
             assert app.state.last_refreshed_at > before
         finally:
             task.cancel()
@@ -512,11 +566,26 @@ def test_refresh_clears_in_progress_on_error(
 
     monkeypatch.setattr(refresh, "newest_mtime", fake_newest_mtime)
 
+    rebuild_finished = threading.Event()
+
     def fake_rebuild(*args, **kwargs):
-        raise RuntimeError("boom")
+        try:
+            raise RuntimeError("boom")
+        finally:
+            rebuild_finished.set()
 
     monkeypatch.setattr(refresh, "_rebuild_sidecar", fake_rebuild)
     monkeypatch.setattr(refresh, "_swap_in", lambda *a, **kw: None)
+    cleanup_done = threading.Event()
+    original_finish = refresh._finish_refresh
+
+    def observe_finish(*args, **kwargs):
+        result = original_finish(*args, **kwargs)
+        if not args[0].refresh_in_progress:
+            cleanup_done.set()
+        return result
+
+    monkeypatch.setattr(refresh, "_finish_refresh", observe_finish)
 
     app = _fake_app()
 
@@ -533,15 +602,15 @@ def test_refresh_clears_in_progress_on_error(
             )
         )
         try:
-            # Poll a few ticks; the loop should error-and-retry each time,
-            # and refresh_in_progress should end up False after each attempt.
-            for _ in range(30):
-                await asyncio.sleep(0.05)
-                if counter["n"] >= 3:
-                    break
-            # Give the finally block one more tick to settle.
-            await asyncio.sleep(0.1)
-            assert app.state.refresh_in_progress is False
+            assert await asyncio.to_thread(rebuild_finished.wait, 1.0), (
+                "raising rebuild did not execute its cleanup"
+            )
+            assert await asyncio.to_thread(cleanup_done.wait, 1.0), (
+                "refresh loop did not finish error cleanup"
+            )
+            assert app.state.refresh_in_progress is False, (
+                "refresh cleanup must clear the in-progress flag"
+            )
         finally:
             task.cancel()
             with pytest.raises(asyncio.CancelledError):
