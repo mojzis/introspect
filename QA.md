@@ -29,8 +29,10 @@ home-directory glob is used as evidence.
 
 # Functional QA: Pycoati accepted findings
 
-Run these commands from the repository root. They use the locked environment
-and write only to the explicitly named disposable files under `/tmp`:
+Run these commands from the repository root. They use the locked environment.
+The repository scans write their reports to the explicitly named disposable
+files under `/tmp`; the synthetic consumer creates and removes a project under
+the system temporary directory:
 
 ```bash
 uv run --locked pycoati --version
@@ -55,10 +57,10 @@ counts of 1 for `check_call`, `check_output`, `run(check=True)`, and
 subprocess name, and checked calls swallowed by `try`/`except` or
 `contextlib.suppress`. It also proves a failing checked child reaches pytest,
 keeps one distinct active mock signal actionable, and observes exactly one each
-of `unknown_test`, `signal_not_active`, and `content_changed` stale states. Its temporary project
-and all child processes self-clean; it does not read conversation logs,
-personal databases, or shared services. Each Pycoati scan and the focused
-pytest failure probe has a 120-second timeout.
+of `unknown_test`, `signal_not_active`, and `content_changed` stale states. Its
+temporary project is removed after its child processes finish; it does not read
+conversation logs, personal databases, or shared services. Each Pycoati scan
+and the focused pytest failure probe has a 120-second timeout.
 
 If the scan output or consumer fails, preserve stderr and the JSON for
 diagnosis. Clean only the named disposable scan files afterward:
