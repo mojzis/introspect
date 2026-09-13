@@ -1,7 +1,7 @@
 # Pycoati 0.2.9 audit
 
 Audit date: 2026-09-13. Base: `2dc8480786a260384f1fed18903e52b06f716322`.
-Tested implementation revision: `befc22c`.
+Tested implementation revision: `30376ac`.
 
 ## Reproducibility
 
@@ -29,7 +29,7 @@ collected tests, and 92.184% line coverage. The raw, default, and
 `--include-accepted` records retained the same measured counts, files, test
 records, scores, and coverage. Acceptance metadata and the expected shortlist
 membership were the only policy differences; runtime and slow-test ordering
-naturally varied (78.93s raw, 82.15s default, 81.97s include-accepted).
+naturally varied (77.92s raw, 76.50s default, 78.74s include-accepted).
 
 | Mode | Accepted | Stale | Shortlist | Result |
 |---|---:|---:|---:|---|
@@ -72,9 +72,10 @@ shorten the report.
 
 ## Repository checks and smoke
 
-The implementation commit's hook passed ruff, ty, biston, zorilla, and
-gerenuk. Repository tests passed with 1,131 passed and 1 skipped in 21.56s,
-with 92% source coverage. The prepared application smoke passed:
+The implementation and QA-evidence commits passed the repository hook checks:
+ruff, ty, biston, zorilla, and gerenuk. Repository tests passed with 1,131
+passed and 1 skipped in 21.56s, with 92% source coverage. The prepared
+application smoke passed:
 
 ```text
 uv run poe test
