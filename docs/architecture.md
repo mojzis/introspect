@@ -563,6 +563,7 @@ randomized order via `pytest-randomly`).
 | Web routes | `tests/routes/` (~25 files) | One file per page or feature — filters, pagination, sorting, HTMX fragments, charts, cost math, tokenscape, trajectory, subagents, triggers, SQL API |
 | Docs | `test_docs_drift.py` | Commands, env vars, relations, MCP tools/prompts, templates, routes, and nav are all mentioned in the docs |
 | End-to-end | `e2e/test_crawl.py`, `e2e/test_flows.py` | Browse every route over real fixture JSONL |
+| Test audit | `pycoati` | Periodic ranked verification audit; raw scores remain authoritative and it is not a hook or CI gate |
 
 ### Fixtures (`conftest.py`)
 

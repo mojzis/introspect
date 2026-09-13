@@ -1,0 +1,57 @@
+schema_version = "1"
+
+[[accept]]
+test = "tests/test_docs_drift.py::test_every_cli_command_is_documented"
+signals = ["zero_asserts"]
+reason = "The helper calls pytest.fail for missing CLI documentation, so its assertion is intentionally indirect."
+reviewed = "2026-09-13"
+fingerprint = "f8ca64ae4366810b"
+
+[[accept]]
+test = "tests/test_docs_drift.py::test_every_env_var_is_documented"
+signals = ["zero_asserts"]
+reason = "The helper calls pytest.fail for missing environment-variable documentation, so its assertion is intentionally indirect."
+reviewed = "2026-09-13"
+fingerprint = "83f21fe2d9052482"
+
+[[accept]]
+test = "tests/test_docs_drift.py::test_every_relation_is_documented"
+signals = ["zero_asserts"]
+reason = "The helper calls pytest.fail for missing relation documentation, so its assertion is intentionally indirect."
+reviewed = "2026-09-13"
+fingerprint = "b3952711d78eca76"
+
+[[accept]]
+test = "tests/test_docs_drift.py::test_every_mcp_tool_is_documented"
+signals = ["zero_asserts"]
+reason = "The helper calls pytest.fail for missing MCP-tool documentation, so its assertion is intentionally indirect."
+reviewed = "2026-09-13"
+fingerprint = "cf130a6b63f68504"
+
+[[accept]]
+test = "tests/test_docs_drift.py::test_every_mcp_prompt_is_documented"
+signals = ["zero_asserts"]
+reason = "The helper calls pytest.fail for missing MCP-prompt documentation, so its assertion is intentionally indirect."
+reviewed = "2026-09-13"
+fingerprint = "ab7f29e79c5a9e9a"
+
+[[accept]]
+test = "tests/test_docs_drift.py::test_every_query_template_is_documented"
+signals = ["zero_asserts"]
+reason = "The helper calls pytest.fail for missing query-template documentation, so its assertion is intentionally indirect."
+reviewed = "2026-09-13"
+fingerprint = "69dff7193ac13e8f"
+
+[[accept]]
+test = "tests/test_docs_drift.py::test_every_route_is_documented"
+signals = ["zero_asserts"]
+reason = "The helper calls pytest.fail for missing route documentation, so its assertion is intentionally indirect."
+reviewed = "2026-09-13"
+fingerprint = "f8986ef6f43c30d8"
+
+[[accept]]
+test = "tests/test_cli.py::test_finish_connected_session_leaves_existing_server_alone"
+signals = ["zero_asserts"]
+reason = "The no-op contract is that an existing connected server is left untouched when no spawned process exists."
+reviewed = "2026-09-13"
+fingerprint = "12d0efb3a0e1bcc4"

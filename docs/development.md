@@ -26,7 +26,7 @@ Tests run in parallel via `pytest-xdist`.
 
 ## Toolbox
 
-Four CLI tools ship as dev dependencies. Each documents itself — run
+Five CLI tools ship as dev dependencies. Each documents itself — run
 `uv run <tool> --help` first rather than guessing at flags.
 
 | Tool | Runs | Purpose |
@@ -35,12 +35,14 @@ Four CLI tools ship as dev dependencies. Each documents itself — run
 | `gerenuk` | in the hook | Which symbols the diff changed; feeds test selection |
 | `biston` | in the hook | Structural clone detection |
 | `zorilla` | on demand only | pytest test-smell lint |
+| `pycoati` | periodic audit only | Ranked test-verification audit; never a hook or CI gate |
 
 Refresh them all to their latest versions:
 
 ```bash
 uv sync --upgrade-package gerenuk --upgrade-package biston \
-  --upgrade-package zorilla --upgrade-package ty-find
+  --upgrade-package zorilla --upgrade-package ty-find \
+  --upgrade-package pycoati
 ```
 
 ```bash
@@ -68,7 +70,21 @@ uv run gerenuk audit <file.py>...   # unreferenced and test-only symbols
 uv run poe test-smells              # = zorilla check tests
 uv run zorilla stats tests
 uv run zorilla explain ZR004
+
+# Ranked test audit; run from the repository root and inspect raw findings.
+uv run pycoati . --no-accept --output /tmp/introspect-pycoati-raw.json
+uv run pycoati . --output /tmp/introspect-pycoati-actionable.json
+uv run pycoati . --include-accepted --output /tmp/introspect-pycoati-full.json
+uv run pycoati guide analyze
+uv run pycoati guide remediate
 ```
+
+Pycoati runs pytest and coverage subprocesses, so check `tool.ran_pytest` and
+`tool.ran_coverage` before using suite metrics. The raw scan is authoritative;
+the project-root `.pycoati-accept.toml` filters only the actionable shortlist.
+Review the [Pycoati 0.2.9 audit](audits/pycoati-0.2.9.md) and the
+[functional QA journey](../QA.md) for the current evidence and disposable
+black-box checks. Keep Pycoati out of hooks and CI.
 
 ## Commit hook
 

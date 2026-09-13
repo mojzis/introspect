@@ -729,7 +729,7 @@ dev = [
     { name = "httpx2" },
     { name = "madoqua", specifier = ">=0.2.3" },
     { name = "poethepoet" },
-    { name = "pycoati", specifier = ">=0.2.7" },
+    { name = "pycoati", specifier = ">=0.2.9" },
     { name = "pytest" },
     { name = "pytest-cov" },
     { name = "pytest-randomly", specifier = ">=4.1.0" },
@@ -1160,13 +1160,13 @@ wheels = [
 
 [[package]]
 name = "pycoati"
-version = "0.2.7"
+version = "0.2.9"
 source = { registry = "https://pypi.org/simple" }
-sdist = { url = "https://files.pythonhosted.org/packages/73/48/32a8a15278bf6d9fd32ae649988196f80a3fe7713fc9a239e0defa284e3b/pycoati-0.2.7.tar.gz", hash = "sha256:8479936109209afdf897576fab87b0a09b6d426815853db5f443583ba0d29d19", size = 145027, upload-time = "2026-09-06T10:16:32.865Z" }
+sdist = { url = "https://files.pythonhosted.org/packages/7c/93/32fd410e64d83ee056c7c3fc366a2cf20a405ce6cbf3247cf2929cdf93a5/pycoati-0.2.9.tar.gz", hash = "sha256:60a264c128d9d2ad24d56aea626f260a5dfa2e55f21513e82337f75499af8b26", size = 195542, upload-time = "2026-09-13T08:30:20.835Z" }
 wheels = [
-    { url = "https://files.pythonhosted.org/packages/92/77/428eb4adaa1e975d81bca60b18b373ec867301a643e5cde76eef8364aa60/pycoati-0.2.7-py3-none-macosx_11_0_arm64.whl", hash = "sha256:9599833af88090e77025131a9903abcec274aadfe445cb8ef27c29e50b32fa68", size = 1381423, upload-time = "2026-09-06T10:16:27.856Z" },
-    { url = "https://files.pythonhosted.org/packages/5f/56/a5ac29ba05decede07697cf016c3de438205a1223dae2df424f46d223745/pycoati-0.2.7-py3-none-manylinux_2_28_x86_64.whl", hash = "sha256:83dcf7fee42e6b57720e9866526798a4a5f33053584e712818f151e593d523d2", size = 1596183, upload-time = "2026-09-06T10:16:29.778Z" },
-    { url = "https://files.pythonhosted.org/packages/04/21/c1b336047dd795cac09c1f95d7d57d04c66bc30fe4fa5afc51fbbe1804f3/pycoati-0.2.7-py3-none-win_amd64.whl", hash = "sha256:55923c3450026564925b2cde9784aae9bcf7642281c9662368dcfc6f903bc01f", size = 1472390, upload-time = "2026-09-06T10:16:31.404Z" },
+    { url = "https://files.pythonhosted.org/packages/e4/3c/ca527e44b8b282f9bed71923bc44ddd5d975a2a29f42a8a81f4e8a79decc/pycoati-0.2.9-py3-none-macosx_11_0_arm64.whl", hash = "sha256:8abd3c21280d4087e2a401f563b1eaf18946ae09eff78823e8b6ce36da88f346", size = 1437517, upload-time = "2026-09-13T08:30:15.588Z" },
+    { url = "https://files.pythonhosted.org/packages/12/77/b267cb4210bf452d5c3b095d1614a2d038aa7da3d5a9afe83d3e2d88a34c/pycoati-0.2.9-py3-none-manylinux_2_28_x86_64.whl", hash = "sha256:660281ced42b42c304dd88d208ac361c89d5a783560d69d6560a88f0be300e0a", size = 1667062, upload-time = "2026-09-13T08:30:17.512Z" },
+    { url = "https://files.pythonhosted.org/packages/cc/6e/3fa92cbb39070e6c754f630a4c0d9d38c5f61087bea6db05a05cf5c9b5c6/pycoati-0.2.9-py3-none-win_amd64.whl", hash = "sha256:f92a7abf3c9340382ae8234c055255aaa1ac9f8a260fe3524e7a81e8d308851a", size = 1534165, upload-time = "2026-09-13T08:30:19.24Z" },
 ]
 
 [[package]]
