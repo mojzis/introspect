@@ -362,6 +362,9 @@ def main() -> None:
                     "test_check_returncode",
                     "test_unchecked_run",
                     "test_check_false",
+                    "test_replaced_subprocess_name",
+                    "test_swallowed_checked_run",
+                    "test_suppressed_checked_run",
                 ]
             },
             "shortlist_counts": {
