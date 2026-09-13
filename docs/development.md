@@ -83,8 +83,9 @@ Pycoati runs pytest and coverage subprocesses, so check `tool.ran_pytest` and
 `tool.ran_coverage` before using suite metrics. The raw scan is authoritative;
 the project-root `.pycoati-accept.toml` filters only the actionable shortlist.
 Review the [Pycoati 0.2.9 audit](audits/pycoati-0.2.9.md) and the
-[functional QA journey](../QA.md) for the current evidence and disposable
-black-box checks. Keep Pycoati out of hooks and CI.
+[functional QA journey](https://github.com/mojzis/introspect/blob/main/QA.md)
+for the current evidence and disposable black-box checks. Keep Pycoati out of
+hooks and CI.
 
 ## Commit hook
 
