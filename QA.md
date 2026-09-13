@@ -51,10 +51,11 @@ scores. Inspect stderr for pytest/coverage and stale-acceptance warnings.
 The synthetic consumer must print one JSON object with `status: "pass"`,
 Pycoati 0.2.9, pytest and coverage enabled, checked subprocess recognition
 counts of 1 for `check_call`, `check_output`, `run(check=True)`, and
-`check_returncode`, and 0 for unchecked `run` and `run(check=False)`. It also
-proves a failing checked child reaches pytest, keeps one distinct active mock
-signal actionable, and observes exactly one each of `unknown_test`,
-`signal_not_active`, and `content_changed` stale states. Its temporary project
+`check_returncode`, and 0 for unchecked `run`, `run(check=False)`, a replaced
+subprocess name, and checked calls swallowed by `try`/`except` or
+`contextlib.suppress`. It also proves a failing checked child reaches pytest,
+keeps one distinct active mock signal actionable, and observes exactly one each
+of `unknown_test`, `signal_not_active`, and `content_changed` stale states. Its temporary project
 and all child processes self-clean; it does not read conversation logs,
 personal databases, or shared services.
 

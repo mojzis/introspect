@@ -92,6 +92,7 @@ def _write_fixture(project: Path) -> None:
     (project / "tests" / "test_fixture.py").write_text(
         dedent(
             """
+            import contextlib
             import subprocess
             import sys
             from pathlib import Path
@@ -129,6 +130,23 @@ def _write_fixture(project: Path) -> None:
                 subprocess.run([sys.executable, CHILD], check=False)
 
 
+            def test_replaced_subprocess_name():
+                subprocess = Mock()
+                subprocess.run([sys.executable, CHILD], check=True)
+
+
+            def test_swallowed_checked_run():
+                try:
+                    subprocess.run([sys.executable, CHILD], check=True)
+                except subprocess.CalledProcessError:
+                    pass
+
+
+            def test_suppressed_checked_run():
+                with contextlib.suppress(subprocess.CalledProcessError):
+                    subprocess.run([sys.executable, CHILD], check=True)
+
+
             def test_accept_me():
                 value = 1
                 value += 1
@@ -157,6 +175,9 @@ def _assert_subprocess_contract(scan: dict[str, Any]) -> None:
         "test_check_returncode": 1,
         "test_unchecked_run": 0,
         "test_check_false": 0,
+        "test_replaced_subprocess_name": 0,
+        "test_swallowed_checked_run": 0,
+        "test_suppressed_checked_run": 0,
     }
     for name, expected in expected_external.items():
         nodeid = f"tests/test_fixture.py::{name}"
@@ -197,7 +218,7 @@ def main() -> None:
             failed_test.returncode == 0
             or "CalledProcessError" not in failed_test.stdout
         ):
-            raise QaFailure("checked subprocess failure did not reach pytest")
+            raise QaFailure("pytest failure diagnostic was not observed")
         failed_child = _scan(project, "--no-accept")
         failed_inventory = failed_child["inventory"]
         if not failed_inventory["tool"]["ran_pytest"]:
@@ -249,13 +270,16 @@ def main() -> None:
             raise QaFailure("include-accepted flag was not reported")
         if raw_inventory["accepted"]["path"] is not None:
             raise QaFailure("--no-accept read the baseline")
-        if _without_shortlist(raw_inventory) != _without_shortlist(included_inventory):
-            raw_audit = _without_shortlist(raw_inventory)
-            included_audit = _without_shortlist(included_inventory)
-            differing = [
-                key for key in raw_audit if raw_audit[key] != included_audit[key]
-            ]
-            raise QaFailure(f"raw/include-accepted audit records diverged: {differing}")
+        normalized_audits = {
+            "default": _without_shortlist(default_inventory),
+            "raw": _without_shortlist(raw_inventory),
+            "include-accepted": _without_shortlist(included_inventory),
+        }
+        raw_audit = normalized_audits["raw"]
+        for label, audit in normalized_audits.items():
+            if audit != raw_audit:
+                differing = [key for key in raw_audit if raw_audit[key] != audit[key]]
+                raise QaFailure(f"raw/{label} audit records diverged: {differing}")
         for inventory in (default_inventory, raw_inventory, included_inventory):
             if (
                 not inventory["tool"]["ran_pytest"]
@@ -351,7 +375,10 @@ def main() -> None:
                 for status in ("unknown_test", "signal_not_active", "content_changed")
             },
             "active_signal_actionable": active_nodeid in default_shortlist,
-            "warnings_observed": ["pytest failure warning", "stale acceptance warning"],
+            "warnings_observed": [
+                "pytest failure diagnostic",
+                "stale acceptance warning",
+            ],
         }
         sys.stdout.write(json.dumps(result, sort_keys=True) + "\n")
 
