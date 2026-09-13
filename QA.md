@@ -57,7 +57,8 @@ subprocess name, and checked calls swallowed by `try`/`except` or
 keeps one distinct active mock signal actionable, and observes exactly one each
 of `unknown_test`, `signal_not_active`, and `content_changed` stale states. Its temporary project
 and all child processes self-clean; it does not read conversation logs,
-personal databases, or shared services.
+personal databases, or shared services. Each Pycoati scan and the focused
+pytest failure probe has a 120-second timeout.
 
 If the scan output or consumer fails, preserve stderr and the JSON for
 diagnosis. Clean only the named disposable scan files afterward:
