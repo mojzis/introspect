@@ -64,7 +64,9 @@ nav:
       - JSONL schema: schema.md
       - Configuration: configuration.md
       - Security: security.md
-  - Development: development.md
+  - Development:
+      - Development guide: development.md
+      - Pycoati 0.2.9 audit: audits/pycoati-0.2.9.md
   - For LLMs: llms.md
 
 markdown_extensions:
@@ -115,6 +117,7 @@ plugins:
           - security.md
         Development:
           - development.md
+          - audits/pycoati-0.2.9.md
         For LLMs:
           - llms.md
 

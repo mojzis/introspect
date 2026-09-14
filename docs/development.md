@@ -36,7 +36,7 @@ Six CLI tools ship as dev dependencies. Each documents itself — run
 | `biston` | in the hook | Structural clone detection |
 | `zorilla` | in the hook + on demand | pytest test-smell lint |
 | `madoqua` | on every Python commit + on demand | Orchestrates staged-file fixes and parallel checks |
-| `pycoati` | on demand | Periodic suspicion-ranked test-suite audit |
+| `pycoati` | periodic audit only | Ranked test-verification audit; never a hook or CI gate |
 
 Refresh them all to their latest versions:
 
@@ -110,7 +110,22 @@ uv run gerenuk audit <file.py>...   # unreferenced and test-only symbols
 uv run poe test-smells              # = zorilla check tests
 uv run zorilla stats tests
 uv run zorilla explain ZR004
+
+# Ranked test audit; run from the repository root and inspect raw findings.
+uv run pycoati . --no-accept --output /tmp/introspect-pycoati-raw.json
+uv run pycoati . --output /tmp/introspect-pycoati-actionable.json
+uv run pycoati . --include-accepted --output /tmp/introspect-pycoati-full.json
+uv run pycoati guide analyze
+uv run pycoati guide remediate
 ```
+
+Pycoati runs pytest and coverage subprocesses, so check `tool.ran_pytest` and
+`tool.ran_coverage` before using suite metrics. The raw scan is authoritative;
+the project-root `.pycoati-accept.toml` filters only the actionable shortlist.
+Review the [Pycoati 0.2.9 audit](audits/pycoati-0.2.9.md) and the
+[functional QA journey](https://github.com/mojzis/introspect/blob/main/QA.md)
+for the current evidence and disposable black-box checks. Keep Pycoati out of
+hooks and CI.
 
 ## Commit hook
 
