@@ -978,8 +978,6 @@ def ensure_materialized(
     db_path: Path = DEFAULT_DB_PATH,
     jsonl_glob: str = DEFAULT_JSONL_GLOB,
     *,
-    days: int = 0,
-    resolve_projects: bool = True,
     codex_glob: str | None = None,
 ) -> datetime | None:
     """Make sure the on-disk DB has materialized tables; build them if not.
@@ -1008,13 +1006,7 @@ def ensure_materialized(
     db_path.parent.mkdir(parents=True, exist_ok=True)
     conn = connect_writable(db_path)
     try:
-        materialize_views(
-            conn,
-            jsonl_glob,
-            days,
-            resolve_projects=resolve_projects,
-            codex_glob=codex_glob,
-        )
+        materialize_views(conn, jsonl_glob, codex_glob=codex_glob)
         build_search_corpus(conn)
         return read_last_materialized(conn)
     finally:

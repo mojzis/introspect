@@ -85,10 +85,7 @@ def _format_relative(dt: datetime | None) -> str:
     return f"{int(delta // _SECONDS_PER_DAY)}d ago"
 
 
-def _db(
-    db_path: Path | None = None,
-    jsonl_glob: str | None = None,
-):
+def _db():
     """Return a read connection, materializing the DB on first use.
 
     The CLI shares its DB with ``introspect serve``; if the server has already
@@ -96,14 +93,12 @@ def _db(
     every command sees the same fast path. A header line tells the user when
     the data was last materialized so stale results are obvious.
 
-    Defaults are resolved at call time (rather than via parameter defaults)
-    so that ``monkeypatch.setattr("introspect.cli.DEFAULT_DB_PATH", ...)`` in
-    tests redirects this code path the same way it redirects ``materialize``.
+    The module globals are read at call time so that
+    ``monkeypatch.setattr("introspect.cli.DEFAULT_DB_PATH", ...)`` in tests
+    redirects this code path the same way it redirects ``materialize``.
     """
-    if db_path is None:
-        db_path = DEFAULT_DB_PATH
-    if jsonl_glob is None:
-        jsonl_glob = DEFAULT_JSONL_GLOB
+    db_path = DEFAULT_DB_PATH
+    jsonl_glob = DEFAULT_JSONL_GLOB
     try:
         materialized_at = ensure_materialized(
             db_path, jsonl_glob, codex_glob=DEFAULT_CODEX_GLOB
