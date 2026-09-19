@@ -243,14 +243,17 @@ def codex_turn_context(turn_id: str, model: str = "gpt-5.6-terra") -> dict:
     return {"turn_id": turn_id, "model": model, "cwd": "/tmp/codex-test"}
 
 
-def write_codex_session(tmp_dir: Path, session_id: str) -> Path:
+def write_codex_session(
+    tmp_dir: Path, session_id: str, timestamp: str = "2026-08-20T10:00:00Z"
+) -> Path:
     """Write a minimal single-turn Codex rollout fixture."""
     lines = [
-        codex_record("session_meta", codex_session_meta(session_id)),
-        codex_record("turn_context", codex_turn_context("turn-1")),
+        codex_record("session_meta", codex_session_meta(session_id), timestamp),
+        codex_record("turn_context", codex_turn_context("turn-1"), timestamp),
         codex_record(
             "event_msg",
             {"type": "user_message", "message": "please fix", "text_elements": []},
+            timestamp,
         ),
     ]
     return write_codex_rollout(tmp_dir, session_id, lines)

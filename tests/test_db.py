@@ -3,6 +3,7 @@
 import subprocess
 import sys
 import tempfile
+from datetime import UTC, datetime, timedelta
 from pathlib import Path
 
 import duckdb
@@ -1103,10 +1104,11 @@ def test_materialize_views_unions_claude_and_codex_with_day_filter():
     ``INTROSPECT_REFRESH_WINDOW``) still unions correctly. The Claude fixture's
     timestamp is old (outside the window) and gets filtered on both sides,
     so only the recent Codex session should survive."""
+    recent = (datetime.now(UTC) - timedelta(days=1)).strftime("%Y-%m-%dT%H:%M:%SZ")
     with tempfile.TemporaryDirectory() as tmp:
         tmp_path = Path(tmp)
         _write_sample_jsonl(tmp_path)
-        _write_codex_session(tmp_path, "codex-sess-001")
+        _write_codex_session(tmp_path, "codex-sess-001", timestamp=recent)
 
         db_path = tmp_path / "test.duckdb"
         conn = duckdb.connect(str(db_path))
