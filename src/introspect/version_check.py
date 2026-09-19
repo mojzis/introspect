@@ -233,7 +233,7 @@ def _write_cache(path: Path, cache: VersionCache) -> None:
 # --- refresh (out-of-band) ---------------------------------------------------
 
 
-def _fetch_latest_version(timeout: float = FETCH_TIMEOUT_SECONDS) -> str | None:
+def _fetch_latest_version() -> str | None:
     """Single GET to the PyPI JSON endpoint. Any failure — network, timeout,
     non-200, unparseable body — returns ``None`` rather than raising.
 
@@ -246,7 +246,7 @@ def _fetch_latest_version(timeout: float = FETCH_TIMEOUT_SECONDS) -> str | None:
         headers={"Accept": "application/json", "User-Agent": "introspy-update-check"},
     )
     try:
-        with urllib.request.urlopen(req, timeout=timeout) as resp:  # noqa: S310
+        with urllib.request.urlopen(req, timeout=FETCH_TIMEOUT_SECONDS) as resp:  # noqa: S310
             if resp.status != _HTTP_OK:
                 return None
             data = json.loads(resp.read())

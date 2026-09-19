@@ -296,9 +296,8 @@ class _FileState:
         self.session_metadata: dict[str, dict[str, str]] = {}
         self.rows: list[dict[str, Any]] = []
 
-    def next_uuid(self, line_index: int, sub_index: int = 0) -> str:
-        base = f"{self.session_id}:{line_index}"
-        return base if sub_index == 0 else f"{base}:{sub_index}"
+    def next_uuid(self, line_index: int) -> str:
+        return f"{self.session_id}:{line_index}"
 
     def next_read_uuid(self, line_index: int) -> str:
         """Distinct uuid for each read-enrichment row emitted from one line."""

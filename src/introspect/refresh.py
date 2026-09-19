@@ -196,19 +196,14 @@ def make_stdio_refresh_state() -> StdioRefreshState:
     )
 
 
-def set_refresh_target(
-    state: RefreshState,
-    window: str,
-    *,
-    days: int | None = None,
-) -> RefreshTarget:
+def set_refresh_target(state: RefreshState, window: str) -> RefreshTarget:
     """Atomically publish a new target and advance its generation.
 
     The compatibility ``refresh_window`` attribute remains mirrored for
     existing templates/callers, but refresh decisions use ``refresh_target``.
     """
     current = getattr(state, "refresh_target", None)
-    requested = target_for_window(window, days=days)
+    requested = target_for_window(window)
     changed = True
     if isinstance(current, RefreshTarget) and (
         current.window == requested.window and current.days == requested.days
@@ -217,7 +212,7 @@ def set_refresh_target(
         changed = False
     else:
         generation = current.generation + 1 if isinstance(current, RefreshTarget) else 1
-        target = target_for_window(window, days=days, generation=generation)
+        target = target_for_window(window, generation=generation)
     state.refresh_target = target
     state.refresh_window = target.window
     state.refresh_pending = bool(getattr(state, "refresh_pending", False)) or changed
@@ -294,7 +289,6 @@ def discover_cold_start_candidates(
     *,
     days: int = 1,
     now: datetime | None = None,
-    max_candidates: int = MAX_COLD_START_CANDIDATES,
 ) -> CandidateFiles:
     """Discover a bounded, conservative file set for the initial preview.
 
@@ -303,12 +297,6 @@ def discover_cold_start_candidates(
     same mtime guard when a test/custom path has no date partition.  The SQL
     timestamp filter remains authoritative after this preselection.
     """
-    if max_candidates < 1:
-        return CandidateFiles(
-            (),
-            (),
-            next(glob.iglob(jsonl_glob, recursive=True), None) is not None,  # noqa: PTH207
-        )
     moment = now or datetime.now(UTC)
     span_days = max(1, days)
     claude_cutoff = (
@@ -346,8 +334,8 @@ def discover_cold_start_candidates(
             )
         )
 
-    claude_selected, claude_truncated = _bounded(claude, max_candidates)
-    remaining = max(0, max_candidates - len(claude_selected))
+    claude_selected, claude_truncated = _bounded(claude, MAX_COLD_START_CANDIDATES)
+    remaining = max(0, MAX_COLD_START_CANDIDATES - len(claude_selected))
     codex_selected, codex_truncated = _bounded(codex, remaining)
     return CandidateFiles(
         claude_selected,
