@@ -423,28 +423,24 @@ FROM priced
 """  # noqa: S608
 
 
-def _rollup_select(alias: str = "") -> str:
-    """Aggregate list every TTL rollup shares, optionally table-qualified.
-
-    ``_comparison_from_row`` unpacks these positionally, and
-    ``session_cache_ttl`` is built from the same fragment, so the column
-    order lives in exactly one place.
-    """
-    q = f"{alias}." if alias else ""
-    return f"""
-    SUM({q}cost_5m_usd) AS cost_5m,
-    SUM({q}cost_1h_usd) AS cost_1h,
+# Aggregate list every TTL rollup shares, qualified by the ``cr`` alias every
+# caller gives ``cache_requests``. ``_comparison_from_row`` unpacks these
+# positionally, and ``session_cache_ttl`` is built from the same fragment, so
+# the column order lives in exactly one place.
+_ROLLUP_SELECT = """
+    SUM(cr.cost_5m_usd) AS cost_5m,
+    SUM(cr.cost_1h_usd) AS cost_1h,
     COUNT(*) AS n_requests,
-    COUNT(*) FILTER (WHERE {q}gap_recoverable) AS n_gaps_recoverable,
-    COUNT(*) FILTER (WHERE {q}gap_unrecoverable) AS n_gaps_unrecoverable,
-    COUNT(*) FILTER (WHERE {q}structural_invalidation) AS n_structural,
-    mode({q}ttl_observed) FILTER (WHERE {q}ttl_observed <> 'unknown')
+    COUNT(*) FILTER (WHERE cr.gap_recoverable) AS n_gaps_recoverable,
+    COUNT(*) FILTER (WHERE cr.gap_unrecoverable) AS n_gaps_unrecoverable,
+    COUNT(*) FILTER (WHERE cr.structural_invalidation) AS n_structural,
+    mode(cr.ttl_observed) FILTER (WHERE cr.ttl_observed <> 'unknown')
         AS ttl_observed_dominant,
     COALESCE(
-        SUM({q}miss_premium_usd) FILTER (WHERE {q}gap_recoverable), 0
+        SUM(cr.miss_premium_usd) FILTER (WHERE cr.gap_recoverable), 0
     ) AS recoverable_waste_usd,
     COALESCE(
-        SUM({q}miss_premium_usd) FILTER (WHERE {q}gap_unrecoverable), 0
+        SUM(cr.miss_premium_usd) FILTER (WHERE cr.gap_unrecoverable), 0
     ) AS unrecoverable_break_usd
 """
 
@@ -453,14 +449,13 @@ def _rollup_select(alias: str = "") -> str:
 # Diagnostics only: ``promptCacheTtl`` is set per user/project, so a
 # per-session "you should have used 1h here" is not actionable on its own —
 # the project and global rollups are what you act on. Built from the same
-# ``_rollup_select`` fragment as those, so the aggregate definitions cannot
+# ``_ROLLUP_SELECT`` fragment as those, so the aggregate definitions cannot
 # drift between the view and the Python API.
-def _session_cache_ttl_body() -> str:
-    return f"""
+SESSION_CACHE_TTL_BODY = f"""
 SELECT
     cr.session_id,
     cr.is_sidechain,
-    {_rollup_select("cr")},
+    {_ROLLUP_SELECT},
     SUM(cr.cost_1h_usd) - SUM(cr.cost_5m_usd) AS delta,
     SUM(cr.cost_observed_usd) AS cost_observed,
     COALESCE(SUM(cr.prefix_total) FILTER (WHERE cr.gap_recoverable), 0)
@@ -468,9 +463,6 @@ SELECT
 FROM cache_requests cr
 GROUP BY cr.session_id, cr.is_sidechain
 """  # noqa: S608
-
-
-SESSION_CACHE_TTL_BODY = _session_cache_ttl_body()
 
 
 class TtlComparison(NamedTuple):
@@ -568,23 +560,21 @@ def _sidechain_and_window(
     *,
     sidechain: bool,
     window: tuple[str, str] | None,
-    alias: str = "",
     provider: str | None = None,
 ) -> tuple[str, list[Any]]:
     """WHERE clause shared by the global and per-project rollups.
 
-    ``alias`` qualifies the column names for callers that join
-    ``cache_requests`` against another relation.
+    Columns are qualified by the ``cr`` alias both callers give
+    ``cache_requests``.
     """
-    prefix = f"{alias}." if alias else ""
-    clause = f"WHERE {prefix}is_sidechain = ?"
+    clause = "WHERE cr.is_sidechain = ?"
     params: list[Any] = [sidechain]
     if window is not None:
-        clause += f" AND {prefix}timestamp >= ? AND {prefix}timestamp < ?"
+        clause += " AND cr.timestamp >= ? AND cr.timestamp < ?"
         params.extend(window)
     if provider:
         clause += (
-            f" AND {prefix}session_id IN "  # noqa: S608
+            " AND cr.session_id IN "
             "(SELECT session_id FROM logical_sessions WHERE provider = ?)"
         )
         params.append(provider)
@@ -606,11 +596,10 @@ def global_ttl_comparison(
     clause, params = _sidechain_and_window(
         sidechain=sidechain,
         window=window,
-        alias="cr",
         provider=provider,
     )
     row = db.execute(
-        f"SELECT {_rollup_select('cr')} FROM cache_requests cr {clause}",  # noqa: S608
+        f"SELECT {_ROLLUP_SELECT} FROM cache_requests cr {clause}",  # noqa: S608
         params,
     ).fetchone()
     return _comparison_from_row(row)
@@ -620,19 +609,16 @@ def project_ttl_comparisons(
     db: duckdb.DuckDBPyConnection,
     *,
     sidechain: bool = False,
-    window: tuple[str, str] | None = None,
 ) -> list[tuple[str, TtlComparison]]:
     """Per-project verdicts, most spend first.
 
     The setting is per user/project, so this — not the per-session rollup —
     is the actionable granularity.
     """
-    clause, params = _sidechain_and_window(
-        sidechain=sidechain, window=window, alias="cr"
-    )
+    clause, params = _sidechain_and_window(sidechain=sidechain, window=None)
     rows = db.execute(
         f"""
-        SELECT COALESCE(ls.project, '?') AS project, {_rollup_select("cr")}
+        SELECT COALESCE(ls.project, '?') AS project, {_ROLLUP_SELECT}
         FROM cache_requests cr
         LEFT JOIN logical_sessions ls ON ls.session_id = cr.session_id
         {clause}
@@ -649,7 +635,6 @@ def cache_miss_event_rows(
     *,
     session_id: str | None = None,
     timestamp_window: tuple[str, str] | None = None,
-    sidechain: bool = False,
     provider: str | None = None,
 ) -> list[dict[str, Any]]:
     """Every cache miss in scope, straight off ``cache_requests``.
@@ -663,8 +648,8 @@ def cache_miss_event_rows(
     would have. Callers must keep the two apart; summing them back together
     reintroduces exactly the inflation this replaced.
     """
-    clauses = ["cache_miss", "is_sidechain = ?"]
-    params: list[Any] = [sidechain]
+    clauses = ["cache_miss", "NOT is_sidechain"]
+    params: list[Any] = []
     if session_id is not None:
         clauses.append("session_id = ?")
         params.append(session_id)
@@ -798,9 +783,7 @@ def gap_histogram(
     ]
 
 
-def parity_residuals(
-    db: duckdb.DuckDBPyConnection, *, sidechain: bool = False
-) -> list[dict[str, Any]]:
+def parity_residuals(db: duckdb.DuckDBPyConnection) -> list[dict[str, Any]]:
     """Per-session simulated-vs-observed residuals on uniform-TTL sessions.
 
     The gate on the whole counterfactual: if simulating the TTL a session
@@ -820,7 +803,7 @@ def parity_residuals(
             SELECT session_id,
                    ANY_VALUE(ttl_observed) AS ttl
             FROM cache_requests
-            WHERE is_sidechain = ?
+            WHERE NOT is_sidechain
             GROUP BY session_id
             HAVING COUNT(*) FILTER (
                        WHERE ttl_observed NOT IN ('5m', '1h')
@@ -836,10 +819,9 @@ def parity_residuals(
                      ELSE cr.cost_5m_usd END) AS simulated
         FROM cache_requests cr
         JOIN uniform u ON u.session_id = cr.session_id
-        WHERE cr.is_sidechain = ?
+        WHERE NOT cr.is_sidechain
         GROUP BY cr.session_id, u.ttl
-        """,
-        [sidechain, sidechain],
+        """
     ).fetchall()
     out: list[dict[str, Any]] = []
     for session_id, ttl, n_requests, observed, simulated in rows:

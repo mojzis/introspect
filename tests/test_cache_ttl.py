@@ -347,7 +347,7 @@ def test_mixed_ttl_session_is_excluded_from_the_parity_gate():
 def test_session_cache_ttl_rollup_matches_the_python_verdict(mixed_gaps):
     """The ad-hoc-SQL view and ``global_ttl_comparison`` agree.
 
-    Both are built from ``_rollup_select``; this pins that they stay so.
+    Both are built from ``_ROLLUP_SELECT``; this pins that they stay so.
     """
     conn, _ = mixed_gaps
     row = conn.execute(
