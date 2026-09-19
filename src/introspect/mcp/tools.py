@@ -398,11 +398,6 @@ def _render_cost_lines(per_model: list[_ModelSpend]) -> list[str]:
     return lines
 
 
-def _session_cost_lines(conn: duckdb.DuckDBPyConnection, session_id: str) -> list[str]:
-    """Render the token-breakdown / cost block for one session."""
-    return _render_cost_lines(_fetch_model_spend(conn, session_id))
-
-
 @_data_tool
 def get_session(session_id: str) -> str:
     """Get full session content by session ID.
@@ -438,7 +433,7 @@ def get_session(session_id: str) -> str:
             f"CWD: {meta[7]}",
             f"Branch: {meta[8]}",
         ]
-        lines.extend(_session_cost_lines(conn, session_id))
+        lines.extend(_render_cost_lines(_fetch_model_spend(conn, session_id)))
         lines.extend(["", "--- Messages ---"])
 
         turns = conn.execute(
