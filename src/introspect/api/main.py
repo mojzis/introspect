@@ -31,7 +31,7 @@ from introspect.db import (
     materialize_views,
 )
 from introspect.mcp.refresh_bridge import set_state as set_mcp_refresh_state
-from introspect.mcp.server import create_mcp_server
+from introspect.mcp.server import create_mcp_http_app, create_mcp_server
 from introspect.refresh import (
     DEFAULT_WINDOW,
     VALID_WINDOWS,
@@ -251,8 +251,8 @@ async def lifespan(app: FastAPI):  # noqa: PLR0915
         )
 
     # Create a fresh MCP server and replace the placeholder mount
-    mcp_server = create_mcp_server(app.state.bind_host)
-    mcp_app = mcp_server.streamable_http_app()
+    mcp_server = create_mcp_server()
+    mcp_app = create_mcp_http_app(mcp_server, app.state.bind_host)
     for route in app.routes:
         if getattr(route, "path", None) == "/mcp":
             route.app = mcp_app  # ty: ignore[unresolved-attribute]

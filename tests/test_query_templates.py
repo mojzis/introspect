@@ -23,7 +23,7 @@ from unittest.mock import patch
 
 import duckdb
 import pytest
-from mcp.types import GetPromptResult, TextContent
+from mcp.types import GetPromptResult, InputRequiredResult, TextContent
 
 from introspect.db import materialize_views
 from introspect.mcp.server import create_mcp_server
@@ -428,13 +428,15 @@ _PROMPT_SAMPLE_ARGS: dict[str, dict[str, object]] = {
 }
 
 
-def _prompt_text(result: GetPromptResult) -> str:
+def _prompt_text(result: GetPromptResult | InputRequiredResult) -> str:
     """Extract the rendered text from a single-message prompt result.
 
-    Every introspect prompt fn returns a plain `str`, which FastMCP wraps as
-    one `TextContent`-bearing message — narrows the `content` union so ty
-    doesn't flag `.text` as missing on the other content variants.
+    Every introspect prompt fn returns a plain `str`, which MCPServer wraps as
+    one `TextContent`-bearing message — narrows the result and `content`
+    unions so ty doesn't flag `.messages` / `.text` as missing on the other
+    variants.
     """
+    assert isinstance(result, GetPromptResult)
     content = result.messages[0].content
     assert isinstance(content, TextContent)
     return content.text
