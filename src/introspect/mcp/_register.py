@@ -1,4 +1,4 @@
-"""Register MCP tools on a FastMCP instance."""
+"""Register MCP tools on an MCPServer instance."""
 
 from __future__ import annotations
 
@@ -8,12 +8,12 @@ from types import FunctionType
 from typing import TYPE_CHECKING
 
 if TYPE_CHECKING:
-    from mcp.server.fastmcp import FastMCP
+    from mcp.server.mcpserver import MCPServer
 
     from introspect.query_templates import TemplateKind
 
 
-def register_tools(mcp: FastMCP) -> None:
+def register_tools(mcp: MCPServer) -> None:
     """Register all introspect MCP tools on the given server instance."""
     from introspect.mcp.tools import (  # noqa: PLC0415
         describe_schema,
@@ -137,7 +137,7 @@ def _register_deterministic_template_tools(
     )
 
 
-def register_prompts(mcp: FastMCP) -> None:
+def register_prompts(mcp: MCPServer) -> None:
     """Register all introspect MCP prompts on the given server instance.
 
     Exploratory-template adapters: every kind="exploratory" entry in the

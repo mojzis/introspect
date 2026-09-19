@@ -5,8 +5,9 @@ import contextlib
 from contextlib import asynccontextmanager
 from typing import cast
 
-from mcp.server.fastmcp import FastMCP
+from mcp.server.mcpserver import MCPServer
 from mcp.server.transport_security import TransportSecuritySettings
+from starlette.applications import Starlette
 
 from introspect.mcp._register import register_prompts, register_tools
 from introspect.mcp.refresh_bridge import get_state, set_state
@@ -85,10 +86,11 @@ Example — top sessions by cost:
 
 
 @asynccontextmanager
-async def _lifespan(_server: FastMCP):
+async def _lifespan(_server: MCPServer):
     """Start standalone progressive loading after MCP transport setup."""
     # The embedded HTTP server already owns the shared lifecycle and bridge.
-    # FastMCP still runs this lifespan for its mounted session manager.
+    # MCPServer still runs this lifespan once, when its mounted session
+    # manager starts.
     if get_state() is not None:
         yield
         return
@@ -109,28 +111,32 @@ async def _lifespan(_server: FastMCP):
                 state.db_path.with_name(state.db_path.name + ".next").unlink()
 
 
-def create_mcp_server(bind_host: str = "") -> FastMCP:
-    """Create a fresh MCP server instance with all tools registered.
+def create_mcp_server() -> MCPServer:
+    """Create a fresh MCP server instance with all tools and prompts registered."""
+    server = MCPServer(
+        "introspect",
+        instructions=INSTRUCTIONS,
+        lifespan=_lifespan,
+    )
+    register_tools(server)
+    register_prompts(server)
+    return server
+
+
+def create_mcp_http_app(server: MCPServer, bind_host: str) -> Starlette:
+    """Build the streamable-HTTP ASGI app for ``server``, to mount at ``/mcp``.
 
     ``bind_host`` is the address the HTTP server bound to, used only to
     decide whether the transport enforces its loopback host/origin
-    allowlists. The default — an empty string, and what the stdio entry point
-    passes — enforces them; stdio has no HTTP transport for them to apply to.
+    allowlists; an empty string enforces them. The endpoint is served at the
+    sub-app root so that mounting it at ``/mcp`` in FastAPI yields a final
+    path of ``/mcp``, not ``/mcp/mcp``.
     """
     security = (
         _OPEN_TRANSPORT_SECURITY
         if bind_host and not is_loopback_host(bind_host)
         else _LOOPBACK_TRANSPORT_SECURITY
     )
-    server = FastMCP(
-        "introspect",
-        instructions=INSTRUCTIONS,
-        transport_security=security,
-        lifespan=_lifespan,
+    return server.streamable_http_app(
+        streamable_http_path="/", transport_security=security
     )
-    # Serve the streamable HTTP endpoint at the sub-app root so that mounting
-    # it at `/mcp` in FastAPI yields a final path of `/mcp`, not `/mcp/mcp`.
-    server.settings.streamable_http_path = "/"
-    register_tools(server)
-    register_prompts(server)
-    return server

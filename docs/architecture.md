@@ -48,7 +48,7 @@ src/introspect/
 │       ├── refresh.py      # Manual refresh trigger + status fragment
 │       └── raw.py          # Raw JSONL records
 ├── mcp/
-│   ├── server.py           # FastMCP server factory + client instructions
+│   ├── server.py           # MCPServer factory + client instructions
 │   ├── _register.py        # Tool / prompt registration and registry wiring
 │   ├── tools.py            # MCP tool implementations
 │   ├── prompts.py          # MCP prompt seeds for exploratory templates
@@ -155,12 +155,13 @@ A FastAPI application launched via `introspy serve`.
 
 ### MCP server (`mcp/server.py`)
 
-Built with FastMCP. `create_mcp_server(bind_host)` registers tools
-(`register_tools`) and prompts (`register_prompts`) and attaches the
-client-facing `INSTRUCTIONS` blob — schema orientation for clients that have no
-other context about the data. `bind_host` selects the transport's
-`TransportSecuritySettings`: a loopback bind (and stdio, which passes the
-default) gets the SDK's DNS-rebinding protection with loopback host and origin
+Built with the MCP SDK's `MCPServer` (FastMCP before mcp 2.x).
+`create_mcp_server()` registers tools (`register_tools`) and prompts
+(`register_prompts`) and attaches the client-facing `INSTRUCTIONS` blob — schema
+orientation for clients that have no other context about the data.
+`create_mcp_http_app(server, bind_host)` builds the streamable-HTTP sub-app;
+`bind_host` selects the transport's `TransportSecuritySettings`: a loopback bind
+gets the SDK's DNS-rebinding protection with loopback host and origin
 allowlists; a deliberate non-loopback bind turns it off, mirroring
 `api.main.host_allowlist_applies`. Runs over stdio (`introspy mcp`) or mounted at `/mcp` in the web app; the
 HTTP mount is built inside the lifespan and replaces a placeholder `FastAPI()`
@@ -168,7 +169,7 @@ so the MCP session manager runs concurrently with request handling.
 
 `mcp/refresh_bridge.py` is a module-level holder that lets stateless MCP tool
 functions reach the live `app.state` for `refresh_data`. It also carries the
-standalone stdio state. FastMCP's lifespan starts `run_stdio_refresh()` in
+standalone stdio state. The MCP server's lifespan starts `run_stdio_refresh()` in
 the background alongside protocol handling: a cold process publishes a bounded
 preview for a bounded target (all-history cold startup publishes `ready`
 directly), a compatible existing database is a warm snapshot, and the existing
