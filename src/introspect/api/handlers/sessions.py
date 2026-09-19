@@ -89,13 +89,13 @@ def _format_exec_time(seconds: float) -> str:
     return f"{mins}m {secs}s"
 
 
-def _cap(value: str | None, limit: int = _MESSAGE_HARD_CAP) -> str:
+def _cap(value: str | None) -> str:
     """Cap long strings with a visible truncation marker."""
     if not value:
         return ""
-    if len(value) <= limit:
+    if len(value) <= _MESSAGE_HARD_CAP:
         return value
-    return value[:limit] + "\n… [truncated]"
+    return value[:_MESSAGE_HARD_CAP] + "\n… [truncated]"
 
 
 def _pretty_tool_input(raw: str | None) -> str:
@@ -146,22 +146,24 @@ def _tool_hint(tool_name: str, raw_input: str | None) -> str:
     try:
         parsed = json.loads(raw_input)
     except (ValueError, TypeError):
-        return _single_line(raw_input, _TOOL_HINT_MAX)
+        return _single_line(raw_input)
     if not isinstance(parsed, dict):
-        return _single_line(str(parsed), _TOOL_HINT_MAX)
+        return _single_line(str(parsed))
     keys = _TOOL_HINT_KEYS.get(tool_name, ())
     for key in keys:
         if key in parsed and parsed[key] not in (None, ""):
-            return _single_line(str(parsed[key]), _TOOL_HINT_MAX)
+            return _single_line(str(parsed[key]))
     for value in parsed.values():
         if value not in (None, ""):
-            return _single_line(str(value), _TOOL_HINT_MAX)
+            return _single_line(str(value))
     return ""
 
 
-def _single_line(value: str, limit: int) -> str:
+def _single_line(value: str) -> str:
     collapsed = " ".join(value.split())
-    return collapsed if len(collapsed) <= limit else collapsed[: limit - 1] + "…"
+    if len(collapsed) <= _TOOL_HINT_MAX:
+        return collapsed
+    return collapsed[: _TOOL_HINT_MAX - 1] + "…"
 
 
 _TOKEN_COMPACT_K = 1_000
@@ -212,12 +214,7 @@ def _token_badge_strings(
     return " ".join(parts), title
 
 
-def _collapse_info(
-    text: object,
-    *,
-    lines: int = _BODY_COLLAPSE_LINES,
-    chars: int = _BODY_COLLAPSE_CHARS,
-) -> tuple[int, int, bool]:
+def _collapse_info(text: object) -> tuple[int, int, bool]:
     """Return ``(line_count, char_count, needs_collapse)`` for a text body.
 
     Accepts non-string input (e.g. dicts yielded by the ``tool_calls`` join
@@ -229,7 +226,7 @@ def _collapse_info(
     s = text if isinstance(text, str) else str(text)
     char_count = len(s)
     line_count = s.count("\n") + 1
-    needs = line_count > lines or char_count > chars
+    needs = line_count > _BODY_COLLAPSE_LINES or char_count > _BODY_COLLAPSE_CHARS
     return line_count, char_count, needs
 
 

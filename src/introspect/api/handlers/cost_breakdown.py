@@ -53,10 +53,6 @@ LABEL_TOP_N = 4
 LABEL_MIN_SHARE = 0.04
 
 
-def _normalise_breakdown(value: str) -> str:
-    return value if value in ALLOWED_BREAKDOWNS else DEFAULT_BREAKDOWN
-
-
 def _fetch_aggregated(
     db: duckdb.DuckDBPyConnection,
     *,
@@ -156,19 +152,18 @@ def _fold_into_other(
 
 def _cap_groups(
     bucketed: dict[str, dict[str, float]],
-    max_groups: int = MAX_GROUPS,
 ) -> dict[str, dict[str, float]]:
-    """Keep the top ``max_groups - 1`` groups; fold the rest into "Other".
+    """Keep the top ``MAX_GROUPS - 1`` groups; fold the rest into "Other".
 
-    A returned mapping has at most ``max_groups`` keys per bucket — the top
+    A returned mapping has at most ``MAX_GROUPS`` keys per bucket — the top
     real groups by total cost plus an ``"Other"`` aggregate when the tail
     needs collapsing.
     """
     totals = _group_totals(bucketed)
-    if len(totals) <= max_groups:
+    if len(totals) <= MAX_GROUPS:
         return bucketed
     keep = {
-        g for g, _ in sorted(totals.items(), key=lambda kv: -kv[1])[: max_groups - 1]
+        g for g, _ in sorted(totals.items(), key=lambda kv: -kv[1])[: MAX_GROUPS - 1]
     }
     return _fold_into_other(bucketed, keep)
 
@@ -338,7 +333,7 @@ def _build_panel_context(  # noqa: PLR0913
     Returns ``(base_context, bucketed)`` so callers can attach view-specific
     extras (``day_count``, ``day``) without re-aggregating.
     """
-    bd = _normalise_breakdown(breakdown)
+    bd = breakdown if breakdown in ALLOWED_BREAKDOWNS else DEFAULT_BREAKDOWN
     rows = _fetch_aggregated(
         db,
         bucket_expr=bucket_expr,
