@@ -1,6 +1,7 @@
 """Shared test fixtures and helpers."""
 
 import json
+import os
 from contextlib import contextmanager
 from datetime import datetime, timedelta
 from pathlib import Path
@@ -15,6 +16,19 @@ LOCK_ERROR_MESSAGE = (
     'IO Error: Could not set lock on file "/tmp/fake.duckdb": '
     "Conflicting lock is held in /tmp/other_proc."
 )
+
+
+@pytest.fixture(autouse=True)
+def _isolate_from_outer_git_env(monkeypatch):
+    """Drop inherited ``GIT_*`` variables so tests that shell out to git stay
+    in their tmp repos.
+
+    A pre-commit hook runs pytest with ``GIT_DIR`` / ``GIT_INDEX_FILE``
+    exported; a ``git init`` or ``git config`` in a test would otherwise act
+    on the outer repository.
+    """
+    for name in [n for n in os.environ if n.startswith("GIT_")]:
+        monkeypatch.delenv(name)
 
 
 @pytest.fixture
