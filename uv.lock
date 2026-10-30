@@ -632,7 +632,7 @@ wheels = [
 
 [[package]]
 name = "introspy"
-version = "0.3.5"
+version = "0.3.6"
 source = { editable = "." }
 dependencies = [
     { name = "duckdb" },
