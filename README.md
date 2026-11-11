@@ -3,6 +3,8 @@
 Explore and search your Claude Code (and Codex) conversation logs using SQL,
 full-text search, a web UI, or an MCP server.
 
+Part of **[aesop](https://mojzis.github.io/aesop/)**, a small menagerie of tools for agentic Python.
+
 Every session your coding agent runs is written to a JSONL file under
 `~/.claude/projects/`. Introspect reads those files into DuckDB and lets you ask
 what they cost, which tools failed, where a session went off the rails, and what
