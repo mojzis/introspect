@@ -47,16 +47,16 @@ dev = [
     "deptry",
     "poethepoet",
     "beautifulsoup4",
-    "ty-find>=0.4.0",
-    "biston>=0.5.0",
+    "ty-find>=0.5.4",
+    "biston>=0.7.6",
     "pytest-xdist>=3.8.0",
     "pytest-randomly>=4.1.0",
     # tests/test_docs_drift.py parses mkdocs.yml.
     "pyyaml>=6.0",
-    "gerenuk>=0.1.0",
-    "zorilla>=0.1.4",
-    "madoqua>=0.2.4",
-    "pycoati>=0.2.9",
+    "gerenuk>=0.5.6",
+    "zorilla>=0.2.5",
+    "madoqua>=0.2.11",
+    "pycoati>=0.2.13",
 ]
 docs = [
     "mkdocs>=1.6",
