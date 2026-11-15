@@ -69,7 +69,7 @@ async def search(
 
 
 @router.get("/tools", response_class=HTMLResponse)
-async def tools(
+async def tools(  # noqa: PLR0913
     request: Request,
     failed: bool = Query(False),
     name: str = Query("", alias="name"),

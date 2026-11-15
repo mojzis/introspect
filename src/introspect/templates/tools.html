@@ -76,10 +76,10 @@
     <table>
         <thead>
             <tr>
-                <th>Session</th>
-                <th>Tool</th>
                 <th>Project</th>
                 <th>Branch</th>
+                <th>Session</th>
+                <th>Tool</th>
                 <th>Day</th>
                 <th>Time</th>
                 <th>Status</th>
@@ -92,22 +92,22 @@
             {% set ts = (tc[1]|string) %}
             {% set et = (tc[5]|string) if tc[5] else '' %}
             <tr>
-                <td><a href="/sessions/{{ tc[0] }}" hx-get="/sessions/{{ tc[0] }}" hx-target="#content" hx-push-url="true"><span class="truncate" style="max-width:250px;" title="{{ (tc[6] or '')|e }}">{{ (tc[6] or (tc[0]|string)[:12] + '...')|truncate(50) }}</span></a></td>
-                <td>{{ tc[2] or '' }}</td>
                 <td>
                     {% if tc[7] %}
-                    <a href="/tools?{{ tool_qs(project=tc[7]) }}"
+                    <a class="link-muted" href="/tools?{{ tool_qs(project=tc[7]) }}"
                        hx-get="/tools?{{ tool_qs(project=tc[7]) }}"
                        hx-target="#content" hx-push-url="true">{{ tc[7] }}</a>
                     {% endif %}
                 </td>
                 <td>
                     {% if tc[8] %}
-                    <a href="/tools?{{ tool_qs(branch=tc[8]) }}"
+                    <a class="link-muted" href="/tools?{{ tool_qs(branch=tc[8]) }}"
                        hx-get="/tools?{{ tool_qs(branch=tc[8]) }}"
                        hx-target="#content" hx-push-url="true">{{ tc[8] }}</a>
                     {% endif %}
                 </td>
+                <td><a href="/sessions/{{ tc[0] }}" hx-get="/sessions/{{ tc[0] }}" hx-target="#content" hx-push-url="true"><span class="truncate" style="max-width:180px;" title="{{ (tc[6] or '')|e }}">{{ (tc[6] or (tc[0]|string)[:12] + '...')|truncate(40) }}</span></a></td>
+                <td>{{ tc[2] or '' }}</td>
                 <td style="white-space:nowrap;">{{ ts[5:10] }}</td>
                 <td style="white-space:nowrap;">{{ ts[11:16] }}</td>
                 <td>
@@ -117,9 +117,9 @@
                     <span class="badge badge-ok">OK</span>
                     {% endif %}
                 </td>
-                <td style="max-width:300px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;cursor:pointer;"
+                <td class="input-cell" style="max-width:300px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;cursor:pointer;"
                     onclick="showInput(this)"
-                    data-raw="{{ (tc[4] or '')|e }}">{{ (tc[4] or '')|replace('{', '')|replace('}', '')|replace('"', '')|replace(',', ', ') }}</td>
+                    data-raw="{{ (tc[4] or '')|e }}"></td>
                 <td style="white-space:nowrap;">{% if ':' in et %}{% set parts = et.split(':') %}{% set h = parts[0]|int %}{% set m = parts[1]|int %}{% set s = parts[2].split('.')[0]|int %}{% if h > 0 %}{{ h }}h{{ '%02d'|format(m) }}m{% elif m > 0 %}{{ m }}m{{ '%02d'|format(s) }}s{% else %}{{ s }}s{% endif %}{% endif %}</td>
             </tr>
             {% endfor %}
@@ -149,6 +149,23 @@
     </div>
 </div>
 <script>
+function formatInputCells() {
+    document.querySelectorAll('.input-cell').forEach(function(td) {
+        var raw = td.getAttribute('data-raw');
+        if (!raw) return;
+        try {
+            var obj = JSON.parse(raw);
+            td.innerHTML = Object.entries(obj).map(function(e) {
+                var v = typeof e[1] === 'string' ? e[1] : JSON.stringify(e[1]);
+                if (v.length > 60) v = v.substring(0, 60) + '\u2026';
+                return '<span style="color:#999">' + e[0] + '</span>: ' + v;
+            }).join('; &nbsp;');
+        } catch(_) {
+            td.textContent = raw;
+        }
+    });
+}
+formatInputCells();
 function showInput(td) {
     var raw = td.getAttribute('data-raw');
     var body = document.getElementById('input-modal-body');

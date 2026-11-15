@@ -17,6 +17,8 @@ from introspect.mcp.server import create_mcp_server
 from introspect.search import build_search_corpus
 
 
+_WATCH_FRESHNESS_SECONDS = 30
+
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     """Materialize views on startup, then start MCP session manager."""
@@ -30,7 +32,7 @@ async def lifespan(app: FastAPI):
     db_fresh = (
         watch
         and db_path.exists()
-        and (time.time() - db_path.stat().st_mtime) < 30
+        and (time.time() - db_path.stat().st_mtime) < _WATCH_FRESHNESS_SECONDS
     )
     if not db_fresh:
         conn = duckdb.connect(str(db_path))
@@ -55,14 +57,17 @@ async def lifespan(app: FastAPI):
             break
     # Rebuild middleware stack to pick up the new mount
     app.middleware_stack = app.build_middleware_stack()
+    app.state.startup_time = str(time.time())
+
+    if watch:
+        logging.getLogger("uvicorn.access").addFilter(_DevVersionFilter())
+
     async with mcp_server.session_manager.run():
         try:
             yield
         finally:
             app.state.read_conn.close()
 
-
-_STARTUP_TIME = str(time.time())
 
 app = FastAPI(title="Introspect", lifespan=lifespan)
 
@@ -115,9 +120,9 @@ async def favicon():
 
 
 @app.get("/_dev/version", include_in_schema=False)
-async def dev_version():
+async def dev_version(request: Request):
     """Return server startup timestamp for live-reload polling."""
-    return JSONResponse({"v": _STARTUP_TIME})
+    return JSONResponse({"v": getattr(request.app.state, "startup_time", "0")})
 
 
 class _DevVersionFilter(logging.Filter):
@@ -125,6 +130,3 @@ class _DevVersionFilter(logging.Filter):
 
     def filter(self, record: logging.LogRecord) -> bool:
         return "/_dev/version" not in getattr(record, "message", record.getMessage())
-
-
-logging.getLogger("uvicorn.access").addFilter(_DevVersionFilter())

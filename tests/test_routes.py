@@ -623,6 +623,26 @@ def test_tools_filter_by_session():
         assert SID[:12] in response.text
 
 
+def test_tools_filter_by_project():
+    """Tools page filters by project name."""
+    with tempfile.TemporaryDirectory() as tmp, _patched_client(Path(tmp)) as client:
+        # Project name is derived from the temp dir basename
+        response = client.get("/tools")
+        assert response.status_code == 200
+        assert "All projects" in response.text
+        assert "All branches" in response.text
+        # Verify filtering by a project returns 200
+        response = client.get("/tools?project=nonexistent")
+        assert response.status_code == 200
+
+
+def test_tools_filter_by_branch():
+    """Tools page filters by branch."""
+    with tempfile.TemporaryDirectory() as tmp, _patched_client(Path(tmp)) as client:
+        response = client.get("/tools?branch=main")
+        assert response.status_code == 200
+
+
 def test_sessions_tool_count_links_to_tools():
     """Sessions page tool count links to tools page filtered by session."""
     with tempfile.TemporaryDirectory() as tmp, _patched_client(Path(tmp)) as client:

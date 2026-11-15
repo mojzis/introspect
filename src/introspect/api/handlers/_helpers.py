@@ -14,7 +14,7 @@ log = logging.getLogger(__name__)
 
 TEMPLATE_DIR = Path(__file__).resolve().parent.parent.parent / "templates"
 templates = Jinja2Templates(directory=str(TEMPLATE_DIR))
-templates.env.globals["watch_mode"] = os.environ.get("INTROSPECT_WATCH") == "1"
+templates.env.globals["watch_mode"] = os.environ.get("INTROSPECT_WATCH") == "1"  # ty: ignore[invalid-assignment]
 
 SESSIONS_PER_PAGE_DEFAULT = 50
 SESSIONS_PAGE_SIZES = [25, 50, 100, 200]

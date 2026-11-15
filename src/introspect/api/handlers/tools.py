@@ -8,7 +8,7 @@ from fastapi.responses import HTMLResponse
 from ._helpers import DEFAULT_PAGE_SIZE, conn, parent, templates
 
 
-async def tools(
+async def tools(  # noqa: PLR0913
     request: Request,
     failed: bool,
     name: str,
@@ -74,7 +74,7 @@ async def tools(
             ls.git_branch
         FROM tool_calls tc
         LEFT JOIN session_titles fp USING (session_id)
-        LEFT JOIN logical_sessions ls ON tc.session_id = ls.session_id
+        {join}
         {where}
         ORDER BY tc.called_at DESC
         LIMIT ? OFFSET ?
@@ -102,7 +102,7 @@ async def tools(
             100.0 * COUNT(*) FILTER (WHERE tc.is_error IS DISTINCT FROM 'true')
                 / COUNT(*) AS success_rate
         FROM tool_calls tc
-        LEFT JOIN logical_sessions ls ON tc.session_id = ls.session_id
+        {join}
         WHERE {" AND ".join(tn_where)}
         GROUP BY tc.tool_name
         ORDER BY cnt DESC
