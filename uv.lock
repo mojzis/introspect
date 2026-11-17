@@ -86,13 +86,13 @@ wheels = [
 
 [[package]]
 name = "biston"
-version = "0.7.6"
+version = "0.7.7"
 source = { registry = "https://pypi.org/simple" }
-sdist = { url = "https://files.pythonhosted.org/packages/d0/fa/5fa8b8ba150be927e27f4d7122cbbc87af0edaaa41579740921453d2bb4b/biston-0.7.6.tar.gz", hash = "sha256:c12458b27423a467f2cdab5e4e9944dfb4991cb8c74e8809d7dba3e7e6e1c16f", size = 978538, upload-time = "2026-11-14T17:06:39.415Z" }
+sdist = { url = "https://files.pythonhosted.org/packages/81/9e/843687b074c9e49cb7d1a566440e51982cb00f487766c6dcb41e962aef1a/biston-0.7.7.tar.gz", hash = "sha256:3b7e06b3e13577b8aaa82b86b6c279a9242e15b91a24c872e361a9167150e544", size = 978546, upload-time = "2026-11-17T08:28:12.457Z" }
 wheels = [
-    { url = "https://files.pythonhosted.org/packages/6b/5b/063a9b3b75d0859d6a9eeffbedc48c6845f51be1118bd0524e768ca72bf3/biston-0.7.6-py3-none-macosx_11_0_arm64.whl", hash = "sha256:27531816e5a049747b9219a99e9ff9b5473f53c78d57413f77a4b3574fd1af96", size = 1515463, upload-time = "2026-11-14T17:06:34.07Z" },
-    { url = "https://files.pythonhosted.org/packages/f4/f1/8ab4da1690772f3f93245979b9c48f938f2f8f3a6a7c059783949844b137/biston-0.7.6-py3-none-manylinux_2_28_x86_64.whl", hash = "sha256:19b10873b769ab458977625a0b7d5e2ca966122a2fe6e1ffb2eaafbcb6ca2dff", size = 1752429, upload-time = "2026-11-14T17:06:36.117Z" },
-    { url = "https://files.pythonhosted.org/packages/7c/a6/0845fa703dc8a52dcc0dd4c41e4870069c0e8d0818764462773dbc72aaa2/biston-0.7.6-py3-none-win_amd64.whl", hash = "sha256:c38556d2f1bce7c6d42cc7b468c248be3c0774c3c1d62b6830441a7395957a73", size = 1605314, upload-time = "2026-11-14T17:06:37.799Z" },
+    { url = "https://files.pythonhosted.org/packages/3d/75/b65382c760cc0b37c012f9c30fd9c4f45e60f41b68c842a5122111d44738/biston-0.7.7-py3-none-macosx_11_0_arm64.whl", hash = "sha256:25c7f75ffa4651e4a7ff7c3ec34aa016f58fadd481192dc6a2e81ff1e56bd1ff", size = 1515445, upload-time = "2026-11-17T08:28:07.037Z" },
+    { url = "https://files.pythonhosted.org/packages/39/54/801e4914ec0390398753b5a8f34f0f5843663b022bbbb176e5e0dcad2bc5/biston-0.7.7-py3-none-manylinux_2_28_x86_64.whl", hash = "sha256:1c7f5be7e7f7b91c90d04a8c010db1257419865ff240393ec704fc360c0b6a49", size = 1752689, upload-time = "2026-11-17T08:28:09.022Z" },
+    { url = "https://files.pythonhosted.org/packages/dc/f3/5c89aa191ae8c8fba34d1bbd761936e4091695dce262f01056db5906128d/biston-0.7.7-py3-none-win_amd64.whl", hash = "sha256:c291c5a91746efc86b191bb767be23c3c8e2b18d962ac61e8503547f681be9e4", size = 1605250, upload-time = "2026-11-17T08:28:10.995Z" },
 ]
 
 [[package]]
@@ -540,16 +540,16 @@ wheels = [
 
 [[package]]
 name = "gerenuk"
-version = "0.5.6"
+version = "0.5.7"
 source = { registry = "https://pypi.org/simple" }
 dependencies = [
     { name = "ty-find" },
 ]
-sdist = { url = "https://files.pythonhosted.org/packages/42/bd/5f72fac41f5236ab5f26eacc194fafb473445589d9b0e4fa44bbb905d60d/gerenuk-0.5.6.tar.gz", hash = "sha256:64fb9cdc40e74aadf3f58e5a32357684eb802419775112f32b30525f4e9d515d", size = 1122264, upload-time = "2026-11-14T16:57:03.044Z" }
+sdist = { url = "https://files.pythonhosted.org/packages/fb/92/1770beb29541f6632a72f588fcc9e553d27f0b415db9f5236d15cc99e3cd/gerenuk-0.5.7.tar.gz", hash = "sha256:cc0b0f88e4491847932d9f8c0ae7ab076d0f1d192104907313ecd94b8827f170", size = 1133680, upload-time = "2026-11-17T08:29:13.25Z" }
 wheels = [
-    { url = "https://files.pythonhosted.org/packages/f3/f4/5cb82f5b005ef6085749bc4148f1b62263b5bc350fb45b2c2a9661e1b0a8/gerenuk-0.5.6-py3-none-macosx_11_0_arm64.whl", hash = "sha256:4b9a967b2250313443faac1062681ddc88b198210ebf3e1365043ee222312129", size = 1200838, upload-time = "2026-11-14T16:56:57.255Z" },
-    { url = "https://files.pythonhosted.org/packages/cd/67/01c7c17231192d2730b1054b141d30166a9ad2abf0a66185b5140862abde/gerenuk-0.5.6-py3-none-manylinux_2_28_x86_64.whl", hash = "sha256:2aa73fd64f440f983b6f0d969899054a4631a68bcadc69ad0101d421a817413c", size = 1375670, upload-time = "2026-11-14T16:56:59.223Z" },
-    { url = "https://files.pythonhosted.org/packages/bc/f4/3392340cdffb1e0223fb820a2b379e4c898990ae9a7f30cef354bbf4df50/gerenuk-0.5.6-py3-none-win_amd64.whl", hash = "sha256:a47c9de16817765ea023ca1397418cb83166373f355c06712fbd27de3d3797e2", size = 1282768, upload-time = "2026-11-14T16:57:01.526Z" },
+    { url = "https://files.pythonhosted.org/packages/89/ac/82fd298f288d27d0abf9249b4a65acf1b42f6e97816edd9ac60fba75035d/gerenuk-0.5.7-py3-none-macosx_11_0_arm64.whl", hash = "sha256:4c134450b64713abb8982bcbc8fbb5b431751925f437646c7499dd0e93639343", size = 1204377, upload-time = "2026-11-17T08:29:08.12Z" },
+    { url = "https://files.pythonhosted.org/packages/37/26/59394d60e5dcb595833cc086caaa156385ca89f6b95a8a6cc30cb4d238f7/gerenuk-0.5.7-py3-none-manylinux_2_28_x86_64.whl", hash = "sha256:28d2842deded4bad6b56e9857463b70a722e2fd34c4cbca73a88ba8af975b462", size = 1378894, upload-time = "2026-11-17T08:29:10.275Z" },
+    { url = "https://files.pythonhosted.org/packages/23/49/457e352a4ac626d56e0aba8e5255738bf5e82966e54ac33279406deb34f0/gerenuk-0.5.7-py3-none-win_amd64.whl", hash = "sha256:183afbfb8e9464b8b7cd02f210f041f836ff6ab54b57b55e2352ad969862833f", size = 1283678, upload-time = "2026-11-17T08:29:11.89Z" },
 ]
 
 [[package]]
@@ -697,11 +697,11 @@ requires-dist = [
 [package.metadata.requires-dev]
 dev = [
     { name = "beautifulsoup4" },
-    { name = "biston", specifier = ">=0.7.6" },
+    { name = "biston", specifier = ">=0.7.7" },
     { name = "deptry" },
-    { name = "gerenuk", specifier = ">=0.5.6" },
+    { name = "gerenuk", specifier = ">=0.5.7" },
     { name = "httpx2" },
-    { name = "madoqua", specifier = ">=0.2.11" },
+    { name = "madoqua", specifier = ">=0.2.12" },
     { name = "poethepoet" },
     { name = "pycoati", specifier = ">=0.2.15" },
     { name = "pytest" },
@@ -711,9 +711,9 @@ dev = [
     { name = "pyyaml", specifier = ">=6.0" },
     { name = "ruff" },
     { name = "ty" },
-    { name = "ty-find", specifier = ">=0.5.4" },
+    { name = "ty-find", specifier = ">=0.5.5" },
     { name = "vulture" },
-    { name = "zorilla", specifier = ">=0.2.5" },
+    { name = "zorilla", specifier = ">=0.2.6" },
 ]
 docs = [
     { name = "mkdocs", specifier = ">=1.6" },
@@ -762,13 +762,13 @@ wheels = [
 
 [[package]]
 name = "madoqua"
-version = "0.2.11"
+version = "0.2.12"
 source = { registry = "https://pypi.org/simple" }
-sdist = { url = "https://files.pythonhosted.org/packages/88/0a/41a8f0a77775603526b3c434d05915ba7ad6f56250ca8c4e5566d14c6f98/madoqua-0.2.11.tar.gz", hash = "sha256:ba9afa66257f760936b7bc88e86733e5a973809d60a707637e035249b9fbaee9", size = 920862, upload-time = "2026-11-14T16:59:19.498Z" }
+sdist = { url = "https://files.pythonhosted.org/packages/0c/bf/3797316906d104df2ad4b601bff2d85175c7bdb33e822b58fbe5504638e7/madoqua-0.2.12.tar.gz", hash = "sha256:0267f513567a97c77200cd7c905bfef1fb3f959c00d64314b702d9f97bcba483", size = 920885, upload-time = "2026-11-17T08:24:00.967Z" }
 wheels = [
-    { url = "https://files.pythonhosted.org/packages/a2/e7/e62177acec6e11c6f7f1620401b16b10acfe31786a71d992615c3c3abe8b/madoqua-0.2.11-py3-none-macosx_11_0_arm64.whl", hash = "sha256:0085be805d608193db33da4af31e6c186765c9f574e0a466aa73c2d24e012b88", size = 776217, upload-time = "2026-11-14T16:59:14.843Z" },
-    { url = "https://files.pythonhosted.org/packages/f3/35/b523e11018ccc194cfffbece138eb786d418a42109345d196d0dceeeee94/madoqua-0.2.11-py3-none-manylinux_2_28_x86_64.whl", hash = "sha256:637cc4074f9da1257180d6d74b2b5ae7850b284003646c516d76c192859c024b", size = 894379, upload-time = "2026-11-14T16:59:16.553Z" },
-    { url = "https://files.pythonhosted.org/packages/64/d3/4d9424d37be3e540af4bae2107079d9621e4f61ec43e32173db79d092498/madoqua-0.2.11-py3-none-win_amd64.whl", hash = "sha256:d9ede13ff4716242379d5cc66cfe3c54575899c1b97669968b34722d58f0e64a", size = 802438, upload-time = "2026-11-14T16:59:18.017Z" },
+    { url = "https://files.pythonhosted.org/packages/0a/68/7584980cbe8d52ff0036520904277bac71d01916d9f560f78200f17d05ae/madoqua-0.2.12-py3-none-macosx_11_0_arm64.whl", hash = "sha256:7255c909452720a27967282bd2fcab1c1bcc7de0ccfb95f61c1a9f1a9f178192", size = 775860, upload-time = "2026-11-17T08:23:56.571Z" },
+    { url = "https://files.pythonhosted.org/packages/8f/2f/a7ff7045dcf03389f7d14ac8ab445660f931ed1f3da1e8b86842d7bdd300/madoqua-0.2.12-py3-none-manylinux_2_28_x86_64.whl", hash = "sha256:bb8b73b91f41a4d3329d69fd2b4dfac39d721a383f193f811c2b9c79ae6cfd10", size = 894208, upload-time = "2026-11-17T08:23:57.983Z" },
+    { url = "https://files.pythonhosted.org/packages/80/56/3d1d73d1d6b4012dbc827b23b23710c383ff635808b9c290546f9c99c3c1/madoqua-0.2.12-py3-none-win_amd64.whl", hash = "sha256:f24c24bbec4a8eaffcd6d9ce54817005a95124eccca5cf3bab354d7c2ed67bcc", size = 802477, upload-time = "2026-11-17T08:23:59.285Z" },
 ]
 
 [[package]]
@@ -1854,13 +1854,13 @@ wheels = [
 
 [[package]]
 name = "ty-find"
-version = "0.5.4"
+version = "0.5.5"
 source = { registry = "https://pypi.org/simple" }
-sdist = { url = "https://files.pythonhosted.org/packages/29/5e/0468fd705b1ed38b4626c238f8bf1b0d34ecf5a8f86df38797cfec1bff48/ty_find-0.5.4.tar.gz", hash = "sha256:3214c86889bac289e07de85904b9eca3d857dfcbdc8249e1ac0fb1de67c234ef", size = 1072302, upload-time = "2026-11-14T17:07:41.898Z" }
+sdist = { url = "https://files.pythonhosted.org/packages/7c/49/c2e9d989648f3b63712b159292d10745a9da21c9636bebe032d182027228/ty_find-0.5.5.tar.gz", hash = "sha256:c211be301c1defca3b03ca46cbfb96552ff1c0b7cb3e26cd58b17761e8a008e7", size = 1072295, upload-time = "2026-11-17T08:28:40.718Z" }
 wheels = [
-    { url = "https://files.pythonhosted.org/packages/52/a2/dc076feb135be4f2119418e70ce5f5b5f58836ba282101fe3345d306406f/ty_find-0.5.4-py3-none-macosx_11_0_arm64.whl", hash = "sha256:ae6e3f481c25b018c7eddbc9a41e814198a363a21d9a8650ded20606fd150aa5", size = 1775283, upload-time = "2026-11-14T17:07:36.689Z" },
-    { url = "https://files.pythonhosted.org/packages/af/ab/e6b7948a68b9652f0be33a5c3748b3a64abc136f57bd2528618dede55f95/ty_find-0.5.4-py3-none-manylinux_2_28_x86_64.whl", hash = "sha256:a3b33cc0ad9a6f0795907ddcf964fcdc5d32437385ed6bc1e3124c08ba2f6301", size = 2037530, upload-time = "2026-11-14T17:07:38.709Z" },
-    { url = "https://files.pythonhosted.org/packages/41/d2/17026600f081ce8c324fe23054f15c1707075152d18fae9f892ee7cc8e8b/ty_find-0.5.4-py3-none-win_amd64.whl", hash = "sha256:cf8be8ab22fa60277b4eea397a52110a8afe8d18fd378e645bc23e0d77f546aa", size = 947552, upload-time = "2026-11-14T17:07:40.244Z" },
+    { url = "https://files.pythonhosted.org/packages/1d/c5/6a36d4957ab52f9f2df569f9637fd86de2163c37668c359087312210bba1/ty_find-0.5.5-py3-none-macosx_11_0_arm64.whl", hash = "sha256:eb32ca9cd638df395a28fe2a457ce1aa8431bd87a152b05993695f067e8309be", size = 1775525, upload-time = "2026-11-17T08:28:35.846Z" },
+    { url = "https://files.pythonhosted.org/packages/af/0d/7368c72209df9c5b521697e54bba053587df7dfe2ea72276721c77aa03df/ty_find-0.5.5-py3-none-manylinux_2_28_x86_64.whl", hash = "sha256:44425ce8f0e75dabaa1bbbb2f4a76cfa2fd7054338529f5729b62fca035f21af", size = 2041228, upload-time = "2026-11-17T08:28:37.679Z" },
+    { url = "https://files.pythonhosted.org/packages/5f/1d/a811a07ecf4a03b3de1128e811773d96cde11f5d7fb329ece0e3ab111ac0/ty_find-0.5.5-py3-none-win_amd64.whl", hash = "sha256:77d41c9ca5c81a2a54937ec36949783f11540c4e570fc2ed045e619a0a0270b0", size = 947220, upload-time = "2026-11-17T08:28:39.137Z" },
 ]
 
 [[package]]
@@ -1980,11 +1980,11 @@ wheels = [
 
 [[package]]
 name = "zorilla"
-version = "0.2.5"
+version = "0.2.6"
 source = { registry = "https://pypi.org/simple" }
-sdist = { url = "https://files.pythonhosted.org/packages/31/80/e40651ffaafe75b2aaf015cb384fafe7fd4642a79bf30bbf161eda518356/zorilla-0.2.5.tar.gz", hash = "sha256:1973bc57f87e3a979c37b343d24cae79586c7f05ab30163e2ac9eee513ed8e13", size = 164118, upload-time = "2026-11-14T17:06:07.449Z" }
+sdist = { url = "https://files.pythonhosted.org/packages/1c/6c/32117af3003da162daa15515651eccbe6904aa07ad14a7aa393ffebbfa8d/zorilla-0.2.6.tar.gz", hash = "sha256:ff0c6f6b84ccc1bf34868d740eeb8f6df6efc6df732fd894b69a86b8c4f84807", size = 164122, upload-time = "2026-11-17T08:28:53.643Z" }
 wheels = [
-    { url = "https://files.pythonhosted.org/packages/0d/5f/52169e3415438cc5101cc3e0c268679ef53fd91251d5413e7fd5f37a16f4/zorilla-0.2.5-py3-none-macosx_11_0_arm64.whl", hash = "sha256:0be07c5abf8f5cfe9d2b0b145e1212bc9f595ac20d80de32fa47b0f7956817af", size = 1211215, upload-time = "2026-11-14T17:06:02.204Z" },
-    { url = "https://files.pythonhosted.org/packages/d9/0b/e798b91a7f352625f087ad0fce1682c1956cf4b2e36192bdb3b674c35ba9/zorilla-0.2.5-py3-none-manylinux_2_28_x86_64.whl", hash = "sha256:a6ee5fcc559ea2997c8215c7f3da1d21f7b1d215ba330b3326c87aa91b3d59c3", size = 1410642, upload-time = "2026-11-14T17:06:04.768Z" },
-    { url = "https://files.pythonhosted.org/packages/6d/a4/ffe13cb124fac9b3a6c38237576e57dd6cf70dab120e8e080e8a4208a4d7/zorilla-0.2.5-py3-none-win_amd64.whl", hash = "sha256:b209b24b00bc8b3b3d12a16a19f0c9ddd2394e0d0c164fd4ec1547b5155f8c4a", size = 1281199, upload-time = "2026-11-14T17:06:06.099Z" },
+    { url = "https://files.pythonhosted.org/packages/f6/b4/25c7c93e413c1088220764cbaa614937d9dccc66f94f18eceaa26d6f15bd/zorilla-0.2.6-py3-none-macosx_11_0_arm64.whl", hash = "sha256:e21deb26d4b6186384a1e8de64b392d97935219d7e1eb97915aa9a4244dc71c5", size = 1211371, upload-time = "2026-11-17T08:28:49.114Z" },
+    { url = "https://files.pythonhosted.org/packages/22/aa/56d49c4c15bed53a7b4ecac1e8d758cfc3314d3add2ed37f6d3f80bd8207/zorilla-0.2.6-py3-none-manylinux_2_28_x86_64.whl", hash = "sha256:25be65a3248faa60db7e0d4c6c6e7a3d7d38d33bf4cc0f086198fe39f52f8962", size = 1410716, upload-time = "2026-11-17T08:28:50.633Z" },
+    { url = "https://files.pythonhosted.org/packages/26/1c/5b3e4ab598c30b4964e1c1322e06453734b33b80d855cae90db055fcd4e3/zorilla-0.2.6-py3-none-win_amd64.whl", hash = "sha256:6448fdbecbc54a156356091c3c2d3850eced2b4f34efc6dce836a593a8e9f5df", size = 1281261, upload-time = "2026-11-17T08:28:52.01Z" },
 ]
