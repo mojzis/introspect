@@ -34,3 +34,28 @@ jobs:
           name: dist
           path: dist/
       - uses: pypa/gh-action-pypi-publish@release/v1
+
+  github-release:
+    name: Create GitHub Release
+    needs: publish
+    runs-on: ubuntu-latest
+    if: startsWith(github.ref, 'refs/tags/')
+    permissions:
+      contents: write
+    steps:
+      # Full history: relnotes finds each note's release from the tags.
+      - uses: actions/checkout@v7
+        with:
+          fetch-depth: 0
+      - uses: astral-sh/setup-uv@v10.4.0
+      # One file per user-visible change in release-notes/ (see `uvx relnotes@latest guide`).
+      - run: uvx relnotes@latest body "$GITHUB_REF_NAME" > release-body.md
+      - uses: actions/download-artifact@v8
+        with:
+          name: dist
+          path: dist/
+      - uses: softprops/action-gh-release@v3
+        with:
+          files: dist/*
+          body_path: release-body.md
+          generate_release_notes: true

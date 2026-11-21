@@ -174,3 +174,12 @@ uv, ruff (lint/format), ty (type check), madoqua (commit hook), tyf (code search
 - All user-facing features must have tests. When adding new routes, template variables, query parameters, or UI functionality, add corresponding tests in `tests/routes/`.
 - **IMPORTANT**: After completing any task, you MUST run the `/python-review` skill to review all changes. Apply all 🔴 Must Fix and 🟡 Should Fix findings before marking work as complete.
 - **IMPORTANT**: Then run the `/docs-review` skill to check the diff against `docs/`, `README.md`, and `CLAUDE.md`. Apply all 🔴 Must Fix findings before marking work as complete.
+
+## Release notes
+
+A change a user would notice adds one file to `release-notes/` in the same PR
+(`YYYY-MM-DD-short-slug.md`, frontmatter `kind: added|changed|fixed|removed`, one or two
+plain sentences). Run `uvx relnotes@latest guide` before writing one: it has the wording rules.
+Dependency bumps, CI, refactors and tests get no note. `uvx relnotes@latest check` validates them.
+The release workflow turns them into the GitHub release, the docs build into
+`docs/release-notes.md` (generated, gitignored), and the aesop site shows them.
