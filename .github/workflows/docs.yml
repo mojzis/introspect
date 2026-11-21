@@ -33,7 +33,7 @@ jobs:
           fetch-depth: 0  # relnotes reads the tags
       - uses: astral-sh/setup-uv@v7
       - run: uv sync --frozen --group docs
-      - run: uvx relnotes@latest page --out docs/release-notes.md
+      - run: uvx --from git+https://github.com/mojzis/relnotes relnotes page --out docs/release-notes.md
       - run: uv run mkdocs build --strict
       - uses: actions/upload-pages-artifact@v5
         with:

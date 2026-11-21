@@ -48,8 +48,8 @@ jobs:
         with:
           fetch-depth: 0
       - uses: astral-sh/setup-uv@v10.4.0
-      # One file per user-visible change in release-notes/ (see `uvx relnotes@latest guide`).
-      - run: uvx relnotes@latest body "$GITHUB_REF_NAME" > release-body.md
+      # One file per user-visible change in release-notes/ (see `uvx --from git+https://github.com/mojzis/relnotes relnotes guide`).
+      - run: uvx --from git+https://github.com/mojzis/relnotes relnotes body "$GITHUB_REF_NAME" > release-body.md
       - uses: actions/download-artifact@v8
         with:
           name: dist
