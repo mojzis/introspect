@@ -67,6 +67,7 @@ nav:
   - Development:
       - Development guide: development.md
       - Pycoati 0.2.9 audit: audits/pycoati-0.2.9.md
+  - Release notes: release-notes.md
   - For LLMs: llms.md
 
 markdown_extensions:
@@ -118,6 +119,8 @@ plugins:
         Development:
           - development.md
           - audits/pycoati-0.2.9.md
+        Release notes:
+          - release-notes.md
         For LLMs:
           - llms.md
 
